@@ -115,13 +115,32 @@ async def _process_audio(
         )
         result = await summarizer.summarize_audio(audio_path)
 
-    else:
-        # ── Whisper path: local transcription → Gemini ────────────────────────
+    elif mode == ProcessingMode.WHISPER_API:
+        # ── OpenAI API path: preprocess + API transcription → Gemini ──────────
         await state.update_task(
             task_id,
             TaskStatus.TRANSCRIBING,
             50,
-            "🎙️ מתמלל עם Whisper (עשוי לקחת מספר דקות)...",
+            "☁️ מסיר שקט ושולח ל-OpenAI Whisper API...",
+        )
+        transcript, _ = await transcriber.transcribe_via_api(audio_path, language)
+
+        await state.update_task(
+            task_id,
+            TaskStatus.SUMMARIZING,
+            80,
+            "🤖 יוצר סיכום ומבחן עם Gemini AI...",
+        )
+        result = await summarizer.summarize_transcript(transcript)
+        result.transcript = transcript
+
+    else:
+        # ── Local Whisper path: local transcription → Gemini ──────────────────
+        await state.update_task(
+            task_id,
+            TaskStatus.TRANSCRIBING,
+            50,
+            "🎙️ מתמלל עם Whisper מקומי (עשוי לקחת מספר דקות)...",
         )
         transcript, detected_lang = await transcriber.transcribe(audio_path, language)
 
@@ -132,7 +151,6 @@ async def _process_audio(
             "🤖 יוצר סיכום ומבחן עם Gemini AI...",
         )
         result = await summarizer.summarize_transcript(transcript)
-        # Attach the raw transcript to the result so the user can download it
         result.transcript = transcript
 
     return result

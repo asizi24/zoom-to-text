@@ -111,6 +111,14 @@
     .btn:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(79,70,229,.45); }
     .btn:disabled { background: #9CA3AF; cursor: not-allowed; transform: none; box-shadow: none; }
 
+    /* ── Keyboard hint ── */
+    .kbd-hint { color: var(--muted); font-size: .8rem; margin-top: 10px; }
+    kbd {
+      display: inline-block; padding: 2px 7px; background: #F3F4F6;
+      border: 1px solid #D1D5DB; border-radius: 5px; font-family: inherit;
+      font-size: .78rem; color: var(--text);
+    }
+
     /* ── Progress ── */
     #progress-card { display: none; }
     .status-label { font-size: 1.05rem; color: var(--text); margin-bottom: 16px; font-weight: 500; }
@@ -121,6 +129,7 @@
       transition: width .6s ease;
     }
     .progress-pct { text-align: left; font-size: .85rem; color: var(--muted); margin-top: 6px; }
+    .progress-eta { font-size: .82rem; color: var(--muted); margin-top: 4px; }
     .spinner {
       display: inline-block; width: 20px; height: 20px;
       border: 3px solid #E5E7EB; border-top-color: var(--primary);
@@ -142,9 +151,21 @@
       border-right: 4px solid var(--secondary);
       padding-right: 14px; margin-bottom: 18px;
     }
+
+    /* ── Copyable block ── */
+    .copyable-wrap { position: relative; }
+    .copy-btn {
+      position: absolute; top: 0; left: 0;
+      padding: 5px 12px; background: white; border: 1.5px solid #E5E7EB;
+      border-radius: 8px; font-size: .78rem; cursor: pointer; color: var(--muted);
+      transition: all .2s; display: flex; align-items: center; gap: 4px;
+    }
+    .copy-btn:hover { border-color: var(--primary); color: var(--primary); }
+    .copy-btn.copied { border-color: var(--success); color: var(--success); }
+
     .summary-text {
       line-height: 1.9; color: var(--text); font-size: 1rem;
-      white-space: pre-wrap;
+      white-space: pre-wrap; padding-top: 6px;
     }
     .chapters-list { display: flex; flex-direction: column; gap: 16px; }
     .chapter {
@@ -198,6 +219,21 @@
       overflow-y: auto; color: var(--muted); direction: rtl;
     }
 
+    /* ── Results action bar ── */
+    .results-actions {
+      display: flex; gap: 10px; flex-wrap: wrap;
+      margin-bottom: 28px; padding-bottom: 24px;
+      border-bottom: 1px solid #F3F4F6;
+    }
+    .action-btn {
+      padding: 9px 20px; border: 1.5px solid #E5E7EB; background: white;
+      border-radius: 50px; font-size: .88rem; font-weight: 500;
+      cursor: pointer; color: var(--text); transition: all .2s;
+      display: flex; align-items: center; gap: 6px;
+    }
+    .action-btn:hover { border-color: var(--primary); color: var(--primary); background: #EEF2FF; }
+    .action-btn.success-flash { border-color: var(--success); color: var(--success); }
+
     /* ── Reset ── */
     .reset-btn {
       padding: 11px 28px; background: #6B7280; color: white;
@@ -213,6 +249,51 @@
       color: white; border-radius: 50px; font-weight: 700; font-size: .95rem;
       margin-bottom: 18px;
     }
+
+    /* ── History panel ── */
+    #history-card { display: none; }
+    .history-header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 16px;
+    }
+    .history-header h2 { font-size: 1.1rem; font-weight: 600; }
+    .history-close {
+      background: none; border: none; cursor: pointer;
+      color: var(--muted); font-size: 1.2rem; padding: 4px 8px;
+    }
+    .history-empty { color: var(--muted); font-size: .9rem; text-align: center; padding: 20px; }
+    .history-list { display: flex; flex-direction: column; gap: 8px; }
+    .history-item {
+      display: flex; align-items: center; gap: 12px;
+      padding: 12px 16px; border: 1.5px solid #E5E7EB;
+      border-radius: 12px; cursor: pointer; transition: all .2s;
+      background: white;
+    }
+    .history-item:hover { border-color: var(--primary); background: #EEF2FF; }
+    .history-item.failed { opacity: .55; cursor: default; }
+    .history-item.failed:hover { border-color: #E5E7EB; background: white; }
+    .h-status { font-size: 1.1rem; flex-shrink: 0; }
+    .h-info { flex: 1; min-width: 0; }
+    .h-url { font-size: .85rem; font-weight: 500; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; direction: ltr; text-align: right; }
+    .h-meta { font-size: .75rem; color: var(--muted); margin-top: 2px; }
+    .h-badge {
+      font-size: .72rem; padding: 3px 10px; border-radius: 20px; font-weight: 600;
+      flex-shrink: 0;
+    }
+    .h-badge.completed { background: #D1FAE5; color: #065F46; }
+    .h-badge.failed    { background: #FEE2E2; color: #991B1B; }
+    .h-badge.running   { background: #EEF2FF; color: var(--primary); }
+
+    /* ── History toggle button ── */
+    .history-toggle-btn {
+      position: fixed; bottom: 24px; left: 24px;
+      padding: 12px 20px; background: white;
+      border: 1.5px solid #E5E7EB; border-radius: 50px;
+      cursor: pointer; font-size: .88rem; font-weight: 500;
+      color: var(--text); box-shadow: 0 4px 12px rgba(0,0,0,.1);
+      transition: all .2s; display: flex; align-items: center; gap: 6px;
+    }
+    .history-toggle-btn:hover { border-color: var(--primary); color: var(--primary); }
 
     /* ── Animations ── */
     @keyframes fadeIn  { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } }
@@ -264,12 +345,18 @@
     </div>
     <div class="mode-opt" data-mode="whisper_local" onclick="selectMode(this)">
       <div class="mode-icon">🔒</div>
-      <div class="mode-name">Whisper Local</div>
+      <div class="mode-name">Whisper מקומי</div>
       <div class="mode-desc">פרטי · 15-20 דקות<br>תמלול מקומי + AI</div>
+    </div>
+    <div class="mode-opt" data-mode="whisper_api" onclick="selectMode(this)">
+      <div class="mode-icon">☁️</div>
+      <div class="mode-name">OpenAI Whisper</div>
+      <div class="mode-desc">מהיר · דורש מפתח API<br>חיתוך שקט אוטומטי</div>
     </div>
   </div>
 
   <button class="btn" id="submit-btn" onclick="submit()">עבד שיעור ✨</button>
+  <div class="kbd-hint">לחץ <kbd>Enter</kbd> לשליחה</div>
   <div class="error-box" id="error-box"></div>
 </div>
 
@@ -282,18 +369,32 @@
     <div class="progress-bar-fill" id="progress-fill"></div>
   </div>
   <div class="progress-pct" id="progress-pct">0%</div>
+  <div class="progress-eta" id="progress-eta"></div>
 </div>
 
 <!-- ═══════════════ RESULTS CARD ═══════════════ -->
 <div class="card" id="results-card">
 
+  <!-- Action bar -->
+  <div class="results-actions">
+    <button class="action-btn" onclick="exportMarkdown()">⬇️ ייצוא Markdown</button>
+    <button class="action-btn" id="copy-all-btn" onclick="copyAll()">📋 העתק הכל</button>
+    <button class="action-btn" onclick="window.print()">🖨️ הדפסה</button>
+  </div>
+
   <!-- Summary -->
   <div class="section-title">📝 סיכום השיעור</div>
-  <div class="summary-text" id="summary-text"></div>
+  <div class="copyable-wrap">
+    <button class="copy-btn" onclick="copySection('summary-text', this)">📋 העתק</button>
+    <div class="summary-text" id="summary-text"></div>
+  </div>
 
   <!-- Chapters -->
   <div id="chapters-section" style="margin-top:32px;">
-    <div class="section-title">📚 פרקים ונושאים</div>
+    <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;">
+      <span>📚 פרקים ונושאים</span>
+      <button class="copy-btn" style="position:static;" onclick="copySection('chapters-list', this)">📋 העתק</button>
+    </div>
     <div class="chapters-list" id="chapters-list"></div>
   </div>
 
@@ -313,6 +414,20 @@
   <button class="reset-btn" onclick="reset()">↩️ עיבוד שיעור נוסף</button>
 </div>
 
+<!-- ═══════════════ HISTORY CARD ═══════════════ -->
+<div class="card" id="history-card">
+  <div class="history-header">
+    <h2>🕘 היסטוריה</h2>
+    <button class="history-close" onclick="toggleHistory()">✕</button>
+  </div>
+  <div id="history-content"></div>
+</div>
+
+<!-- ═══════════════ HISTORY TOGGLE BUTTON ═══════════════ -->
+<button class="history-toggle-btn" onclick="toggleHistory()" id="history-toggle-btn">
+  🕘 היסטוריה
+</button>
+
 <script>
   // ══════════════════════════════════════════════════════════════════════════
   // State
@@ -322,6 +437,27 @@
   let selectedFile  = null;
   let pollTimer     = null;
   let quizScore     = { correct: 0, total: 0 };
+  let currentResult = null;
+  let currentSource = '';
+  let historyVisible = false;
+  let processingStartTime = null;
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // Keyboard shortcut — Enter to submit
+  // ══════════════════════════════════════════════════════════════════════════
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey && document.getElementById('input-card').style.display !== 'none') {
+      const active = document.activeElement;
+      // Only fire when the URL input is focused OR nothing specific is focused
+      if (!active || active === document.body || active.id === 'url-input') {
+        e.preventDefault();
+        submit();
+      }
+    }
+    if (e.key === 'Escape' && document.getElementById('results-card').style.display === 'block') {
+      reset();
+    }
+  });
 
   // ══════════════════════════════════════════════════════════════════════════
   // Tab & mode switching
@@ -373,15 +509,18 @@
       if (currentTab === 'url') {
         const url = document.getElementById('url-input').value.trim();
         if (!url) { showError('אנא הכנס קישור'); return; }
+        currentSource = url;
         taskId = await submitUrl(url);
       } else {
         if (!selectedFile) { showError('אנא בחר קובץ'); return; }
+        currentSource = selectedFile.name;
         taskId = await submitFile();
       }
     } catch (err) {
       showError(err.message); return;
     }
 
+    processingStartTime = Date.now();
     showProgress();
     startPolling(taskId);
   }
@@ -435,6 +574,23 @@
     document.getElementById('progress-pct').textContent  = pct + '%';
     document.getElementById('status-label').innerHTML    =
       (msg || 'מעבד...') + ' <span class="spinner"></span>';
+
+    // Estimated time remaining
+    if (processingStartTime && pct > 5) {
+      const elapsed = (Date.now() - processingStartTime) / 1000;
+      const totalEst = elapsed / (pct / 100);
+      const remaining = Math.max(0, totalEst - elapsed);
+      const etaEl = document.getElementById('progress-eta');
+      if (remaining > 10) {
+        const mins = Math.floor(remaining / 60);
+        const secs = Math.round(remaining % 60);
+        etaEl.textContent = mins > 0
+          ? `⏱️ זמן משוער: ${mins}:${String(secs).padStart(2,'0')} דקות`
+          : `⏱️ זמן משוער: ${secs} שניות`;
+      } else {
+        etaEl.textContent = '⏱️ כמעט מוכן...';
+      }
+    }
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -442,6 +598,7 @@
   // ══════════════════════════════════════════════════════════════════════════
   function showResults(result) {
     hideProgress();
+    currentResult = result;
     document.getElementById('input-card').style.display = 'none';
 
     // Summary
@@ -529,11 +686,164 @@
   }
 
   // ══════════════════════════════════════════════════════════════════════════
+  // Copy helpers
+  // ══════════════════════════════════════════════════════════════════════════
+  function copySection(elementId, btn) {
+    const el = document.getElementById(elementId);
+    const text = el ? el.innerText : '';
+    navigator.clipboard.writeText(text).then(() => {
+      btn.classList.add('copied');
+      const orig = btn.innerHTML;
+      btn.innerHTML = '✅ הועתק';
+      setTimeout(() => { btn.classList.remove('copied'); btn.innerHTML = orig; }, 2000);
+    });
+  }
+
+  function copyAll() {
+    if (!currentResult) return;
+    const md = buildMarkdown(currentResult);
+    navigator.clipboard.writeText(md).then(() => {
+      const btn = document.getElementById('copy-all-btn');
+      btn.classList.add('success-flash');
+      const orig = btn.innerHTML;
+      btn.innerHTML = '✅ הועתק';
+      setTimeout(() => { btn.classList.remove('success-flash'); btn.innerHTML = orig; }, 2000);
+    });
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // Export as Markdown
+  // ══════════════════════════════════════════════════════════════════════════
+  function buildMarkdown(result) {
+    const lines = [];
+    const date = new Date().toLocaleDateString('he-IL');
+    lines.push(`# סיכום שיעור — ${date}`);
+    if (currentSource) lines.push(`> מקור: ${currentSource}`);
+    lines.push('');
+
+    if (result.summary) {
+      lines.push('## 📝 סיכום');
+      lines.push(result.summary);
+      lines.push('');
+    }
+
+    if ((result.chapters || []).length) {
+      lines.push('## 📚 פרקים ונושאים');
+      result.chapters.forEach((ch, i) => {
+        lines.push(`### ${i + 1}. ${ch.title}`);
+        lines.push(ch.content);
+        if (ch.key_points && ch.key_points.length) {
+          ch.key_points.forEach(p => lines.push(`- ${p}`));
+        }
+        lines.push('');
+      });
+    }
+
+    if ((result.quiz || []).length) {
+      lines.push('## 🧠 מבחן');
+      result.quiz.forEach((q, i) => {
+        lines.push(`**שאלה ${i + 1}:** ${q.question}`);
+        (q.options || []).forEach(o => lines.push(`- ${o}`));
+        lines.push(`✅ תשובה נכונה: ${q.correct_answer}`);
+        if (q.explanation) lines.push(`💡 ${q.explanation}`);
+        lines.push('');
+      });
+    }
+
+    if (result.transcript) {
+      lines.push('## 📄 תמלול גולמי');
+      lines.push(result.transcript);
+    }
+
+    return lines.join('\n');
+  }
+
+  function exportMarkdown() {
+    if (!currentResult) return;
+    const md = buildMarkdown(currentResult);
+    const date = new Date().toISOString().slice(0, 10);
+    const blob = new Blob([md], { type: 'text/markdown; charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `lesson-summary-${date}.md`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // History
+  // ══════════════════════════════════════════════════════════════════════════
+  async function toggleHistory() {
+    historyVisible = !historyVisible;
+    const card = document.getElementById('history-card');
+    card.style.display = historyVisible ? 'block' : 'none';
+    if (historyVisible) await loadHistory();
+  }
+
+  async function loadHistory() {
+    const container = document.getElementById('history-content');
+    container.innerHTML = '<div class="history-empty">טוען...</div>';
+    try {
+      const r = await fetch('/api/tasks?limit=30');
+      const tasks = await r.json();
+      if (!tasks.length) {
+        container.innerHTML = '<div class="history-empty">אין היסטוריה עדיין</div>';
+        return;
+      }
+      const list = document.createElement('div');
+      list.className = 'history-list';
+      tasks.forEach(t => {
+        const item = document.createElement('div');
+        const isCompleted = t.status === 'completed';
+        const isFailed    = t.status === 'failed';
+        item.className = `history-item${isFailed ? ' failed' : ''}`;
+        const statusIcon = isCompleted ? '✅' : isFailed ? '❌' : '⏳';
+        const badgeClass = isCompleted ? 'completed' : isFailed ? 'failed' : 'running';
+        const badgeText  = isCompleted ? 'הושלם' : isFailed ? 'נכשל' : 'בתהליך';
+        const dt = new Date(t.created_at).toLocaleString('he-IL', { dateStyle: 'short', timeStyle: 'short' });
+        const shortUrl = (t.url || '').replace(/^upload:/, '📁 ').replace('https://', '').slice(0, 60);
+
+        item.innerHTML = `
+          <span class="h-status">${statusIcon}</span>
+          <div class="h-info">
+            <div class="h-url">${shortUrl || 'לא ידוע'}</div>
+            <div class="h-meta">${dt}</div>
+          </div>
+          <span class="h-badge ${badgeClass}">${badgeText}</span>`;
+
+        if (isCompleted) {
+          item.onclick = () => loadHistoryTask(t.id);
+        }
+        list.appendChild(item);
+      });
+      container.innerHTML = '';
+      container.appendChild(list);
+    } catch {
+      container.innerHTML = '<div class="history-empty">שגיאה בטעינת ההיסטוריה</div>';
+    }
+  }
+
+  async function loadHistoryTask(taskId) {
+    try {
+      const r = await fetch(`/api/tasks/${taskId}`);
+      const task = await r.json();
+      if (task.result) {
+        currentSource = task.url || '';
+        toggleHistory();
+        showResults(task.result);
+      }
+    } catch {
+      alert('שגיאה בטעינת המשימה');
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
   // UI helpers
   // ══════════════════════════════════════════════════════════════════════════
   function showProgress() {
     document.getElementById('input-card').style.display    = 'none';
     document.getElementById('progress-card').style.display = 'block';
+    document.getElementById('progress-eta').textContent    = '';
     updateProgress(5, 'מתחיל עיבוד...');
   }
   function hideProgress() {
@@ -555,6 +865,9 @@
     document.getElementById('input-card').style.display   = 'block';
     document.getElementById('url-input').value = '';
     selectedFile = null;
+    currentResult = null;
+    currentSource = '';
+    processingStartTime = null;
     document.getElementById('file-badge').style.display = 'none';
     quizScore = { correct: 0, total: 0 };
     document.getElementById('score-badge').style.display = 'none';

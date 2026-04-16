@@ -8,9 +8,7 @@ Upload a recording URL or an audio/video file → get a structured summary, chap
 ## How It Works
 
 1. **Download** — The server downloads the Zoom recording audio via yt-dlp + ffmpeg
-2. **Process** — Two modes available:
-   - **Gemini Direct** (recommended): audio is sent directly to Gemini AI → summary + quiz in ~3 min
-   - **Whisper Local** (offline/private): transcribed locally with Faster-Whisper → text sent to Gemini
+2. **Process** — Three modes available (see [Processing Modes](#processing-modes) below)
 3. **Results** — Structured output: summary, chapters with key points, 8–10 multiple-choice questions
 
 ---
@@ -48,7 +46,13 @@ Open `.env` and set your Gemini API key:
 GOOGLE_API_KEY=your-gemini-api-key-here
 ```
 
-Get a free API key at: https://aistudio.google.com/app/apikey
+Get a free key at: https://aistudio.google.com/app/apikey
+
+**Optional — OpenAI Whisper API mode:**
+
+```env
+OPENAI_API_KEY=sk-...
+```
 
 ### 3. Start the server
 
@@ -118,10 +122,20 @@ curl http://localhost:8000/health
 
 ## Processing Modes
 
-| Mode | Speed | Privacy | Best For |
-|------|-------|---------|----------|
-| **Gemini Direct** | ~3 min for 3h lecture | Audio sent to Google | Most use cases |
-| **Whisper Local** | ~15 min for 3h lecture (CPU) | Audio stays on your machine | Sensitive content |
+| Mode | Speed | Privacy | Requirements | Best For |
+|------|-------|---------|--------------|----------|
+| **Gemini Direct** | ~3 min for 3h lecture | Audio sent to Google | `GOOGLE_API_KEY` | Most use cases |
+| **Whisper Local** | ~15 min for 3h lecture (CPU) | Audio stays on your machine | None | Sensitive content |
+| **OpenAI Whisper** | ~5 min for 3h lecture | Audio sent to OpenAI | `OPENAI_API_KEY` | Fast + accurate transcription |
+
+### OpenAI Whisper mode — how it works
+
+Because the OpenAI API has a 25 MB file size limit (~22 min of audio at 96 kbps), the audio is preprocessed automatically before sending:
+
+1. **Silence removal** — strips dead air using ffmpeg's `silenceremove` filter (threshold: −40 dBFS, minimum 1 second)
+2. **Chunking** — splits into ≤13-minute pieces that safely fit under the API limit
+3. **Transcription** — each chunk is sent to `whisper-1` in sequence
+4. **Merge** — transcripts are joined in order and sent to Gemini for summarization
 
 ---
 
@@ -146,6 +160,16 @@ Maximum upload size: **600 MB**
 
 ---
 
+## UI Features
+
+- **Export Markdown** — download the full summary, chapters, and quiz as a `.md` file
+- **Copy to clipboard** — copy the full result or individual sections
+- **History panel** — browse and reload past results without reprocessing
+- **Estimated time** — live countdown calculated from processing progress
+- **Keyboard shortcuts** — `Enter` to submit, `Esc` to return to the home screen
+
+---
+
 ## Troubleshooting
 
 | Problem | Solution |
@@ -156,6 +180,8 @@ Maximum upload size: **600 MB**
 | Recording not found (404) | The Zoom link may have expired |
 | AI returns malformed JSON | Transient Gemini error — the system retries automatically (up to 3x) |
 | Whisper not loading | Not enough RAM — switch to a smaller model in `.env` |
+| OpenAI mode: "API key not configured" | Add `OPENAI_API_KEY=sk-...` to your `.env` file |
+| OpenAI mode: file too large | This shouldn't happen — the preprocessor chunks to ≤13 min automatically |
 | `docker compose up` very slow | First run downloads the image (~3 GB) — wait it out |
 | No space left on device | Run `docker system prune -af` to clear unused images |
 
@@ -166,21 +192,22 @@ Maximum upload size: **600 MB**
 ```
 zoom-to-text/
 ├── app/
-│   ├── api/routes.py          # REST API endpoints
+│   ├── api/routes.py              # REST API endpoints
 │   ├── services/
-│   │   ├── transcriber.py     # Faster-Whisper integration
-│   │   ├── summarizer.py      # Gemini AI summarization + quiz
-│   │   ├── zoom_downloader.py # yt-dlp audio extraction
-│   │   └── processor.py       # Pipeline orchestrator
-│   ├── config.py              # Settings (loaded from .env)
-│   ├── models.py              # Pydantic schemas
-│   ├── state.py               # SQLite task state manager
-│   └── main.py                # FastAPI app + startup
+│   │   ├── transcriber.py         # Faster-Whisper (local) + OpenAI Whisper API
+│   │   ├── audio_preprocessor.py  # Silence removal + chunking (used by OpenAI mode)
+│   │   ├── summarizer.py          # Gemini AI summarization + quiz
+│   │   ├── zoom_downloader.py     # yt-dlp audio extraction
+│   │   └── processor.py           # Pipeline orchestrator
+│   ├── config.py                  # Settings (loaded from .env)
+│   ├── models.py                  # Pydantic schemas
+│   ├── state.py                   # SQLite task state manager
+│   └── main.py                    # FastAPI app + startup
 ├── static/
-│   ├── index.html             # Web UI
+│   ├── index.html                 # Web UI
 │   └── style.css
-├── extension/                 # Chrome extension
-├── data/                      # SQLite DB + temp downloads (gitignored)
+├── extension/                     # Chrome extension
+├── data/                          # SQLite DB + temp downloads (gitignored)
 ├── Dockerfile
 ├── docker-compose.yml
 ├── requirements.txt

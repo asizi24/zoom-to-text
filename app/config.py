@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     # Gemini model to use for summarization
     gemini_model: str = "gemini-2.5-flash"
 
+    # ── OpenAI (optional — for WHISPER_API mode) ────────────────────────────────
+    openai_api_key: str = ""
+
     # ── Faster-Whisper ──────────────────────────────────────────────────────────
     # Model sizes: tiny | base | small | medium | large-v3
     # CPU memory requirements: tiny=~400MB, medium=~2GB, large-v3=~4GB

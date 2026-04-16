@@ -1,21 +1,19 @@
 """
-Faster-Whisper transcription service.
+Whisper transcription service — two backends:
 
-Key design decisions:
-  1. Lazy loading  — the model is NOT loaded at startup. It loads on first use.
-     This prevents a 30-60 second startup delay and avoids consuming RAM when
-     the server is idle.
+  WHISPER_LOCAL (default)
+    Runs Faster-Whisper on the local machine. No API key needed.
+    The model is lazy-loaded, idle-unloaded, and thread-safe.
+    Handles files of any length natively.
 
-  2. Idle unloading — after AUTO_SHUTDOWN_IDLE_MINUTES of inactivity, the model
-     is deleted from memory and garbage-collected. On the next request it
-     silently reloads. A 2-hour class on CPU takes ~15 min to transcribe;
-     this ensures RAM is freed between jobs.
-
-  3. Thread safety — an asyncio.Lock prevents two coroutines from loading the
-     model simultaneously (which would double-allocate RAM).
-
-  4. Executor offload — model loading and transcription are blocking operations.
-     They run in a thread-pool executor to avoid blocking the event loop.
+  WHISPER_API (OpenAI)
+    Sends audio to OpenAI's Whisper API (whisper-1).
+    Requires OPENAI_API_KEY in the environment / .env.
+    Because the API has a 25 MB file size limit (~22 min at 96 kbps),
+    the audio is preprocessed first:
+      1. Silence removal  — strips dead air with ffmpeg silenceremove
+      2. Chunking         — splits into ≤13-min pieces (safely under the limit)
+    Each chunk is sent independently; transcripts are joined in order.
 """
 import asyncio
 import gc
@@ -23,18 +21,23 @@ import logging
 import time
 from pathlib import Path
 
+import httpx
+
 from app.config import settings
+from app.services import audio_preprocessor
 
 logger = logging.getLogger(__name__)
 
-# ── Module-level model state ──────────────────────────────────────────────────────
+
+# ── Local model state ─────────────────────────────────────────────────────────
+
 _model = None
 _last_used: float = 0.0
 _model_lock = asyncio.Lock()
-_IDLE_THRESHOLD = settings.auto_shutdown_idle_minutes * 60  # seconds
+_IDLE_THRESHOLD = settings.auto_shutdown_idle_minutes * 60
 
 
-# ── Model lifecycle ───────────────────────────────────────────────────────────────
+# ── Model lifecycle (local only) ──────────────────────────────────────────────
 
 def _load_model_sync():
     """Blocking: load the Faster-Whisper model. Runs in a thread executor."""
@@ -73,12 +76,12 @@ async def unload_model_if_idle():
     """
     global _model, _last_used
     if _model is None:
-        return  # Already unloaded, nothing to do
+        return
 
     idle_seconds = time.time() - _last_used
     if idle_seconds > _IDLE_THRESHOLD:
         async with _model_lock:
-            if _model is not None:  # Re-check inside lock
+            if _model is not None:
                 logger.info(
                     f"Whisper idle for {idle_seconds / 60:.1f} min "
                     f"(threshold: {settings.auto_shutdown_idle_minutes} min) — unloading"
@@ -88,11 +91,11 @@ async def unload_model_if_idle():
                 gc.collect()
 
 
-# ── Transcription ─────────────────────────────────────────────────────────────────
+# ── LOCAL transcription ───────────────────────────────────────────────────────
 
 def _transcribe_sync(model, audio_path: str, language: str) -> tuple[str, str]:
     """
-    Blocking transcription call.
+    Blocking transcription call — identical to the original implementation.
     Returns (full_transcript_text, detected_language_code).
     """
     lang_hint = language if language != "auto" else None
@@ -106,28 +109,92 @@ def _transcribe_sync(model, audio_path: str, language: str) -> tuple[str, str]:
         word_timestamps=False,                  # Saves memory
     )
 
-    # Consume the generator and join segments
     full_text = " ".join(seg.text.strip() for seg in segments if seg.text.strip())
     return full_text, info.language
 
 
 async def transcribe(audio_path: str, language: str = "he") -> tuple[str, str]:
     """
-    Transcribe an audio file.
+    Transcribe an audio file locally with Faster-Whisper.
     Returns (transcript_text, detected_language).
     """
     model = await _get_model()
-    loop = asyncio.get_running_loop()
+    loop  = asyncio.get_running_loop()
 
-    logger.info(f"Transcribing: {audio_path} (language hint: {language})")
+    logger.info(f"[Local Whisper] Transcribing: {audio_path} (language: {language})")
     transcript, detected_lang = await loop.run_in_executor(
         None, _transcribe_sync, model, audio_path, language
     )
 
-    # Update last_used timestamp after transcription completes
     global _last_used
     _last_used = time.time()
 
-    char_count = len(transcript)
-    logger.info(f"Transcription complete: {char_count:,} chars, detected language: {detected_lang}")
+    logger.info(
+        f"[Local Whisper] Done: {len(transcript):,} chars, "
+        f"detected language: {detected_lang}"
+    )
     return transcript, detected_lang
+
+
+# ── OPENAI API transcription ──────────────────────────────────────────────────
+
+async def transcribe_via_api(audio_path: str, language: str = "he") -> tuple[str, str]:
+    """
+    Transcribe an audio file via OpenAI's Whisper API (whisper-1).
+
+    Steps:
+      1. Silence removal  (ffmpeg) — strips dead air to reduce file size
+      2. Chunking         (ffmpeg) — splits into ≤13-min pieces under the 25 MB API limit
+      3. API calls        (httpx)  — each chunk sent independently
+      4. Join                      — transcripts concatenated in order
+
+    Requires settings.openai_api_key to be set.
+    Returns (transcript_text, language).
+    """
+    if not settings.openai_api_key:
+        raise RuntimeError(
+            "OpenAI API key not configured. "
+            "Set OPENAI_API_KEY in your .env file to use this mode."
+        )
+
+    loop = asyncio.get_running_loop()
+
+    logger.info(f"[OpenAI Whisper] Preprocessing audio: {audio_path}")
+    chunks = await loop.run_in_executor(None, audio_preprocessor.preprocess, audio_path)
+    logger.info(f"[OpenAI Whisper] Sending {len(chunks)} chunk(s) to API...")
+
+    try:
+        transcripts: list[str] = []
+        async with httpx.AsyncClient(timeout=300) as client:
+            for i, chunk_path in enumerate(chunks, start=1):
+                logger.info(f"[OpenAI Whisper] Chunk {i}/{len(chunks)}: {chunk_path}")
+                text = await _call_whisper_api(client, chunk_path, language)
+                if text.strip():
+                    transcripts.append(text.strip())
+
+        transcript = " ".join(transcripts)
+        logger.info(f"[OpenAI Whisper] Done: {len(transcript):,} chars")
+        return transcript, language
+
+    finally:
+        audio_preprocessor.cleanup_chunks(chunks)
+
+
+async def _call_whisper_api(client: httpx.AsyncClient, chunk_path: str, language: str) -> str:
+    """Send a single audio chunk to the OpenAI Whisper API and return the transcript text."""
+    lang_param = language if language != "auto" else None
+
+    with open(chunk_path, "rb") as f:
+        data = {"model": "whisper-1", "response_format": "text"}
+        if lang_param:
+            data["language"] = lang_param
+
+        response = await client.post(
+            "https://api.openai.com/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+            files={"file": (Path(chunk_path).name, f, "audio/mpeg")},
+            data=data,
+        )
+
+    response.raise_for_status()
+    return response.text
