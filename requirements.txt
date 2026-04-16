@@ -1,10 +1,26 @@
-flask
-flask-cors
-torch
-torchaudio
-faster-whisper
-pyannote.audio
-yt-dlp
-python-dotenv
-requests
-psutil
+# ── Web Framework ──────────────────────────────────────────────────────────────
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+python-multipart==0.0.9
+aiofiles==23.2.1
+
+# ── Database (async SQLite — no external DB needed) ────────────────────────────
+aiosqlite==0.20.0
+
+# ── Config ─────────────────────────────────────────────────────────────────────
+pydantic-settings==2.3.4
+python-dotenv==1.0.1
+
+# ── Zoom Downloader ────────────────────────────────────────────────────────────
+yt-dlp>=2024.5.27
+
+# ── Google AI (Gemini — for direct audio + text summarization) ─────────────────
+google-genai>=1.0.0
+
+# ── Transcription (Faster-Whisper — used only in WHISPER_LOCAL mode) ───────────
+# torch CPU-only is installed separately in Dockerfile to save ~1 GB of disk
+faster-whisper==1.0.3
+
+# ── Utilities ──────────────────────────────────────────────────────────────────
+httpx==0.27.0
+psutil==6.0.0

@@ -51,8 +51,23 @@ Thumbs.db
 # SSH keys (NEVER commit these!)
 *.pem
 
+# GCP Service Account keys (NEVER commit these!)
+key.json
+# *.json — do NOT add this; it would block package.json etc.
+
+# Database & state files
+data/
+*.db
+
+# Log files
+*.log
+
 *.env
 
 .env
 *.env
  (2).env
+
+# Legacy archive & Claude internal
+_legacy_archive/
+.claude/

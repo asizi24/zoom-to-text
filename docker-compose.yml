@@ -1,19 +1,57 @@
-version: '3.8'
-
 services:
-  app:
+  api:
     build: .
-    container_name: zoom-audio-app
+    container_name: zoom_transcriber
     ports:
-      - "8000:5000"
-    environment:
-      - PORT=8000
-      - GOOGLE_APPLICATION_CREDENTIALS=/app/key.json
+      - "8000:8000"    # Local development
+      # - "80:8000"    # EC2 / production: uncomment this and comment line above
+    volumes:
+      # ── Persistent data (tasks DB + downloads) ─────────────────────────────
+      # This volume survives container restarts — tasks are never lost again.
+      - ./data:/app/data
+
+      # ── Whisper model cache ─────────────────────────────────────────────────
+      # The large-v3 model (~3 GB) is downloaded once and reused across rebuilds.
+      # Without this, every `docker-compose up --build` re-downloads the model.
+      - whisper_model_cache:/root/.cache/faster_whisper
+
     env_file:
       - .env
-    volumes:
-      - ./key.json:/app/key.json
-      - ./static:/app/static
-      - ./uploads:/app/uploads
+
+    environment:
+      - PYTHONUNBUFFERED=1
+      # Override these per-environment as needed:
+      # - WHISPER_MODEL=medium
+      # - AUTO_SHUTDOWN_IDLE_MINUTES=30
+
+    # ── Resource limits ─────────────────────────────────────────────────────────
+    # Prevents the container from consuming all RAM on a shared EC2 instance.
+    # Whisper large-v3 on CPU needs ~4 GB; medium needs ~2 GB.
+    # Adjust based on your instance type (m7i-flex.large = 8 GB RAM).
+    deploy:
+      resources:
+        limits:
+          memory: 6g
+          cpus: '3.5'
+        reservations:
+          memory: 512m
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s   # Give time for first-run model download
+
     restart: unless-stopped
-    command: uvicorn main:app --host 0.0.0.0 --port 5000 --timeout-keep-alive 600
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+volumes:
+  whisper_model_cache:
+    name: zoom_whisper_model_cache
+    # To clear the model cache and re-download: docker volume rm zoom_whisper_model_cache
