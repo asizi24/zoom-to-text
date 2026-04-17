@@ -15,7 +15,7 @@
  * Change to your EC2 public IP/domain in the settings panel.
  */
 
-const DEFAULT_SERVER = 'http://localhost:8000';
+const DEFAULT_SERVER = 'https://zoom-transcriber.fly.dev';
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
 const statusEl     = document.getElementById('status');

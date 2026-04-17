@@ -11,7 +11,8 @@
     "host_permissions": [
         "*://*.zoom.us/*",
         "*://*.cloudfunctions.net/*",
-        "*://*.run.app/*"
+        "*://*.run.app/*",
+        "*://*.fly.dev/*"
     ],
     "action": {
         "default_popup": "popup.html",

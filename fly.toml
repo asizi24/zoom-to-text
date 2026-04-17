@@ -1,0 +1,38 @@
+# fly.toml — Zoom Transcriber
+# Deploy with: fly deploy
+# Docs: https://fly.io/docs/reference/configuration/
+
+app            = "zoom-transcriber"
+primary_region = "ams"        # Amsterdam — closest to Israel
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PYTHONUNBUFFERED         = "1"
+  WHISPER_MODEL            = "medium"
+  AUTO_SHUTDOWN_IDLE_MINUTES = "30"
+  # Secrets (GOOGLE_API_KEY, GEMINI_MODEL, GCP_PROJECT_ID) are set via:
+  #   fly secrets set KEY=VALUE
+
+[http_service]
+  internal_port       = 8000
+  force_https         = true
+  auto_stop_machines  = false   # IMPORTANT: keep alive for background tasks
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type       = "requests"
+    hard_limit = 10
+    soft_limit = 5
+
+[[vm]]
+  size   = "shared-cpu-2x"
+  memory = "2gb"
+
+# Persistent volume for SQLite DB + downloads
+# Create with: fly volumes create zoom_data --region ams --size 5
+[[mounts]]
+  source      = "zoom_data"
+  destination = "/app/data"

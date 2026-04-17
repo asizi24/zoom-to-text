@@ -42,7 +42,8 @@ WORKDIR /app
 COPY app/        ./app/
 COPY static/     ./static/
 COPY extension/  ./extension/
-COPY key.json    ./key.json
+# key.json is NOT copied — GCP credentials are injected via environment secrets
+# (fly secrets set GOOGLE_APPLICATION_CREDENTIALS_JSON="..." for production)
 
 RUN mkdir -p data/downloads
 
