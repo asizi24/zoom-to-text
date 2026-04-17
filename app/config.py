@@ -41,8 +41,8 @@ class Settings(BaseSettings):
     max_upload_bytes: int = 600 * 1024 * 1024  # 600 MB
 
     # ── Paths ───────────────────────────────────────────────────────────────────
-    data_dir: Path = Path("data")
-    downloads_dir: Path = Path("data/downloads")
+    data_dir: Path = Path("data")          # Override with DATA_DIR=/tmp/data on Cloud Run
+    downloads_dir: Path = Path("data/downloads")  # Derived from data_dir below
 
     # ── App ─────────────────────────────────────────────────────────────────────
     app_title: str = "Zoom Transcriber"

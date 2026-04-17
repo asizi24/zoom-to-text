@@ -15,7 +15,7 @@
  * Change to your EC2 public IP/domain in the settings panel.
  */
 
-const DEFAULT_SERVER = 'https://zoom-transcriber.fly.dev';
+const DEFAULT_SERVER = 'https://YOUR_CLOUDRUN_URL.a.run.app'; // Update this after deployment
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
 const statusEl     = document.getElementById('status');
