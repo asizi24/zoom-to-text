@@ -62,8 +62,9 @@ async def download_audio(
         logger.info(f"Cookie file written: {cookie_file_path}")
 
     ydl_opts: dict = {
-        # Audio-only extraction — saves significant disk space vs downloading video
-        "format": "bestaudio/best",
+        # Prefer audio-only stream; fall back to lowest-quality video + best audio
+        # (audio track is identical across all video resolutions, so no quality loss)
+        "format": "bestaudio[ext=m4a]/bestaudio/worstvideo+bestaudio/worst",
         "postprocessors": [{
             "key": "FFmpegExtractAudio",
             "preferredcodec": "mp3",

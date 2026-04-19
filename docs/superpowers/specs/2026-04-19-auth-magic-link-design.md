@@ -99,10 +99,11 @@ All new tasks will have `user_id` set at creation time.
 | `app/api/auth.py` | New router: `POST /api/auth/request`, `GET /api/auth/verify`, `POST /api/auth/logout` |
 | `app/api/deps.py` | New file: `get_current_user()` dependency that reads session cookie |
 | `app/api/routes.py` | Add `Depends(get_current_user)` to all endpoints. Filter `list_tasks` by `user_id`. Pass `user_id` to `create_task`. |
-| `app/main.py` | Register auth router. Tighten CORS `allow_origins` to `[settings.cors_origin]`. Add session middleware. |
+| `app/main.py` | Register auth router. Tighten CORS `allow_origins` to `[settings.cors_origin]`. |
 | `app/config.py` | Add: `allowed_emails`, `resend_api_key`, `cors_origin` |
 | `static/login.html` | New standalone page: email input + submit button + status message |
-| `fly.toml` | Fly.io config: 1 shared CPU, 512MB RAM, persistent volume at `/data`, health check on `/health` |
+| `fly.toml` | New file — Fly.io config: 1 shared CPU, 512MB RAM, persistent volume at `/data`, health check on `/health` |
+| `requirements.txt` | No new packages — Resend API called via `httpx` (already present) |
 | `.gitignore` | Ensure `key.json` is listed |
 
 ---
@@ -125,7 +126,7 @@ BASE_URL=https://zoom-to-text.fly.dev
 
 - Single machine: `shared-cpu-1x`, 512MB RAM (sufficient for Gemini Direct mode)
 - Persistent volume: 10GB mounted at `/data` (SQLite + downloaded audio files)
-- Secrets: `GOOGLE_API_KEY`, `RESEND_API_KEY`, `SESSION_SECRET`, `ALLOWED_EMAILS` set via `fly secrets set`
+- Secrets: `GOOGLE_API_KEY`, `RESEND_API_KEY`, `ALLOWED_EMAILS`, `CORS_ORIGIN` set via `fly secrets set`
 - `key.json` removed from repo; GCP auth switches to `GOOGLE_API_KEY` (AI Studio)
 - Auto-HTTPS via Fly.io (no cert management needed)
 

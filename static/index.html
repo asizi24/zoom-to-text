@@ -730,6 +730,12 @@
   let historyVisible = false;
   let processingStartTime = null;
 
+  // Progress creep state
+  let creepTimer        = null;
+  let lastRealProgress  = 0;
+  let lastProgressTime  = 0;
+  let visualProgress    = 0;
+
   // ══════════════════════════════════════════════════════════════════════════
   // Keyboard shortcut — Enter to submit
   // ══════════════════════════════════════════════════════════════════════════
@@ -857,13 +863,24 @@
     }, 2000);
   }
 
-  function updateProgress(pct, msg) {
+  function _applyProgressBar(pct) {
     document.getElementById('progress-fill').style.width = pct + '%';
-    document.getElementById('progress-pct').textContent  = pct + '%';
-    document.getElementById('status-label').innerHTML    =
+    document.getElementById('progress-pct').textContent  = Math.round(pct) + '%';
+  }
+
+  function updateProgress(pct, msg) {
+    // Stop existing creep — a real update arrived
+    if (creepTimer) { clearInterval(creepTimer); creepTimer = null; }
+
+    lastRealProgress = pct;
+    lastProgressTime = Date.now();
+    visualProgress   = pct;
+
+    _applyProgressBar(pct);
+    document.getElementById('status-label').innerHTML =
       '<span class="spinner"></span>' + (msg || 'מעבד...');
 
-    // Estimated time remaining
+    // ETA based on real progress
     if (processingStartTime && pct > 5) {
       const elapsed = (Date.now() - processingStartTime) / 1000;
       const totalEst = elapsed / (pct / 100);
@@ -878,6 +895,20 @@
       } else {
         etaEl.textContent = '⏱️ כמעט מוכן...';
       }
+    }
+
+    // Start creep: after 8s without a real update, inch bar forward slowly
+    if (pct < 100) {
+      creepTimer = setInterval(() => {
+        const stale = (Date.now() - lastProgressTime) / 1000;
+        if (stale > 8) {
+          const cap = Math.min(lastRealProgress + 30, 95);
+          if (visualProgress < cap) {
+            visualProgress = Math.min(visualProgress + 0.15, cap);
+            _applyProgressBar(visualProgress);
+          }
+        }
+      }, 1000);
     }
   }
 
@@ -1137,6 +1168,7 @@
     updateProgress(5, 'מתחיל עיבוד...');
   }
   function hideProgress() {
+    if (creepTimer) { clearInterval(creepTimer); creepTimer = null; }
     document.getElementById('progress-card').style.display = 'none';
   }
   function showError(msg) {
@@ -1150,7 +1182,8 @@
   }
 
   function reset() {
-    if (pollTimer) clearInterval(pollTimer);
+    if (pollTimer)  clearInterval(pollTimer);
+    if (creepTimer) { clearInterval(creepTimer); creepTimer = null; }
     document.getElementById('results-card').style.display = 'none';
     document.getElementById('input-card').style.display   = 'block';
     document.querySelector('.brand').style.display        = 'block';
