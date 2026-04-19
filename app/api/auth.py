@@ -90,7 +90,7 @@ async def _send_magic_link_email(email: str, token: str) -> None:
             "https://api.resend.com/emails",
             headers={"Authorization": f"Bearer {settings.resend_api_key}"},
             json={
-                "from": "Zoom to Text <noreply@zoom-to-text.fly.dev>",
+                "from": "Zoom to Text <onboarding@resend.dev>",
                 "to": [email],
                 "subject": "כניסה ל-Zoom to Text",
                 "html": (
