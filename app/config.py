@@ -49,6 +49,14 @@ class Settings(BaseSettings):
     # Base URL shown in responses (used by the Chrome extension to know where to post)
     base_url: str = "http://localhost:8000"
 
+    # ── Auth ────────────────────────────────────────────────────────────────────
+    # Comma-separated list of emails allowed to log in
+    # Example: "alice@example.com,bob@example.com"
+    allowed_emails: str = ""
+    resend_api_key: str = ""
+    # Allowed CORS origin — set to your Fly.io domain in production
+    cors_origin: str = "http://localhost:8000"
+
 
 settings = Settings()
 
