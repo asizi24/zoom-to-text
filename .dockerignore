@@ -1,40 +1,45 @@
-# Environment and secrets
+# ── Secrets — NEVER bake .env into the image ──────────────────
 .env
 *.pem
 
-# Python
+# ── Python ────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
+*.pyo
+.pytest_cache/
+
+# ── Virtual environments ───────────────────────────────────────
 .venv/
 venv/
+env/
 
-# Git
+# ── Data & runtime files (mounted as Docker volumes) ──────────
+data/
+downloads/
+uploads/
+*.db
+*.log
+
+# ── Git & CI ───────────────────────────────────────────────────
 .git/
 .github/
 .gitignore
 
-# IDE
+# ── IDE & OS ───────────────────────────────────────────────────
 .vscode/
 .idea/
+*.swp
+.DS_Store
+Thumbs.db
 
-# Data directories (mounted as volumes)
-downloads/
-uploads/
-
-# Logs
-*.log
-app.log
-
-# Test files
+# ── Legacy & test files ────────────────────────────────────────
+_legacy_archive/
 test_*.py
 verify_*.py
 demo_*.py
 
-# Documentation
+# ── Docs ──────────────────────────────────────────────────────
 README.md
-# *.txt
-# But we need requirements.txt!
-!requirements.txt
 
-# Gemini artifacts
-.gemini/
+# requirements.txt MUST be included (Dockerfile COPY depends on it)
+!requirements.txt

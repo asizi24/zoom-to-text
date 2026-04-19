@@ -1,8 +1,31 @@
-fastapi==0.109.2
-uvicorn==0.27.1
-gunicorn==21.2.0
+# ── Web Framework ──────────────────────────────────────────────────────────────
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
 python-multipart==0.0.9
-google-cloud-storage==2.14.0
-google-cloud-aiplatform==1.42.1
-yt-dlp
-python-dotenv
+aiofiles==23.2.1
+
+# ── Database (async SQLite — no external DB needed) ────────────────────────────
+aiosqlite==0.20.0
+
+# ── Config ─────────────────────────────────────────────────────────────────────
+pydantic-settings==2.3.4
+python-dotenv==1.0.1
+
+# ── Zoom Downloader ────────────────────────────────────────────────────────────
+yt-dlp>=2024.5.27
+
+# ── Google AI (Gemini — for direct audio + text summarization) ─────────────────
+google-genai>=1.0.0
+
+# ── Transcription (Faster-Whisper — used only in WHISPER_LOCAL mode) ───────────
+# torch CPU-only is installed separately in Dockerfile to save ~1 GB of disk
+faster-whisper==1.0.3
+
+# ── Utilities ──────────────────────────────────────────────────────────────────
+httpx==0.27.0
+psutil==6.0.0
+
+# ── Testing ─────────────────────────────────────────────────────────────────────
+pytest==8.2.2
+pytest-asyncio==0.23.8
+anyio==4.4.0

@@ -1,0 +1,56 @@
+name: Deploy to Google Cloud Run
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  PROJECT_ID: gen-lang-client-0633910627
+  SERVICE:    zoom-transcriber
+  REGION:     us-central1
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write   # Required for Workload Identity Federation
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for GCR
+        run: gcloud auth configure-docker --quiet
+
+      - name: Build and Push Docker image
+        run: |
+          docker build -t gcr.io/$PROJECT_ID/$SERVICE:latest .
+          docker push gcr.io/$PROJECT_ID/$SERVICE:latest
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy $SERVICE \
+            --image gcr.io/$PROJECT_ID/$SERVICE:latest \
+            --region $REGION \
+            --platform managed \
+            --allow-unauthenticated \
+            --port 8000 \
+            --memory 1Gi \
+            --cpu 1 \
+            --timeout 3600 \
+            --min-instances 0 \
+            --max-instances 1 \
+            --cpu-throttling \
+            --set-env-vars "DATA_DIR=/tmp/data,PYTHONUNBUFFERED=1,GEMINI_MODEL=gemini-2.5-flash,GCP_PROJECT_ID=$PROJECT_ID" \
+            --set-secrets "GOOGLE_API_KEY=GOOGLE_API_KEY:latest"

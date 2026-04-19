@@ -1,215 +1,163 @@
-// Configuration
-const SERVER_URL = 'YOUR_CLOUD_RUN_URL_HERE'; // Replace with your actual Cloud Run URL
+/**
+ * Zoom Transcriber — Chrome Extension Popup
+ *
+ * Flow:
+ *  1. User opens a Zoom recording page (already authenticated)
+ *  2. User clicks the extension icon → this popup opens
+ *  3. content.js (injected in the Zoom page) extracts the CDN video URL
+ *     and the session cookies from the authenticated browser context
+ *  4. popup.js sends URL + cookies to the backend → receives a task_id
+ *  5. Polls GET /api/tasks/{task_id} every 2.5s and shows live progress
+ *  6. When done → shows a "View Results" button that opens the web UI
+ *
+ * The server URL is stored in chrome.storage.local.
+ * Default: http://localhost:8000 (local Docker)
+ * Change to your EC2 public IP/domain in the settings panel.
+ */
 
-// DOM Elements
-const analyzeBtn = document.getElementById('analyzeBtn');
-const clearBtn = document.getElementById('clearBtn');
-const statusEl = document.getElementById('status');
-const resultsEl = document.getElementById('results');
-const errorEl = document.getElementById('error');
+const DEFAULT_SERVER = 'https://YOUR_CLOUDRUN_URL.a.run.app'; // Update this after deployment
 
-// State
-let isProcessing = false;
+// ── DOM refs ──────────────────────────────────────────────────────────────────
+const statusEl     = document.getElementById('status');
+const sendBtn      = document.getElementById('send-btn');
+const settingsLink = document.getElementById('settings-link');
+const serverInput  = document.getElementById('server-url');
+const settingsDiv  = document.getElementById('settings-panel');
+const saveBtn      = document.getElementById('save-settings');
+const progressWrap = document.getElementById('progress-wrap');
+const progressFill = document.getElementById('progress-fill');
+const progressText = document.getElementById('progress-text');
+const resultLink   = document.getElementById('result-link');
 
-// Event Listeners
-analyzeBtn.addEventListener('click', analyzeRecording);
-clearBtn.addEventListener('click', clearResults);
+let serverUrl    = DEFAULT_SERVER;
+let pollInterval = null;
 
-// Main Function
-async function analyzeRecording() {
-    if (isProcessing) return;
+// ── Init ──────────────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', async () => {
+  const stored = await chrome.storage.local.get(['serverUrl']);
+  serverUrl = stored.serverUrl || DEFAULT_SERVER;
+  serverInput.value = serverUrl;
 
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const isZoomPage = tab?.url?.includes('zoom.us');
+
+  if (!isZoomPage) {
+    setStatus('⚠️ פתח דף הקלטת Zoom תחילה', 'warn');
+    sendBtn.disabled = true;
+    return;
+  }
+
+  setStatus('✅ דף Zoom זוהה — לחץ לשליחה', 'ok');
+  sendBtn.disabled = false;
+});
+
+// ── Settings ──────────────────────────────────────────────────────────────────
+settingsLink.addEventListener('click', () => {
+  settingsDiv.style.display = settingsDiv.style.display === 'none' ? 'block' : 'none';
+});
+
+saveBtn.addEventListener('click', async () => {
+  serverUrl = serverInput.value.trim().replace(/\/$/, '');
+  await chrome.storage.local.set({ serverUrl });
+  settingsDiv.style.display = 'none';
+  setStatus(`💾 שמור — שרת: ${serverUrl}`, 'ok');
+});
+
+// ── Send to server ────────────────────────────────────────────────────────────
+sendBtn.addEventListener('click', async () => {
+  sendBtn.disabled = true;
+  resultLink.style.display = 'none';
+  setStatus('📡 מחלץ מידע מהדף...', 'info');
+
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+
+    // Ask the content script for the CDN video URL + cookies
+    let pageData = {};
     try {
-        isProcessing = true;
-        analyzeBtn.disabled = true;
-        hideError();
-        hideResults();
-
-        // Step 1: Get active tab
-        updateStatus('מחפש הקלטה...', true);
-        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-
-        if (!tab.url.includes('zoom.us')) {
-            throw new Error('אנא פתח דף הקלטת Zoom');
-        }
-
-        // Step 2: Inject content script to get video URL
-        const [result] = await chrome.scripting.executeScript({
-            target: { tabId: tab.id },
-            function: getVideoSource
-        });
-
-        if (!result || !result.result) {
-            throw new Error('לא נמצא סרטון בדף');
-        }
-
-        const videoUrl = result.result;
-
-        // Step 3: Download audio
-        updateStatus('מוריד אודיו...', true);
-        const audioBlob = await fetchAudioBlob(videoUrl);
-
-        // Step 4: Upload to server
-        updateStatus('מעבד עם AI...', true);
-        const response = await uploadToServer(audioBlob);
-
-        // Step 5: Display results
-        updateStatus('הושלם בהצלחה! ✓', false);
-        displayResults(response);
-
-    } catch (error) {
-        console.error('Error:', error);
-        updateStatus('שגיאה', false);
-        showError(error.message);
-    } finally {
-        isProcessing = false;
-        analyzeBtn.disabled = false;
-    }
-}
-
-// Helper: Get video source from page
-function getVideoSource() {
-    const video = document.querySelector('video');
-    const audio = document.querySelector('audio');
-
-    if (video && video.src) {
-        return video.src;
+      pageData = await chrome.tabs.sendMessage(tab.id, { action: 'getZoomData' });
+    } catch {
+      // Content script not yet active — inject it on demand
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] });
+      // Small delay to let it initialize
+      await new Promise(r => setTimeout(r, 400));
+      pageData = await chrome.tabs.sendMessage(tab.id, { action: 'getZoomData' });
     }
 
-    if (audio && audio.src) {
-        return audio.src;
+    const recordingUrl = pageData?.videoUrl || tab.url;
+    const cookies      = pageData?.cookies  || null;
+
+    if (!cookies) {
+      setStatus('⚠️ לא נמצאו cookies — ייתכן שהסרטון ייכשל אם הוא פרטי', 'warn');
+    } else {
+      setStatus('🚀 שולח לשרת לעיבוד...', 'info');
     }
 
-    // Try to find source in video/audio elements
-    const videoSource = document.querySelector('video source');
-    const audioSource = document.querySelector('audio source');
-
-    if (videoSource && videoSource.src) {
-        return videoSource.src;
-    }
-
-    if (audioSource && audioSource.src) {
-        return audioSource.src;
-    }
-
-    return null;
-}
-
-// Helper: Fetch audio as Blob
-async function fetchAudioBlob(url) {
-    const response = await fetch(url);
-
-    if (!response.ok) {
-        throw new Error('כשל בהורדת האודיו');
-    }
-
-    return await response.blob();
-}
-
-// Helper: Upload to server
-async function uploadToServer(audioBlob) {
-    const formData = new FormData();
-    formData.append('file', audioBlob, 'recording.webm');
-
-    const response = await fetch(`${SERVER_URL}/analyze`, {
-        method: 'POST',
-        body: formData
+    const response = await fetch(`${serverUrl}/api/tasks`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url:      recordingUrl,
+        mode:     'gemini_direct',
+        cookies:  cookies,
+        language: 'he',
+      }),
     });
 
     if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.detail || 'שגיאת שרת');
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.detail || `שגיאת שרת ${response.status}`);
     }
 
-    return await response.json();
-}
+    const task = await response.json();
+    setStatus(`⏳ עיבוד החל...`, 'info');
+    showProgress(5, 'מתחיל...');
+    startPolling(task.task_id);
 
-// Helper: Display results
-function displayResults(data) {
-    const { summary, quiz } = data;
-
-    let html = '';
-
-    // Summary Section
-    if (summary) {
-        html += `
-            <div class="summary">
-                <h3>📝 סיכום</h3>
-                <p>${summary}</p>
-            </div>
-        `;
-    }
-
-    // Quiz Section
-    if (quiz && quiz.length > 0) {
-        html += `
-            <div class="quiz">
-                <h3>❓ שאלות</h3>
-        `;
-
-        quiz.forEach((q, index) => {
-            html += `
-                <div class="question">
-                    <div class="question-text">${index + 1}. ${q.question}</div>
-                    <ul class="options">
-            `;
-
-            q.options.forEach((option, optIndex) => {
-                const isCorrect = optIndex === q.correct;
-                html += `<li class="${isCorrect ? 'correct' : ''}">${option}${isCorrect ? ' ✓' : ''}</li>`;
-            });
-
-            html += `
-                    </ul>
-                </div>
-            `;
-        });
-
-        html += `</div>`;
-    }
-
-    resultsEl.innerHTML = html;
-    showResults();
-}
-
-// Helper: Update status
-function updateStatus(message, loading = false) {
-    statusEl.textContent = message;
-    statusEl.classList.toggle('loading', loading);
-}
-
-// Helper: Show/Hide results
-function showResults() {
-    resultsEl.classList.add('show');
-}
-
-function hideResults() {
-    resultsEl.classList.remove('show');
-    resultsEl.innerHTML = '';
-}
-
-// Helper: Show/Hide error
-function showError(message) {
-    errorEl.textContent = message;
-    errorEl.classList.add('show');
-}
-
-function hideError() {
-    errorEl.classList.remove('show');
-    errorEl.textContent = '';
-}
-
-// Clear results
-function clearResults() {
-    hideResults();
-    hideError();
-    updateStatus('מוכן לניתוח...', false);
-}
-
-// Load saved results on popup open (optional)
-chrome.storage.local.get(['lastResults'], (data) => {
-    if (data.lastResults) {
-        displayResults(data.lastResults);
-        updateStatus('תוצאות אחרונות', false);
-    }
+  } catch (err) {
+    setStatus(`❌ ${err.message}`, 'error');
+    sendBtn.disabled = false;
+  }
 });
+
+// ── Polling ───────────────────────────────────────────────────────────────────
+function startPolling(taskId) {
+  if (pollInterval) clearInterval(pollInterval);
+
+  pollInterval = setInterval(async () => {
+    try {
+      const r = await fetch(`${serverUrl}/api/tasks/${taskId}`);
+      if (!r.ok) return;
+      const task = await r.json();
+
+      showProgress(task.progress, task.message || '');
+
+      if (task.status === 'completed') {
+        clearInterval(pollInterval);
+        setStatus('✅ הסיכום מוכן!', 'ok');
+        showProgress(100, 'הושלם!');
+        resultLink.href          = `${serverUrl}/?task=${taskId}`;
+        resultLink.style.display = 'block';
+        sendBtn.disabled         = false;
+
+      } else if (task.status === 'failed') {
+        clearInterval(pollInterval);
+        setStatus(`❌ ${task.error || 'העיבוד נכשל'}`, 'error');
+        sendBtn.disabled = false;
+      }
+    } catch { /* retry on next tick */ }
+  }, 2500);
+}
+
+// ── UI helpers ────────────────────────────────────────────────────────────────
+function setStatus(msg, type = 'info') {
+  statusEl.textContent = msg;
+  statusEl.className   = `status status-${type}`;
+}
+
+function showProgress(pct, msg) {
+  progressWrap.style.display = 'block';
+  progressFill.style.width   = pct + '%';
+  const label = msg.replace(/[⬇️✅🤖🎙️]/gu, '').trim();
+  progressText.textContent   = `${label} (${pct}%)`;
+}

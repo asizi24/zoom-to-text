@@ -1,653 +1,1213 @@
 <!DOCTYPE html>
 <html lang="he" dir="rtl">
-
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>עוזר לימודי חכם - ניתוח הקלטות</title>
-    <link href="https://fonts.googleapis.com/css2?family=Rubik:wght@300;400;500;700&display=swap" rel="stylesheet">
-    <style>
-        :root {
-            --primary: #4F46E5;
-            --primary-hover: #4338CA;
-            --secondary: #EC4899;
-            --bg-color: #F3F4F6;
-            --card-bg: rgba(255, 255, 255, 0.85);
-            --text-main: #1F2937;
-            --text-sub: #4B5563;
-            --success: #10B981;
-            --error: #EF4444;
-            --glass-border: 1px solid rgba(255, 255, 255, 0.3);
-            --shadow: 0 10px 30px -5px rgba(0, 0, 0, 0.1);
-        }
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Zoom Transcriber — עוזר לימודי</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Rubik:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --accent1: #7c3aed;
+      --accent2: #db2777;
+      --accent-g: linear-gradient(135deg, #7c3aed, #db2777);
+      --success: #10b981;
+      --error:   #ef4444;
+      --warning: #f59e0b;
+      --text:    #e2e8f0;
+      --muted:   rgba(226,232,240,.4);
+      --border:  rgba(255,255,255,.1);
+      --card-bg: rgba(255,255,255,.055);
+      --radius:  24px;
+      --shadow:  0 32px 80px rgba(0,0,0,.6), 0 0 0 1px rgba(139,92,246,.15), inset 0 1px 0 rgba(255,255,255,.1);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
 
-        body {
-            font-family: 'Rubik', sans-serif;
-            background: linear-gradient(135deg, #e0e7ff 0%, #fce7f3 100%);
-            color: var(--text-main);
-            margin: 0;
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 20px;
-        }
+    body {
+      font-family: 'Inter', 'Rubik', system-ui, sans-serif;
+      background: #090b14;
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 0 20px 80px;
+      overflow-x: hidden;
+    }
 
-        .container {
-            width: 100%;
-            max-width: 900px;
-            background: var(--card-bg);
-            backdrop-filter: blur(12px);
-            -webkit-backdrop-filter: blur(12px);
-            border-radius: 24px;
-            border: var(--glass-border);
-            box-shadow: var(--shadow);
-            padding: 40px;
-            text-align: center;
-            transition: transform 0.3s ease;
-        }
+    /* ── Background orbs ── */
+    .bg-orbs { position: fixed; inset: 0; pointer-events: none; z-index: 0; overflow: hidden; }
+    .orb {
+      position: absolute; border-radius: 50%;
+      filter: blur(100px); will-change: transform;
+    }
+    .orb1 { width: 600px; height: 600px; background: #4a1d8a; top: -160px; right: -120px; opacity: .4; }
+    .orb2 { width: 450px; height: 450px; background: #9d174d; bottom: 60px; left: -100px; opacity: .22; }
+    .orb3 { width: 350px; height: 350px; background: #1e3a8a; top: 45%; left: 50%; transform: translate(-50%,-50%); opacity: .18; }
 
-        h1 {
-            font-size: 2.5rem;
-            margin-bottom: 10px;
-            background: linear-gradient(to right, var(--primary), var(--secondary));
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            font-weight: 700;
-        }
+    /* ── Layout ── */
+    .wrapper { position: relative; z-index: 1; width: 100%; max-width: 600px; padding-top: 56px; }
 
-        p.subtitle {
-            color: var(--text-sub);
-            margin-bottom: 30px;
-            font-size: 1.1rem;
-        }
+    /* ── Brand ── */
+    .brand { text-align: center; margin-bottom: 40px; }
+    .brand-icon {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 60px; height: 60px; border-radius: 18px; font-size: 1.7rem;
+      background: var(--accent-g);
+      box-shadow: 0 8px 28px rgba(124,58,237,.5);
+      margin-bottom: 16px;
+    }
+    .brand-title {
+      font-size: 2.1rem; font-weight: 800; letter-spacing: -.04em;
+      background: linear-gradient(135deg, #c4b5fd, #f9a8d4 55%, #6ee7b7);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+      margin-bottom: 10px;
+    }
+    .brand-sub { font-size: .92rem; color: var(--muted); line-height: 1.7; font-weight: 400; }
 
-        /* Tabs */
-        .tabs {
-            display: flex;
-            justify-content: center;
-            gap: 10px;
-            margin-bottom: 30px;
-        }
+    /* ── Glass card ── */
+    .card {
+      background: var(--card-bg);
+      backdrop-filter: blur(28px) saturate(160%);
+      -webkit-backdrop-filter: blur(28px) saturate(160%);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 32px;
+      box-shadow: var(--shadow);
+      margin-bottom: 16px;
+    }
 
-        .tab-btn {
-            padding: 12px 30px;
-            border: 2px solid #E5E7EB;
-            background: white;
-            border-radius: 50px;
-            cursor: pointer;
-            font-size: 1rem;
-            font-weight: 500;
-            transition: all 0.3s;
-            color: var(--text-sub);
-        }
+    /* ── Tabs ── */
+    .tabs {
+      display: flex; gap: 4px; margin-bottom: 24px;
+      background: rgba(0,0,0,.3); border-radius: 14px; padding: 4px;
+    }
+    .tab {
+      flex: 1; padding: 11px 0; border-radius: 10px; text-align: center;
+      font-size: .88rem; font-weight: 600; cursor: pointer;
+      color: var(--muted); transition: all .22s; border: none; background: none;
+    }
+    .tab:hover:not(.active) { color: rgba(255,255,255,.65); }
+    .tab.active {
+      background: var(--accent-g); color: #fff;
+      box-shadow: 0 4px 16px rgba(124,58,237,.4);
+    }
+    .tab-pane { display: none; }
+    .tab-pane.active { display: block; animation: fadeIn .25s; }
 
-        .tab-btn:hover {
-            border-color: var(--primary);
-            color: var(--primary);
-        }
+    /* ── Drop zone ── */
+    .drop-zone {
+      border: 2px dashed rgba(255,255,255,.15); border-radius: 16px;
+      padding: 44px 28px; text-align: center; cursor: pointer;
+      transition: all .25s; background: rgba(0,0,0,.18);
+    }
+    .drop-zone:hover, .drop-zone.over {
+      border-color: rgba(124,58,237,.6); background: rgba(124,58,237,.08);
+      transform: scale(1.01);
+    }
+    .drop-zone .icon { font-size: 48px; margin-bottom: 12px; opacity: .7; }
+    .drop-zone h3 { font-size: 1rem; color: var(--text); margin-bottom: 6px; font-weight: 600; }
+    .drop-zone p  { color: var(--muted); font-size: .82rem; }
+    .file-badge {
+      display: none; margin-top: 16px; padding: 10px 16px;
+      background: rgba(124,58,237,.15); border: 1px solid rgba(124,58,237,.3);
+      border-radius: 10px; color: #c4b5fd; font-weight: 500;
+      align-items: center; gap: 8px; font-size: .88rem;
+    }
 
-        .tab-btn.active {
-            background: linear-gradient(135deg, var(--primary), var(--secondary));
-            color: white;
-            border-color: transparent;
-        }
+    /* ── URL input ── */
+    .url-wrap { margin-bottom: 10px; }
+    .url-input {
+      width: 100%; padding: 14px 18px;
+      background: rgba(0,0,0,.35);
+      border: 1px solid var(--border);
+      border-radius: 14px; color: var(--text);
+      font-size: .95rem; font-family: inherit;
+      direction: ltr; text-align: left;
+      outline: none; transition: all .22s;
+    }
+    .url-input::placeholder { color: rgba(255,255,255,.2); }
+    .url-input:focus {
+      border-color: rgba(124,58,237,.6);
+      box-shadow: 0 0 0 3px rgba(124,58,237,.18);
+      background: rgba(0,0,0,.48);
+    }
+    .url-hint {
+      color: var(--muted); font-size: .8rem; margin-bottom: 22px;
+      text-align: center; line-height: 1.5;
+    }
 
-        .tab-content {
-            display: none;
-        }
+    /* ── Mode selector ── */
+    .mode-label {
+      font-size: .7rem; font-weight: 700; letter-spacing: .1em;
+      text-transform: uppercase; color: var(--muted); margin-bottom: 10px;
+    }
+    .mode-row { display: flex; gap: 10px; margin-bottom: 28px; }
+    .mode-opt {
+      flex: 1; padding: 14px 10px; border-radius: 16px; text-align: center;
+      cursor: pointer; transition: all .22s;
+      border: 1px solid rgba(255,255,255,.08);
+      background: rgba(255,255,255,.03);
+    }
+    .mode-opt:hover {
+      border-color: rgba(124,58,237,.4); background: rgba(124,58,237,.07);
+    }
+    .mode-opt.selected {
+      border-color: rgba(124,58,237,.6); background: rgba(124,58,237,.13);
+      box-shadow: 0 0 22px rgba(124,58,237,.18), inset 0 1px 0 rgba(255,255,255,.07);
+    }
+    .mode-icon { font-size: 1.5rem; margin-bottom: 6px; }
+    .mode-name { font-weight: 700; font-size: .8rem; color: var(--text); margin-bottom: 3px; }
+    .mode-desc { font-size: .7rem; color: var(--muted); line-height: 1.4; }
+    .mode-opt.selected .mode-name { color: #c4b5fd; }
+    .mode-opt.selected .mode-desc { color: rgba(196,181,253,.5); }
 
-        .tab-content.active {
-            display: block;
-            animation: fadeIn 0.3s ease;
-        }
+    /* ── CTA button ── */
+    .btn {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 15px 44px; border: none; border-radius: 14px;
+      background: var(--accent-g); color: #fff;
+      font-size: 1.05rem; font-weight: 700; cursor: pointer;
+      font-family: inherit; transition: all .25s; letter-spacing: -.01em;
+      box-shadow: 0 6px 24px rgba(124,58,237,.45);
+    }
+    .btn:hover:not(:disabled) {
+      transform: translateY(-2px); box-shadow: 0 12px 32px rgba(124,58,237,.55);
+    }
+    .btn:disabled { background: rgba(255,255,255,.1); cursor: not-allowed; transform: none; box-shadow: none; color: var(--muted); }
+    .btn-row { text-align: center; }
+    .kbd-hint { color: var(--muted); font-size: .78rem; margin-top: 10px; }
+    kbd {
+      padding: 2px 7px; background: rgba(255,255,255,.08);
+      border: 1px solid rgba(255,255,255,.13); border-radius: 5px;
+      font-size: .72rem; color: rgba(255,255,255,.4);
+    }
 
-        @keyframes fadeIn {
-            from {
-                opacity: 0;
-                transform: translateY(10px);
-            }
+    /* ── Error ── */
+    .error-box {
+      display: none; padding: 14px 18px;
+      background: rgba(239,68,68,.15); border: 1px solid rgba(239,68,68,.35);
+      border-radius: 12px; color: #fca5a5; margin-top: 16px;
+      font-weight: 500; font-size: .9rem;
+    }
 
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
-        }
+    /* ── Progress card ── */
+    #progress-card { display: none; }
+    .status-label { font-size: 1rem; color: var(--text); margin-bottom: 18px; font-weight: 600; }
+    .progress-bar-wrap {
+      height: 8px; background: rgba(255,255,255,.08);
+      border-radius: 99px; overflow: hidden;
+    }
+    .progress-bar-fill {
+      height: 100%; width: 0%; border-radius: 99px;
+      background: var(--accent-g);
+      transition: width .6s ease; box-shadow: 0 0 12px rgba(124,58,237,.5);
+    }
+    .progress-pct { text-align: left; font-size: .82rem; color: var(--muted); margin-top: 8px; }
+    .progress-eta { font-size: .8rem; color: var(--muted); margin-top: 4px; }
+    .spinner {
+      display: inline-block; width: 18px; height: 18px;
+      border: 2px solid rgba(255,255,255,.15); border-top-color: #a78bfa;
+      border-radius: 50%; animation: spin 1s linear infinite;
+      vertical-align: middle; margin-right: 8px;
+    }
 
-        /* Upload Area */
-        .upload-area {
-            border: 3px dashed #CBD5E1;
-            border-radius: 16px;
-            padding: 60px 40px;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            background: rgba(255, 255, 255, 0.5);
-        }
+    /* ── Results card ── */
+    #results-card { display: none; }
+    .section-title {
+      font-size: 1.15rem; font-weight: 700; color: #c4b5fd;
+      border-right: 3px solid #db2777;
+      padding-right: 12px; margin-bottom: 18px;
+    }
 
-        .upload-area:hover,
-        .upload-area.drag-over {
-            border-color: var(--primary);
-            background: rgba(240, 245, 255, 0.6);
-            transform: scale(1.02);
-        }
+    /* ── Results action bar ── */
+    .results-actions {
+      display: flex; gap: 8px; flex-wrap: wrap;
+      margin-bottom: 28px; padding-bottom: 24px;
+      border-bottom: 1px solid rgba(255,255,255,.07);
+    }
+    .action-btn {
+      padding: 8px 18px;
+      border: 1px solid rgba(255,255,255,.12);
+      background: rgba(255,255,255,.05);
+      border-radius: 99px; font-size: .82rem; font-weight: 500;
+      cursor: pointer; color: var(--text); transition: all .2s;
+      display: flex; align-items: center; gap: 6px; font-family: inherit;
+    }
+    .action-btn:hover { border-color: rgba(124,58,237,.5); color: #c4b5fd; background: rgba(124,58,237,.1); }
+    .action-btn.success-flash { border-color: var(--success); color: #6ee7b7; }
 
-        .icon-cloud {
-            font-size: 64px;
-            color: #9CA3AF;
-            margin-bottom: 20px;
-            transition: color 0.3s;
-        }
+    /* ── Copyable ── */
+    .copyable-wrap { position: relative; }
+    .copy-btn {
+      position: absolute; top: 0; left: 0;
+      padding: 4px 12px;
+      background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.12);
+      border-radius: 8px; font-size: .75rem; cursor: pointer;
+      color: var(--muted); transition: all .2s; display: flex; align-items: center; gap: 4px;
+      font-family: inherit;
+    }
+    .copy-btn:hover { border-color: rgba(124,58,237,.5); color: #c4b5fd; }
+    .copy-btn.copied { border-color: var(--success); color: #6ee7b7; }
+    .summary-text {
+      line-height: 1.9; color: var(--text); font-size: .95rem;
+      white-space: pre-wrap; padding-top: 6px;
+    }
 
-        .upload-area:hover .icon-cloud {
-            color: var(--primary);
-        }
+    /* ── Chapters ── */
+    .chapters-list { display: flex; flex-direction: column; gap: 14px; }
+    .chapter {
+      background: rgba(255,255,255,.04);
+      border-radius: 14px; padding: 18px 20px;
+      border-right: 3px solid var(--accent1);
+      border: 1px solid rgba(255,255,255,.07);
+      border-right: 3px solid var(--accent1);
+    }
+    .chapter-title { font-weight: 700; font-size: 1rem; margin-bottom: 8px; color: #e2e8f0; }
+    .chapter-content { color: var(--muted); font-size: .9rem; line-height: 1.7; margin-bottom: 10px; }
+    .key-points { list-style: none; }
+    .key-points li::before { content: "◆ "; color: #db2777; font-size: .65rem; }
+    .key-points li { font-size: .85rem; color: var(--text); padding: 3px 0; }
 
-        .file-info {
-            display: none;
-            margin-top: 20px;
-            padding: 15px;
-            background: #EFF6FF;
-            border-radius: 12px;
-            color: var(--primary);
-            font-weight: 500;
-            align-items: center;
-            justify-content: center;
-            gap: 10px;
-        }
+    /* ── Transcript ── */
+    .transcript-toggle {
+      cursor: pointer; color: #a78bfa; font-size: .88rem;
+      font-weight: 500; text-decoration: underline;
+      margin-top: 10px; display: inline-block;
+    }
+    .transcript-box {
+      display: none; margin-top: 10px; padding: 16px;
+      background: rgba(0,0,0,.25); border-radius: 10px;
+      border: 1px solid rgba(255,255,255,.07);
+      font-size: .82rem; line-height: 1.7; max-height: 260px;
+      overflow-y: auto; color: var(--muted); direction: rtl;
+    }
 
-        /* URL Input */
-        .url-input-container {
-            max-width: 600px;
-            margin: 0 auto;
-        }
+    /* ── Quiz ── */
+    .quiz-list { display: flex; flex-direction: column; gap: 16px; }
+    .q-card {
+      background: rgba(255,255,255,.04);
+      border-radius: 16px; padding: 20px 22px;
+      border: 1px solid rgba(255,255,255,.08); transition: border-color .2s;
+    }
+    .q-card:hover { border-color: rgba(124,58,237,.3); }
+    .q-num { font-size: .75rem; color: var(--muted); font-weight: 700; margin-bottom: 8px; letter-spacing: .05em; text-transform: uppercase; }
+    .q-text { font-weight: 600; font-size: .95rem; margin-bottom: 14px; line-height: 1.6; color: var(--text); }
+    .options { display: flex; flex-direction: column; gap: 8px; }
+    .opt-btn {
+      width: 100%; text-align: right; padding: 11px 16px;
+      background: rgba(255,255,255,.04);
+      border: 1px solid rgba(255,255,255,.1);
+      border-radius: 10px; font-size: .9rem; font-family: inherit;
+      cursor: pointer; transition: all .2s; color: var(--text);
+    }
+    .opt-btn:hover:not(:disabled) {
+      background: rgba(124,58,237,.1); border-color: rgba(124,58,237,.4);
+    }
+    .opt-btn.correct { background: rgba(16,185,129,.15) !important; border-color: var(--success) !important; color: #6ee7b7 !important; }
+    .opt-btn.wrong   { background: rgba(239,68,68,.12)  !important; border-color: var(--error)   !important; color: #fca5a5 !important; }
+    .explanation {
+      display: none; margin-top: 12px; padding: 12px 16px;
+      background: rgba(245,158,11,.1); border-radius: 10px;
+      color: #fcd34d; font-size: .88rem; line-height: 1.6;
+      border-right: 3px solid var(--warning);
+    }
+    .q-score { font-size: .82rem; color: var(--muted); margin-top: 10px; text-align: left; }
+    .score-badge {
+      display: inline-block; padding: 6px 20px;
+      background: var(--accent-g);
+      color: white; border-radius: 99px; font-weight: 700; font-size: .9rem;
+      margin-bottom: 18px;
+      box-shadow: 0 4px 16px rgba(124,58,237,.3);
+    }
 
-        .url-input {
-            width: 100%;
-            padding: 18px 24px;
-            border: 2px solid #E5E7EB;
-            border-radius: 16px;
-            font-size: 1.1rem;
-            text-align: right;
-            transition: all 0.3s;
-            box-sizing: border-box;
-        }
+    /* ── Reset btn ── */
+    .reset-btn {
+      padding: 12px 28px;
+      background: rgba(255,255,255,.07);
+      border: 1px solid rgba(255,255,255,.12);
+      color: var(--text); border-radius: 99px; cursor: pointer;
+      font-size: .92rem; margin-top: 28px; transition: all .2s;
+      font-family: inherit;
+    }
+    .reset-btn:hover { background: rgba(255,255,255,.12); }
 
-        .url-input:focus {
-            outline: none;
-            border-color: var(--primary);
-            box-shadow: 0 0 0 4px rgba(79, 70, 229, 0.1);
-        }
+    /* ── History card ── */
+    #history-card { display: none; }
+    .history-header {
+      display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px;
+    }
+    .history-header h2 { font-size: 1rem; font-weight: 700; color: var(--text); }
+    .history-close {
+      background: none; border: none; cursor: pointer;
+      color: var(--muted); font-size: 1.1rem; padding: 4px 8px;
+    }
+    .history-empty { color: var(--muted); font-size: .88rem; text-align: center; padding: 20px; }
+    .history-list { display: flex; flex-direction: column; gap: 8px; }
+    .history-item {
+      display: flex; align-items: center; gap: 12px;
+      padding: 12px 16px;
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 12px; cursor: pointer; transition: all .2s;
+      background: rgba(255,255,255,.03);
+    }
+    .history-item:hover { border-color: rgba(124,58,237,.4); background: rgba(124,58,237,.07); }
+    .history-item.failed { opacity: .45; cursor: default; }
+    .history-item.failed:hover { border-color: rgba(255,255,255,.08); background: rgba(255,255,255,.03); }
+    .h-status { font-size: 1rem; flex-shrink: 0; }
+    .h-info { flex: 1; min-width: 0; }
+    .h-url { font-size: .82rem; font-weight: 500; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; direction: ltr; text-align: right; }
+    .h-meta { font-size: .72rem; color: var(--muted); margin-top: 2px; }
+    .h-badge {
+      font-size: .7rem; padding: 3px 10px; border-radius: 99px; font-weight: 700; flex-shrink: 0;
+    }
+    .h-badge.completed { background: rgba(16,185,129,.15); color: #6ee7b7; border: 1px solid rgba(16,185,129,.25); }
+    .h-badge.failed    { background: rgba(239,68,68,.12);  color: #fca5a5; border: 1px solid rgba(239,68,68,.2); }
+    .h-badge.running   { background: rgba(124,58,237,.15); color: #c4b5fd; border: 1px solid rgba(124,58,237,.25); }
 
-        .url-hint {
-            color: var(--text-sub);
-            font-size: 0.9rem;
-            margin-top: 12px;
-        }
+    /* ── History toggle button (fixed) ── */
+    .history-toggle-btn {
+      position: fixed; bottom: 24px; left: 24px;
+      display: flex; align-items: center; gap: 8px;
+      padding: 10px 20px;
+      background: rgba(255,255,255,.07);
+      backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+      border: 1px solid rgba(255,255,255,.12); border-radius: 99px;
+      cursor: pointer; font-size: .82rem; font-weight: 500;
+      color: rgba(255,255,255,.55);
+      box-shadow: 0 4px 20px rgba(0,0,0,.35);
+      transition: all .2s; font-family: inherit;
+    }
+    .history-toggle-btn:hover { color: #fff; border-color: rgba(124,58,237,.5); }
 
-        /* Button */
-        button.action-btn {
-            background: linear-gradient(135deg, var(--primary), var(--secondary));
-            color: white;
-            border: none;
-            padding: 16px 40px;
-            border-radius: 50px;
-            font-size: 1.2rem;
-            font-weight: 600;
-            cursor: pointer;
-            margin-top: 30px;
-            transition: all 0.3s;
-            box-shadow: 0 4px 15px rgba(79, 70, 229, 0.4);
-        }
+    /* ── Stats row ── */
+    .stats {
+      display: flex; gap: 14px; justify-content: center;
+      margin-top: 8px;
+    }
+    .stat {
+      display: flex; align-items: center; gap: 6px;
+      font-size: .73rem; color: rgba(255,255,255,.22); font-weight: 500;
+    }
+    .stat-dot { width: 5px; height: 5px; border-radius: 50%; background: #10b981; flex-shrink: 0; }
 
-        button.action-btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 8px 25px rgba(79, 70, 229, 0.5);
-        }
+    /* ── Animations ── */
+    @keyframes fadeIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } }
+    @keyframes spin   { to { transform: rotate(360deg); } }
 
-        button.action-btn:disabled {
-            background: #9CA3AF;
-            cursor: not-allowed;
-            transform: none;
-            box-shadow: none;
-        }
+    /* ════════════════════════════════════════
+       MOBILE RESPONSIVE
+       ════════════════════════════════════════ */
+    @media (max-width: 520px) {
+      body { padding: 0 12px 80px; }
 
-        /* Loading */
-        .loader {
-            display: none;
-            margin: 40px auto;
-            width: 50px;
-            height: 50px;
-            border: 5px solid #f3f3f3;
-            border-top: 5px solid var(--primary);
-            border-radius: 50%;
-            animation: spin 1s linear infinite;
-        }
+      .wrapper { padding-top: 32px; }
 
-        @keyframes spin {
-            0% {
-                transform: rotate(0deg);
-            }
+      .brand-icon { width: 48px; height: 48px; font-size: 1.4rem; border-radius: 14px; }
+      .brand-title { font-size: 1.55rem; }
+      .brand-sub { font-size: .82rem; }
 
-            100% {
-                transform: rotate(360deg);
-            }
-        }
+      .card { padding: 20px 18px; border-radius: 18px; }
 
-        .status-text {
-            display: none;
-            color: var(--text-sub);
-            margin-top: 15px;
-            font-size: 1.1rem;
-            animation: pulse 2s infinite;
-        }
+      .tab { font-size: .8rem; padding: 9px 0; }
 
-        @keyframes pulse {
-            0% {
-                opacity: 0.6;
-            }
+      .url-input { font-size: .88rem; padding: 12px 14px; }
 
-            50% {
-                opacity: 1;
-            }
+      .mode-row { gap: 7px; }
+      .mode-opt { padding: 11px 6px; border-radius: 12px; }
+      .mode-icon { font-size: 1.3rem; margin-bottom: 4px; }
+      .mode-name { font-size: .72rem; }
+      .mode-desc { font-size: .63rem; }
 
-            100% {
-                opacity: 0.6;
-            }
-        }
+      .btn { padding: 13px 32px; font-size: .95rem; border-radius: 12px; }
 
-        #error-msg {
-            color: var(--error);
-            display: none;
-            margin-top: 20px;
-            font-weight: bold;
-            padding: 15px;
-            background: #FEE2E2;
-            border-radius: 12px;
-        }
+      .results-actions { gap: 6px; }
+      .action-btn { padding: 7px 14px; font-size: .78rem; }
 
-        /* Results */
-        #results {
-            display: none;
-            margin-top: 50px;
-            text-align: right;
-            border-top: 2px solid #E5E7EB;
-            padding-top: 30px;
-            animation: slideUp 0.6s ease-out;
-        }
+      .section-title { font-size: 1rem; }
 
-        @keyframes slideUp {
-            from {
-                opacity: 0;
-                transform: translateY(20px);
-            }
+      .q-card { padding: 16px 14px; }
+      .q-text { font-size: .88rem; }
+      .opt-btn { padding: 10px 12px; font-size: .85rem; }
 
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
-        }
+      .chapter { padding: 14px 16px; }
 
-        .summary-box {
-            background: white;
-            padding: 30px;
-            border-radius: 16px;
-            margin-bottom: 30px;
-            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
-            line-height: 1.8;
-        }
+      .history-toggle-btn { bottom: 16px; left: 12px; padding: 8px 14px; font-size: .78rem; }
 
-        .summary-title {
-            color: var(--primary);
-            font-size: 1.5rem;
-            margin-bottom: 20px;
-            border-right: 4px solid var(--secondary);
-            padding-right: 15px;
-        }
+      .stats { gap: 8px; }
+      .stat { font-size: .68rem; }
 
-        .quiz-item {
-            background: white;
-            padding: 24px;
-            border-radius: 12px;
-            margin-bottom: 20px;
-            border: 1px solid #E5E7EB;
-            transition: transform 0.2s;
-        }
+      .drop-zone { padding: 32px 18px; }
+      .drop-zone .icon { font-size: 36px; }
+    }
 
-        .quiz-item:hover {
-            transform: translateY(-2px);
-            border-color: var(--primary);
-        }
+    /* ════════════════════════════════════════
+       PRINT STYLES
+       ════════════════════════════════════════ */
+    @media print {
+      /* Reset to white, readable page */
+      * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 
-        .question {
-            font-weight: 700;
-            margin-bottom: 15px;
-            font-size: 1.1rem;
-        }
+      body {
+        background: #fff !important;
+        color: #1a1a2e !important;
+        padding: 0 !important;
+        font-family: 'Rubik', Arial, sans-serif !important;
+      }
 
-        .option-btn {
-            display: block;
-            width: 100%;
-            background: #F9FAFB;
-            border: 1px solid #D1D5DB;
-            color: var(--text-main);
-            padding: 12px;
-            border-radius: 8px;
-            font-size: 1rem;
-            text-align: right;
-            margin-top: 8px;
-            cursor: pointer;
-            transition: all 0.2s;
-        }
+      /* Hide everything not needed for print */
+      .bg-orbs,
+      .brand,
+      .stats,
+      #input-card,
+      #progress-card,
+      #history-card,
+      .history-toggle-btn,
+      .results-actions,
+      .copy-btn,
+      .transcript-toggle,
+      .reset-btn,
+      #score-badge { display: none !important; }
 
-        .option-btn:hover:not(:disabled) {
-            background: #EEF2FF;
-            border-color: var(--primary);
-        }
+      /* Show results even if JS set display:none */
+      #results-card { display: block !important; }
 
-        .correct {
-            background: #D1FAE5 !important;
-            border-color: #10B981 !important;
-            color: #065F46 !important;
-        }
+      /* Solid white card, no glass */
+      .card {
+        background: #fff !important;
+        backdrop-filter: none !important;
+        -webkit-backdrop-filter: none !important;
+        border: 1px solid #e0e0e0 !important;
+        box-shadow: none !important;
+        border-radius: 8px !important;
+        padding: 0 !important;
+        margin: 0 !important;
+      }
 
-        .incorrect {
-            background: #FEE2E2 !important;
-            border-color: #EF4444 !important;
-            color: #7F1D1D !important;
-        }
+      .wrapper { max-width: 100% !important; padding: 0 !important; }
 
-        .explanation {
-            margin-top: 15px;
-            padding: 10px;
-            background: #FFFBEB;
-            border-radius: 8px;
-            color: #92400E;
-            font-size: 0.95rem;
-            display: none;
-        }
+      /* Typography */
+      .section-title {
+        color: #4F46E5 !important;
+        border-right-color: #EC4899 !important;
+        font-size: 1.1rem !important;
+        margin-top: 24px;
+        page-break-after: avoid;
+      }
 
-        .reset-btn {
-            background: #6B7280;
-            color: white;
-            border: none;
-            padding: 12px 30px;
-            border-radius: 50px;
-            font-size: 1rem;
-            cursor: pointer;
-            margin-top: 30px;
-        }
+      .summary-text {
+        color: #1a1a2e !important;
+        font-size: .92rem !important;
+        line-height: 1.8 !important;
+      }
 
-        .reset-btn:hover {
-            background: #4B5563;
-        }
-    </style>
+      /* Chapters */
+      .chapter {
+        background: #f8f8ff !important;
+        border-right-color: #4F46E5 !important;
+        border-color: #e0e0e0 !important;
+        page-break-inside: avoid;
+        margin-bottom: 10px;
+      }
+      .chapter-title { color: #1a1a2e !important; }
+      .chapter-content { color: #444 !important; }
+      .key-points li { color: #1a1a2e !important; }
+      .key-points li::before { color: #EC4899 !important; }
+
+      /* Quiz */
+      .q-card {
+        background: #fff !important;
+        border-color: #ddd !important;
+        page-break-inside: avoid;
+      }
+      .q-num { color: #888 !important; }
+      .q-text { color: #1a1a2e !important; }
+      .opt-btn {
+        background: #f5f5f5 !important;
+        border-color: #ddd !important;
+        color: #1a1a2e !important;
+        text-align: right;
+      }
+      .opt-btn.correct { background: #d1fae5 !important; border-color: #10b981 !important; color: #065f46 !important; }
+      .opt-btn.wrong   { background: #fee2e2 !important; border-color: #ef4444 !important; color: #7f1d1d !important; }
+      .explanation {
+        display: block !important;
+        background: #fffbeb !important;
+        color: #92400e !important;
+        border-right-color: #f59e0b !important;
+      }
+
+      /* Transcript */
+      .transcript-box {
+        display: block !important;
+        background: #f9f9f9 !important;
+        color: #444 !important;
+        border-color: #ddd !important;
+        max-height: none !important;
+      }
+
+      /* Page breaks */
+      #chapters-section { page-break-before: always; }
+      #quiz-list > .q-card { page-break-inside: avoid; }
+    }
+  </style>
 </head>
-
 <body>
+  <div style="position:fixed;top:16px;left:16px;z-index:1000">
+    <form method="POST" action="/api/auth/logout">
+      <button type="submit" style="background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.15);color:rgba(255,255,255,0.6);padding:8px 16px;border-radius:8px;cursor:pointer;font-size:0.85rem">
+        יציאה
+      </button>
+    </form>
+  </div>
 
-    <div class="container">
-        <h1>עוזר לימודי חכם</h1>
-        <p class="subtitle">העלה הקלטה או הדבק קישור - קבל סיכום ומבחן מיידי 🚀</p>
+<!-- Background orbs -->
+<div class="bg-orbs">
+  <div class="orb orb1"></div>
+  <div class="orb orb2"></div>
+  <div class="orb orb3"></div>
+</div>
 
-        <!-- Tabs -->
-        <div class="tabs" id="tabs-container">
-            <button class="tab-btn active" onclick="switchTab('file')">📁 העלאת קובץ</button>
-            <button class="tab-btn" onclick="switchTab('url')">🔗 קישור לסרטון</button>
-        </div>
+<div class="wrapper">
 
-        <!-- File Upload Tab -->
-        <div class="tab-content active" id="file-tab">
-            <div class="upload-area" id="drop-zone">
-                <div class="icon-cloud">☁️</div>
-                <h3>גרור קובץ לכאן או לחץ לבחירה</h3>
-                <p style="color: #9CA3AF; margin-top: 10px;">MP3, M4A, WAV (עד 500MB)</p>
-                <input type="file" id="file-input" hidden accept="audio/*">
-                <div class="file-info" id="file-info">
-                    <span>📎</span>
-                    <span id="filename">שם הקובץ</span>
-                </div>
-            </div>
-            <button class="action-btn" id="analyze-file-btn" disabled>נתח הקלטה ✨</button>
-        </div>
+  <!-- Brand -->
+  <div class="brand">
+    <div class="brand-icon">🎓</div>
+    <div class="brand-title">עוזר לימודי חכם</div>
+    <div class="brand-sub">הדבק קישור Zoom או העלה קובץ אודיו<br>וקבל סיכום מפורט ומבחן אמריקאי תוך דקות 🚀</div>
+  </div>
 
-        <!-- URL Tab -->
-        <div class="tab-content" id="url-tab">
-            <div class="url-input-container">
-                <input type="text" class="url-input" id="url-input"
-                    placeholder="הדבק קישור לסרטון (YouTube, Zoom, וכו')">
-                <p class="url-hint">💡 תומך ב-YouTube, Zoom, Vimeo ועוד מאות אתרים</p>
-            </div>
-            <button class="action-btn" id="analyze-url-btn">נתח מקישור 🎬</button>
-        </div>
+<!-- ═══════════════ INPUT CARD ═══════════════ -->
+<div class="card" id="input-card">
 
-        <!-- Loading -->
-        <div class="loader" id="loader"></div>
-        <div class="status-text" id="status-text">מוריד ומעבד... זה עשוי לקחת כמה דקות...</div>
-        <div id="error-msg"></div>
+  <!-- Tabs -->
+  <div class="tabs">
+    <button class="tab active" onclick="switchTab('url')">🔗 קישור Zoom</button>
+    <button class="tab"        onclick="switchTab('file')">📁 העלאת קובץ</button>
+  </div>
 
-        <!-- Results -->
-        <div id="results">
-            <div class="summary-box">
-                <h2 class="summary-title">📝 סיכום</h2>
-                <div id="summary-content"></div>
-            </div>
-
-            <h2 class="summary-title" style="margin-top: 40px;">🧠 בחן את עצמך</h2>
-            <div id="quiz-container"></div>
-
-            <button class="reset-btn" onclick="resetUI()">התחל מחדש ↩️</button>
-        </div>
+  <!-- URL tab -->
+  <div class="tab-pane active" id="tab-url">
+    <div class="url-wrap">
+      <input type="text" class="url-input" id="url-input"
+             placeholder="https://admin-ort-org-il.zoom.us/rec/share/..." />
     </div>
+    <p class="url-hint">💡 לקישורי Zoom פרטיים — השתמש בתוסף Chrome לשליחה אוטומטית</p>
+  </div>
 
-    <script>
-        const dropZone = document.getElementById('drop-zone');
-        const fileInput = document.getElementById('file-input');
-        const analyzeFileBtn = document.getElementById('analyze-file-btn');
-        const analyzeUrlBtn = document.getElementById('analyze-url-btn');
-        const urlInput = document.getElementById('url-input');
-        const fileInfo = document.getElementById('file-info');
-        const filenameSpan = document.getElementById('filename');
-        const loader = document.getElementById('loader');
-        const statusText = document.getElementById('status-text');
-        const errorMsg = document.getElementById('error-msg');
-        const resultsDiv = document.getElementById('results');
-        const summaryContent = document.getElementById('summary-content');
-        const quizContainer = document.getElementById('quiz-container');
-        const tabsContainer = document.getElementById('tabs-container');
+  <!-- File upload tab -->
+  <div class="tab-pane" id="tab-file">
+    <div class="drop-zone" id="drop-zone">
+      <div class="icon">☁️</div>
+      <h3>גרור קובץ לכאן או לחץ לבחירה</h3>
+      <p>MP3, MP4, M4A, WAV, MKV, WEBM — עד 600MB</p>
+      <input type="file" id="file-input" hidden
+             accept=".mp3,.mp4,.m4a,.wav,.mkv,.webm,.avi" />
+      <div class="file-badge" id="file-badge">
+        <span>📎</span><span id="file-name"></span>
+      </div>
+    </div>
+  </div>
 
-        let selectedFile = null;
+  <!-- Mode selector -->
+  <div style="margin-top:22px;">
+    <div class="mode-label">בחר מצב עיבוד</div>
+    <div class="mode-row" id="mode-row">
+      <div class="mode-opt selected" data-mode="gemini_direct" onclick="selectMode(this)">
+        <div class="mode-icon">⚡</div>
+        <div class="mode-name">Gemini Direct</div>
+        <div class="mode-desc">מהיר · 2-3 דקות<br>אודיו → AI</div>
+      </div>
+      <div class="mode-opt" data-mode="whisper_local" onclick="selectMode(this)">
+        <div class="mode-icon">🔒</div>
+        <div class="mode-name">Whisper מקומי</div>
+        <div class="mode-desc">פרטי · 15-20 דקות<br>תמלול מקומי</div>
+      </div>
+      <div class="mode-opt" data-mode="whisper_api" onclick="selectMode(this)">
+        <div class="mode-icon">☁️</div>
+        <div class="mode-name">OpenAI Whisper</div>
+        <div class="mode-desc">מהיר · דורש API<br>חיתוך שקט</div>
+      </div>
+    </div>
+  </div>
 
-        // Tab switching
-        function switchTab(tab) {
-            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
-            document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+  <div class="btn-row">
+    <button class="btn" id="submit-btn" onclick="submit()">✨ עבד שיעור</button>
+    <div class="kbd-hint">לחץ <kbd>Enter</kbd> לשליחה</div>
+  </div>
+  <div class="error-box" id="error-box"></div>
+</div>
 
-            if (tab === 'file') {
-                document.querySelector('.tab-btn:first-child').classList.add('active');
-                document.getElementById('file-tab').classList.add('active');
-            } else {
-                document.querySelector('.tab-btn:last-child').classList.add('active');
-                document.getElementById('url-tab').classList.add('active');
-            }
+<!-- stats row -->
+<div class="stats">
+  <div class="stat"><div class="stat-dot"></div>שרת פעיל</div>
+  <div class="stat">·</div>
+  <div class="stat">3 מצבי עיבוד</div>
+  <div class="stat">·</div>
+  <div class="stat">תמיכה בעברית</div>
+</div>
+
+<!-- ═══════════════ PROGRESS CARD ═══════════════ -->
+<div class="card" id="progress-card" style="margin-top:16px;">
+  <div class="status-label" id="status-label">
+    <span class="spinner"></span>מתחיל עיבוד...
+  </div>
+  <div class="progress-bar-wrap">
+    <div class="progress-bar-fill" id="progress-fill"></div>
+  </div>
+  <div class="progress-pct" id="progress-pct">0%</div>
+  <div class="progress-eta" id="progress-eta"></div>
+</div>
+
+<!-- ═══════════════ RESULTS CARD ═══════════════ -->
+<div class="card" id="results-card" style="margin-top:16px;">
+
+  <!-- Action bar -->
+  <div class="results-actions">
+    <button class="action-btn" onclick="exportMarkdown()">⬇️ ייצוא Markdown</button>
+    <button class="action-btn" id="copy-all-btn" onclick="copyAll()">📋 העתק הכל</button>
+    <button class="action-btn" onclick="window.print()">🖨️ הדפסה</button>
+  </div>
+
+  <!-- Summary -->
+  <div class="section-title">📝 סיכום השיעור</div>
+  <div class="copyable-wrap">
+    <button class="copy-btn" onclick="copySection('summary-text', this)">📋 העתק</button>
+    <div class="summary-text" id="summary-text"></div>
+  </div>
+
+  <!-- Chapters -->
+  <div id="chapters-section" style="margin-top:32px;">
+    <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;">
+      <span>📚 פרקים ונושאים</span>
+      <button class="copy-btn" style="position:static;" onclick="copySection('chapters-list', this)">📋 העתק</button>
+    </div>
+    <div class="chapters-list" id="chapters-list"></div>
+  </div>
+
+  <!-- Transcript (collapsible) -->
+  <div id="transcript-section" style="display:none; margin-top:24px;">
+    <span class="transcript-toggle" onclick="toggleTranscript()">▶ הצג תמלול גולמי</span>
+    <div class="transcript-box" id="transcript-box"></div>
+  </div>
+
+  <!-- Quiz -->
+  <div style="margin-top:36px;">
+    <div class="section-title">🧠 מבחן — בחן את עצמך</div>
+    <div class="score-badge" id="score-badge" style="display:none">ציון: 0 / 0</div>
+    <div class="quiz-list" id="quiz-list"></div>
+  </div>
+
+  <button class="reset-btn" onclick="reset()">↩️ עיבוד שיעור נוסף</button>
+</div>
+
+<!-- ═══════════════ HISTORY CARD ═══════════════ -->
+<div class="card" id="history-card" style="margin-top:16px;">
+  <div class="history-header">
+    <h2>🕘 היסטוריה</h2>
+    <button class="history-close" onclick="toggleHistory()">✕</button>
+  </div>
+  <div id="history-content"></div>
+</div>
+
+</div><!-- /wrapper -->
+
+<!-- ═══════════════ HISTORY TOGGLE BUTTON ═══════════════ -->
+<button class="history-toggle-btn" onclick="toggleHistory()" id="history-toggle-btn">
+  🕘 היסטוריה
+</button>
+
+<script>
+  // ══════════════════════════════════════════════════════════════════════════
+  // State
+  // ══════════════════════════════════════════════════════════════════════════
+  let currentTab    = 'url';
+  let selectedMode  = 'gemini_direct';
+  let selectedFile  = null;
+  let pollTimer     = null;
+  let quizScore     = { correct: 0, total: 0 };
+  let currentResult = null;
+  let currentSource = '';
+  let historyVisible = false;
+  let processingStartTime = null;
+
+  // Progress creep state
+  let creepTimer        = null;
+  let lastRealProgress  = 0;
+  let lastProgressTime  = 0;
+  let visualProgress    = 0;
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // Keyboard shortcut — Enter to submit
+  // ══════════════════════════════════════════════════════════════════════════
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey && document.getElementById('input-card').style.display !== 'none') {
+      const active = document.activeElement;
+      // Only fire when the URL input is focused OR nothing specific is focused
+      if (!active || active === document.body || active.id === 'url-input') {
+        e.preventDefault();
+        submit();
+      }
+    }
+    if (e.key === 'Escape' && document.getElementById('results-card').style.display === 'block') {
+      reset();
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // Tab & mode switching
+  // ══════════════════════════════════════════════════════════════════════════
+  function switchTab(tab) {
+    currentTab = tab;
+    document.querySelectorAll('.tab').forEach((b,i) => {
+      b.classList.toggle('active', (tab === 'url' && i === 0) || (tab === 'file' && i === 1));
+    });
+    document.getElementById('tab-url' ).classList.toggle('active', tab === 'url');
+    document.getElementById('tab-file').classList.toggle('active', tab === 'file');
+  }
+
+  function selectMode(el) {
+    document.querySelectorAll('.mode-opt').forEach(m => m.classList.remove('selected'));
+    el.classList.add('selected');
+    selectedMode = el.dataset.mode;
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // File drag & drop
+  // ══════════════════════════════════════════════════════════════════════════
+  const dropZone  = document.getElementById('drop-zone');
+  const fileInput = document.getElementById('file-input');
+
+  dropZone.addEventListener('click',     () => fileInput.click());
+  dropZone.addEventListener('dragover',  e => { e.preventDefault(); dropZone.classList.add('over'); });
+  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('over'));
+  dropZone.addEventListener('drop', e => {
+    e.preventDefault(); dropZone.classList.remove('over');
+    if (e.dataTransfer.files[0]) setFile(e.dataTransfer.files[0]);
+  });
+  fileInput.addEventListener('change', e => { if (e.target.files[0]) setFile(e.target.files[0]); });
+
+  function setFile(f) {
+    selectedFile = f;
+    document.getElementById('file-name').textContent = f.name;
+    document.getElementById('file-badge').style.display = 'flex';
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // Submit
+  // ══════════════════════════════════════════════════════════════════════════
+  async function submit() {
+    hideError();
+    let taskId;
+
+    try {
+      if (currentTab === 'url') {
+        const url = document.getElementById('url-input').value.trim();
+        if (!url) { showError('אנא הכנס קישור'); return; }
+        currentSource = url;
+        taskId = await submitUrl(url);
+      } else {
+        if (!selectedFile) { showError('אנא בחר קובץ'); return; }
+        currentSource = selectedFile.name;
+        taskId = await submitFile();
+      }
+    } catch (err) {
+      showError(err.message); return;
+    }
+
+    processingStartTime = Date.now();
+    showProgress();
+    startPolling(taskId);
+  }
+
+  async function submitUrl(url) {
+    const body = { url, mode: selectedMode, language: 'he' };
+    const r = await fetch('/api/tasks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) { const e = await r.json(); throw new Error(e.detail || 'שגיאה בשרת'); }
+    return (await r.json()).task_id;
+  }
+
+  async function submitFile() {
+    const fd = new FormData();
+    fd.append('file', selectedFile);
+    fd.append('mode', selectedMode);
+    fd.append('language', 'he');
+    const r = await fetch('/api/tasks/upload', { method: 'POST', body: fd });
+    if (!r.ok) { const e = await r.json(); throw new Error(e.detail || 'שגיאה בשרת'); }
+    return (await r.json()).task_id;
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // Polling
+  // ══════════════════════════════════════════════════════════════════════════
+  function startPolling(taskId) {
+    pollTimer = setInterval(async () => {
+      try {
+        const r = await fetch(`/api/tasks/${taskId}`);
+        if (!r.ok) return;
+        const task = await r.json();
+        updateProgress(task.progress, task.message);
+
+        if (task.status === 'completed') {
+          clearInterval(pollTimer);
+          showResults(task.result);
+        } else if (task.status === 'failed') {
+          clearInterval(pollTimer);
+          hideProgress();
+          showError(task.error || 'העיבוד נכשל');
         }
+      } catch { /* retry next tick */ }
+    }, 2000);
+  }
 
-        // Drag & Drop
-        dropZone.addEventListener('dragover', (e) => {
-            e.preventDefault();
-            dropZone.classList.add('drag-over');
-        });
+  function _applyProgressBar(pct) {
+    document.getElementById('progress-fill').style.width = pct + '%';
+    document.getElementById('progress-pct').textContent  = Math.round(pct) + '%';
+  }
 
-        dropZone.addEventListener('dragleave', () => {
-            dropZone.classList.remove('drag-over');
-        });
+  function updateProgress(pct, msg) {
+    // Stop existing creep — a real update arrived
+    if (creepTimer) { clearInterval(creepTimer); creepTimer = null; }
 
-        dropZone.addEventListener('drop', (e) => {
-            e.preventDefault();
-            dropZone.classList.remove('drag-over');
-            if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
-        });
+    lastRealProgress = pct;
+    lastProgressTime = Date.now();
+    visualProgress   = pct;
 
-        dropZone.addEventListener('click', () => fileInput.click());
-        fileInput.addEventListener('change', (e) => {
-            if (e.target.files.length) handleFile(e.target.files[0]);
-        });
+    _applyProgressBar(pct);
+    document.getElementById('status-label').innerHTML =
+      '<span class="spinner"></span>' + (msg || 'מעבד...');
 
-        function handleFile(file) {
-            selectedFile = file;
-            filenameSpan.textContent = file.name;
-            fileInfo.style.display = 'flex';
-            analyzeFileBtn.disabled = false;
-            hideError();
+    // ETA based on real progress
+    if (processingStartTime && pct > 5) {
+      const elapsed = (Date.now() - processingStartTime) / 1000;
+      const totalEst = elapsed / (pct / 100);
+      const remaining = Math.max(0, totalEst - elapsed);
+      const etaEl = document.getElementById('progress-eta');
+      if (remaining > 10) {
+        const mins = Math.floor(remaining / 60);
+        const secs = Math.round(remaining % 60);
+        etaEl.textContent = mins > 0
+          ? `⏱️ זמן משוער: ${mins}:${String(secs).padStart(2,'0')} דקות`
+          : `⏱️ זמן משוער: ${secs} שניות`;
+      } else {
+        etaEl.textContent = '⏱️ כמעט מוכן...';
+      }
+    }
+
+    // Start creep: after 8s without a real update, inch bar forward slowly
+    if (pct < 100) {
+      creepTimer = setInterval(() => {
+        const stale = (Date.now() - lastProgressTime) / 1000;
+        if (stale > 8) {
+          const cap = Math.min(lastRealProgress + 30, 95);
+          if (visualProgress < cap) {
+            visualProgress = Math.min(visualProgress + 0.15, cap);
+            _applyProgressBar(visualProgress);
+          }
         }
+      }, 1000);
+    }
+  }
 
-        function showLoading(message) {
-            tabsContainer.style.display = 'none';
-            document.querySelectorAll('.tab-content').forEach(c => c.style.display = 'none');
-            loader.style.display = 'block';
-            statusText.style.display = 'block';
-            statusText.textContent = message;
-            hideError();
-            resultsDiv.style.display = 'none';
+  // ══════════════════════════════════════════════════════════════════════════
+  // Results rendering
+  // ══════════════════════════════════════════════════════════════════════════
+  function showResults(result) {
+    hideProgress();
+    currentResult = result;
+    document.getElementById('input-card').style.display = 'none';
+    document.querySelector('.brand').style.display = 'none';
+    document.querySelector('.stats').style.display = 'none';
+
+    // Summary
+    document.getElementById('summary-text').textContent = result.summary || '';
+
+    // Chapters
+    const cl = document.getElementById('chapters-list');
+    cl.innerHTML = '';
+    (result.chapters || []).forEach(ch => {
+      const kp = (ch.key_points || []).map(p => `<li>${p}</li>`).join('');
+      cl.innerHTML += `
+        <div class="chapter">
+          <div class="chapter-title">${ch.title}</div>
+          <div class="chapter-content">${ch.content}</div>
+          ${kp ? `<ul class="key-points">${kp}</ul>` : ''}
+        </div>`;
+    });
+    if (!(result.chapters || []).length)
+      document.getElementById('chapters-section').style.display = 'none';
+
+    // Transcript (Whisper mode only)
+    if (result.transcript) {
+      document.getElementById('transcript-box').textContent = result.transcript;
+      document.getElementById('transcript-section').style.display = 'block';
+    }
+
+    // Quiz
+    quizScore = { correct: 0, total: 0 };
+    const ql = document.getElementById('quiz-list');
+    ql.innerHTML = '';
+    (result.quiz || []).forEach((q, i) => {
+      quizScore.total++;
+      const opts = (q.options || []).map(o =>
+        `<button class="opt-btn" onclick="checkAnswer(this,'${esc(o)}','${esc(q.correct_answer)}')">${o}</button>`
+      ).join('');
+      ql.innerHTML += `
+        <div class="q-card">
+          <div class="q-num">שאלה ${i + 1}</div>
+          <div class="q-text">${q.question}</div>
+          <div class="options">${opts}</div>
+          <div class="explanation">💡 ${q.explanation || ''}</div>
+        </div>`;
+    });
+
+    document.getElementById('results-card').style.display = 'block';
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function esc(s) { return (s || '').replace(/'/g, "\\'").replace(/"/g, '&quot;'); }
+
+  window.checkAnswer = function(btn, selected, correct) {
+    const card    = btn.closest('.q-card');
+    const allBtns = card.querySelectorAll('.opt-btn');
+    const expDiv  = card.querySelector('.explanation');
+
+    allBtns.forEach(b => {
+      b.disabled = true;
+      if (b.textContent.trim() === correct.trim()) b.classList.add('correct');
+    });
+
+    const isCorrect = selected.trim() === correct.trim();
+    if (!isCorrect) btn.classList.add('wrong');
+    else { quizScore.correct++; }
+
+    if (expDiv) expDiv.style.display = 'block';
+
+    // Update score badge
+    const badge = document.getElementById('score-badge');
+    badge.style.display = 'inline-block';
+    badge.textContent = `ציון: ${quizScore.correct} / ${quizScore.total}`;
+
+    const pct = Math.round((quizScore.correct / quizScore.total) * 100);
+    badge.style.background =
+      pct >= 80 ? 'linear-gradient(135deg,#10B981,#059669)' :
+      pct >= 60 ? 'linear-gradient(135deg,#F59E0B,#D97706)' :
+                  'linear-gradient(135deg,#EF4444,#DC2626)';
+  };
+
+  function toggleTranscript() {
+    const box = document.getElementById('transcript-box');
+    const tog = document.querySelector('.transcript-toggle');
+    const open = box.style.display === 'block';
+    box.style.display = open ? 'none' : 'block';
+    tog.textContent = (open ? '▶' : '▼') + ' ' + (open ? 'הצג תמלול גולמי' : 'הסתר תמלול');
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // Copy helpers
+  // ══════════════════════════════════════════════════════════════════════════
+  function copySection(elementId, btn) {
+    const el = document.getElementById(elementId);
+    const text = el ? el.innerText : '';
+    navigator.clipboard.writeText(text).then(() => {
+      btn.classList.add('copied');
+      const orig = btn.innerHTML;
+      btn.innerHTML = '✅ הועתק';
+      setTimeout(() => { btn.classList.remove('copied'); btn.innerHTML = orig; }, 2000);
+    });
+  }
+
+  function copyAll() {
+    if (!currentResult) return;
+    const md = buildMarkdown(currentResult);
+    navigator.clipboard.writeText(md).then(() => {
+      const btn = document.getElementById('copy-all-btn');
+      btn.classList.add('success-flash');
+      const orig = btn.innerHTML;
+      btn.innerHTML = '✅ הועתק';
+      setTimeout(() => { btn.classList.remove('success-flash'); btn.innerHTML = orig; }, 2000);
+    });
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // Export as Markdown
+  // ══════════════════════════════════════════════════════════════════════════
+  function buildMarkdown(result) {
+    const lines = [];
+    const date = new Date().toLocaleDateString('he-IL');
+    lines.push(`# סיכום שיעור — ${date}`);
+    if (currentSource) lines.push(`> מקור: ${currentSource}`);
+    lines.push('');
+
+    if (result.summary) {
+      lines.push('## 📝 סיכום');
+      lines.push(result.summary);
+      lines.push('');
+    }
+
+    if ((result.chapters || []).length) {
+      lines.push('## 📚 פרקים ונושאים');
+      result.chapters.forEach((ch, i) => {
+        lines.push(`### ${i + 1}. ${ch.title}`);
+        lines.push(ch.content);
+        if (ch.key_points && ch.key_points.length) {
+          ch.key_points.forEach(p => lines.push(`- ${p}`));
         }
+        lines.push('');
+      });
+    }
 
-        function hideLoading() {
-            loader.style.display = 'none';
-            statusText.style.display = 'none';
+    if ((result.quiz || []).length) {
+      lines.push('## 🧠 מבחן');
+      result.quiz.forEach((q, i) => {
+        lines.push(`**שאלה ${i + 1}:** ${q.question}`);
+        (q.options || []).forEach(o => lines.push(`- ${o}`));
+        lines.push(`✅ תשובה נכונה: ${q.correct_answer}`);
+        if (q.explanation) lines.push(`💡 ${q.explanation}`);
+        lines.push('');
+      });
+    }
+
+    if (result.transcript) {
+      lines.push('## 📄 תמלול גולמי');
+      lines.push(result.transcript);
+    }
+
+    return lines.join('\n');
+  }
+
+  function exportMarkdown() {
+    if (!currentResult) return;
+    const md = buildMarkdown(currentResult);
+    const date = new Date().toISOString().slice(0, 10);
+    const blob = new Blob([md], { type: 'text/markdown; charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `lesson-summary-${date}.md`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // History
+  // ══════════════════════════════════════════════════════════════════════════
+  async function toggleHistory() {
+    historyVisible = !historyVisible;
+    const card = document.getElementById('history-card');
+    card.style.display = historyVisible ? 'block' : 'none';
+    if (historyVisible) await loadHistory();
+  }
+
+  async function loadHistory() {
+    const container = document.getElementById('history-content');
+    container.innerHTML = '<div class="history-empty">טוען...</div>';
+    try {
+      const r = await fetch('/api/tasks?limit=30');
+      const tasks = await r.json();
+      if (!tasks.length) {
+        container.innerHTML = '<div class="history-empty">אין היסטוריה עדיין</div>';
+        return;
+      }
+      const list = document.createElement('div');
+      list.className = 'history-list';
+      tasks.forEach(t => {
+        const item = document.createElement('div');
+        const isCompleted = t.status === 'completed';
+        const isFailed    = t.status === 'failed';
+        item.className = `history-item${isFailed ? ' failed' : ''}`;
+        const statusIcon = isCompleted ? '✅' : isFailed ? '❌' : '⏳';
+        const badgeClass = isCompleted ? 'completed' : isFailed ? 'failed' : 'running';
+        const badgeText  = isCompleted ? 'הושלם' : isFailed ? 'נכשל' : 'בתהליך';
+        const dt = new Date(t.created_at).toLocaleString('he-IL', { dateStyle: 'short', timeStyle: 'short' });
+        const shortUrl = (t.url || '').replace(/^upload:/, '📁 ').replace('https://', '').slice(0, 60);
+
+        item.innerHTML = `
+          <span class="h-status">${statusIcon}</span>
+          <div class="h-info">
+            <div class="h-url">${shortUrl || 'לא ידוע'}</div>
+            <div class="h-meta">${dt}</div>
+          </div>
+          <span class="h-badge ${badgeClass}">${badgeText}</span>`;
+
+        if (isCompleted) {
+          item.onclick = () => loadHistoryTask(t.id);
         }
+        list.appendChild(item);
+      });
+      container.innerHTML = '';
+      container.appendChild(list);
+    } catch {
+      container.innerHTML = '<div class="history-empty">שגיאה בטעינת ההיסטוריה</div>';
+    }
+  }
 
-        function showError(msg) {
-            errorMsg.textContent = msg;
-            errorMsg.style.display = 'block';
-            tabsContainer.style.display = 'flex';
-            document.getElementById('file-tab').style.display = 'block';
-        }
+  async function loadHistoryTask(taskId) {
+    try {
+      const r = await fetch(`/api/tasks/${taskId}`);
+      const task = await r.json();
+      if (task.result) {
+        currentSource = task.url || '';
+        toggleHistory();
+        showResults(task.result);
+      }
+    } catch {
+      alert('שגיאה בטעינת המשימה');
+    }
+  }
 
-        function hideError() {
-            errorMsg.style.display = 'none';
-        }
+  // ══════════════════════════════════════════════════════════════════════════
+  // UI helpers
+  // ══════════════════════════════════════════════════════════════════════════
+  function showProgress() {
+    document.getElementById('input-card').style.display    = 'none';
+    document.getElementById('progress-card').style.display = 'block';
+    document.getElementById('progress-eta').textContent    = '';
+    updateProgress(5, 'מתחיל עיבוד...');
+  }
+  function hideProgress() {
+    if (creepTimer) { clearInterval(creepTimer); creepTimer = null; }
+    document.getElementById('progress-card').style.display = 'none';
+  }
+  function showError(msg) {
+    const b = document.getElementById('error-box');
+    b.textContent = '❌ ' + msg;
+    b.style.display = 'block';
+    document.getElementById('input-card').style.display = 'block';
+  }
+  function hideError() {
+    document.getElementById('error-box').style.display = 'none';
+  }
 
-        function resetUI() {
-            resultsDiv.style.display = 'none';
-            tabsContainer.style.display = 'flex';
-            document.querySelectorAll('.tab-content').forEach(c => c.style.display = 'none');
-            document.getElementById('file-tab').style.display = 'block';
-            document.getElementById('file-tab').classList.add('active');
-            document.getElementById('url-tab').classList.remove('active');
-            document.querySelector('.tab-btn:first-child').classList.add('active');
-            document.querySelector('.tab-btn:last-child').classList.remove('active');
-            selectedFile = null;
-            fileInfo.style.display = 'none';
-            analyzeFileBtn.disabled = true;
-            urlInput.value = '';
-            hideError();
-        }
+  function reset() {
+    if (pollTimer)  clearInterval(pollTimer);
+    if (creepTimer) { clearInterval(creepTimer); creepTimer = null; }
+    document.getElementById('results-card').style.display = 'none';
+    document.getElementById('input-card').style.display   = 'block';
+    document.querySelector('.brand').style.display        = 'block';
+    document.querySelector('.stats').style.display        = 'flex';
+    document.getElementById('url-input').value = '';
+    selectedFile = null;
+    currentResult = null;
+    currentSource = '';
+    processingStartTime = null;
+    document.getElementById('file-badge').style.display = 'none';
+    quizScore = { correct: 0, total: 0 };
+    document.getElementById('score-badge').style.display = 'none';
+    document.getElementById('chapters-section').style.display = 'block';
+    document.getElementById('transcript-section').style.display = 'none';
+    hideError();
+    switchTab('url');
+  }
 
-        // Analyze File
-        analyzeFileBtn.addEventListener('click', async () => {
-            if (!selectedFile) return;
-            showLoading('מעלה ומנתח את ההקלטה...');
-
-            const formData = new FormData();
-            formData.append('file', selectedFile);
-
-            try {
-                const response = await fetch('/analyze', { method: 'POST', body: formData });
-                if (!response.ok) {
-                    const err = await response.json();
-                    throw new Error(err.detail || 'שגיאה בשרת');
-                }
-                const data = await response.json();
-                displayResults(data.result);
-            } catch (err) {
-                hideLoading();
-                showError(`שגיאה: ${err.message}`);
-            }
-        });
-
-        // Analyze URL
-        analyzeUrlBtn.addEventListener('click', async () => {
-            const url = urlInput.value.trim();
-            if (!url) {
-                showError('אנא הכנס קישור');
-                return;
-            }
-            showLoading('מוריד סרטון וממיר לאודיו... זה עשוי לקחת כמה דקות...');
-
-            try {
-                const response = await fetch('/analyze-url', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ url })
-                });
-                if (!response.ok) {
-                    const err = await response.json();
-                    throw new Error(err.detail || 'שגיאה בשרת');
-                }
-                const data = await response.json();
-                displayResults(data.result);
-            } catch (err) {
-                hideLoading();
-                showError(`שגיאה: ${err.message}`);
-            }
-        });
-
-        function displayResults(resultStr) {
-            hideLoading();
-            resultsDiv.style.display = 'block';
-
-            let data;
-            try {
-                const cleanStr = resultStr.replace(/```json/g, '').replace(/```/g, '').trim();
-                data = JSON.parse(cleanStr);
-            } catch (e) {
-                data = { summary: resultStr, quiz: [] };
-            }
-
-            summaryContent.innerHTML = `<p>${data.summary || resultStr}</p>`;
-            quizContainer.innerHTML = '';
-
-            if (data.quiz && data.quiz.length > 0) {
-                data.quiz.forEach((q, index) => {
-                    const qEl = document.createElement('div');
-                    qEl.className = 'quiz-item';
-
-                    // Support both 'correct_answer' and 'answer' fields
-                    const correctAnswer = q.correct_answer || q.answer || '';
-
-                    let optionsHtml = '';
-                    (q.options || []).forEach(opt => {
-                        optionsHtml += `<button class="option-btn" onclick="checkAnswer(this, '${opt.replace(/'/g, "\\'")}', '${correctAnswer.replace(/'/g, "\\'")}')">${opt}</button>`;
-                    });
-
-                    qEl.innerHTML = `
-                    <div class="question">${index + 1}. ${q.question}</div>
-                    <div class="options-grid">${optionsHtml}</div>
-                    <div class="explanation">💡 ${q.explanation || ''}</div>
-                `;
-                    quizContainer.appendChild(qEl);
-                });
-            }
-        }
-
-        window.checkAnswer = function (btn, selected, correct) {
-            const parent = btn.parentElement;
-            const allBtns = parent.querySelectorAll('.option-btn');
-            const explanation = parent.nextElementSibling;
-
-            allBtns.forEach(b => b.disabled = true);
-
-            if (selected === correct) {
-                btn.classList.add('correct');
-            } else {
-                btn.classList.add('incorrect');
-                allBtns.forEach(b => {
-                    if (b.innerText === correct) b.classList.add('correct');
-                });
-            }
-            if (explanation) explanation.style.display = 'block';
-        }
-    </script>
-
+  // Auto-load a specific task when arriving from the Chrome extension (?task=<id>)
+  const _taskFromUrl = new URLSearchParams(location.search).get('task');
+  if (_taskFromUrl) {
+    showProgress();
+    startPolling(_taskFromUrl);
+  }
+</script>
 </body>
-
 </html>
