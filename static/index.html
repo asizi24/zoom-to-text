@@ -868,6 +868,42 @@
     document.getElementById('progress-pct').textContent  = Math.round(pct) + '%';
   }
 
+  // Typical total processing time in seconds per mode (2-hour recording baseline)
+  const MODE_TYPICAL_SEC = { gemini_direct: 240, whisper_api: 600, whisper_local: 1800 };
+
+  function _estimateRemaining(pct) {
+    if (!processingStartTime || pct <= 5) return null;
+    const elapsed = (Date.now() - processingStartTime) / 1000;
+
+    // Linear interpolation from actual elapsed + current progress
+    const linearRemaining = elapsed / (pct / 100) - elapsed;
+
+    // Mode-based estimate: typical total minus elapsed
+    const typical = MODE_TYPICAL_SEC[selectedMode] || 300;
+    const modeRemaining = Math.max(0, typical - elapsed);
+
+    // Early on (pct < 30) trust the mode estimate more; later trust linear more
+    const weight = Math.min(1, pct / 60);
+    return Math.max(0, linearRemaining * weight + modeRemaining * (1 - weight));
+  }
+
+  function _updateEta(pct) {
+    const etaEl = document.getElementById('progress-eta');
+    const remaining = _estimateRemaining(pct);
+    if (remaining === null) { etaEl.textContent = ''; return; }
+
+    if (remaining <= 8) {
+      etaEl.textContent = '⏱️ כמעט מוכן...';
+    } else {
+      const mins = Math.floor(remaining / 60);
+      const secs = Math.round(remaining % 60);
+      const timeStr = mins > 0
+        ? `${mins}:${String(secs).padStart(2,'0')} דקות`
+        : `${secs} שניות`;
+      etaEl.textContent = `⏱️ זמן משוער לסיכום: ${timeStr}`;
+    }
+  }
+
   function updateProgress(pct, msg) {
     // Stop existing creep — a real update arrived
     if (creepTimer) { clearInterval(creepTimer); creepTimer = null; }
@@ -880,22 +916,7 @@
     document.getElementById('status-label').innerHTML =
       '<span class="spinner"></span>' + (msg || 'מעבד...');
 
-    // ETA based on real progress
-    if (processingStartTime && pct > 5) {
-      const elapsed = (Date.now() - processingStartTime) / 1000;
-      const totalEst = elapsed / (pct / 100);
-      const remaining = Math.max(0, totalEst - elapsed);
-      const etaEl = document.getElementById('progress-eta');
-      if (remaining > 10) {
-        const mins = Math.floor(remaining / 60);
-        const secs = Math.round(remaining % 60);
-        etaEl.textContent = mins > 0
-          ? `⏱️ זמן משוער: ${mins}:${String(secs).padStart(2,'0')} דקות`
-          : `⏱️ זמן משוער: ${secs} שניות`;
-      } else {
-        etaEl.textContent = '⏱️ כמעט מוכן...';
-      }
-    }
+    _updateEta(pct);
 
     // Start creep: after 8s without a real update, inch bar forward slowly
     if (pct < 100) {
@@ -907,6 +928,7 @@
             visualProgress = Math.min(visualProgress + 0.15, cap);
             _applyProgressBar(visualProgress);
           }
+          _updateEta(visualProgress); // refresh ETA every second
         }
       }, 1000);
     }
