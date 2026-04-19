@@ -146,7 +146,7 @@ async def _process_audio(
     Transcribe and/or summarize the audio depending on the selected mode.
     Returns a populated LessonResult.
     """
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     if mode == ProcessingMode.GEMINI_DIRECT:
         await state.update_task(
