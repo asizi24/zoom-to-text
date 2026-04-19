@@ -147,12 +147,12 @@ async def _mark_interrupted_tasks_failed():
 
 # ── CRUD ──────────────────────────────────────────────────────────────────────────
 
-async def create_task(task_id: str, url: str) -> TaskResponse:
+async def create_task(task_id: str, url: str, user_id: Optional[str] = None) -> TaskResponse:
     now = datetime.now(timezone.utc).isoformat()
     db = await _get_db()
     await db.execute(
-        "INSERT INTO tasks (id, status, progress, message, created_at, url) VALUES (?,?,?,?,?,?)",
-        [task_id, TaskStatus.PENDING.value, 0, "Task queued", now, url],
+        "INSERT INTO tasks (id, status, progress, message, created_at, url, user_id) VALUES (?,?,?,?,?,?,?)",
+        [task_id, TaskStatus.PENDING.value, 0, "Task queued", now, url, user_id],
     )
     await db.commit()
     return TaskResponse(
@@ -219,15 +219,23 @@ async def get_task(task_id: str) -> Optional[TaskResponse]:
     )
 
 
-async def list_tasks(limit: int = 50) -> list[dict]:
+async def list_tasks(limit: int = 50, user_id: Optional[str] = None) -> list[dict]:
     db = await _get_db()
     db.row_factory = aiosqlite.Row
-    async with db.execute(
-        "SELECT id, status, progress, message, created_at, url FROM tasks "
-        "ORDER BY created_at DESC LIMIT ?",
-        [limit],
-    ) as cursor:
-        rows = await cursor.fetchall()
+    if user_id:
+        async with db.execute(
+            "SELECT id, status, progress, message, created_at, url FROM tasks "
+            "WHERE user_id=? ORDER BY created_at DESC LIMIT ?",
+            [user_id, limit],
+        ) as cursor:
+            rows = await cursor.fetchall()
+    else:
+        async with db.execute(
+            "SELECT id, status, progress, message, created_at, url FROM tasks "
+            "ORDER BY created_at DESC LIMIT ?",
+            [limit],
+        ) as cursor:
+            rows = await cursor.fetchall()
     return [dict(row) for row in rows]
 
 
