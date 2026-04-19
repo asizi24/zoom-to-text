@@ -11,14 +11,16 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import state
 from app.api.routes import router
+from app.api.auth import router as auth_router
 from app.config import settings
 from app.services import transcriber
 
@@ -84,6 +86,7 @@ async def lifespan(app: FastAPI):
 
     # ── Shutdown ──
     watcher.cancel()
+    await state.close_db()
     logger.info("Server shutting down — goodbye")
 
 
@@ -98,7 +101,8 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # Lock this down in production if needed
+    allow_origins=[settings.cors_origin],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -106,6 +110,17 @@ app.add_middleware(
 # ── Routes ────────────────────────────────────────────────────────────────────────
 
 app.include_router(router, prefix="/api", tags=["tasks"])
+app.include_router(auth_router, prefix="/api", tags=["auth"])
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Catch-all so unhandled errors return clean JSON instead of raw HTML."""
+    logger.exception(f"Unhandled error on {request.method} {request.url.path}")
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error. Please try again."},
+    )
 
 if Path("static").exists():
     app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -117,13 +132,23 @@ async def health():
     return {"status": "ok", "version": "2.0.0"}
 
 
+@app.get("/login", response_class=HTMLResponse, include_in_schema=False)
+async def login_page():
+    """Serve the login page."""
+    login_path = Path("static/login.html")
+    if login_path.exists():
+        return FileResponse(login_path)
+    return HTMLResponse("<h1>Login</h1><p>static/login.html not found</p>")
+
+
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
-async def index():
-    """Serve the frontend."""
+async def index(request: Request):
+    """Serve the frontend. Redirect to /login if not authenticated."""
+    session_id = request.cookies.get("session_id")
+    user_id = await state.get_session_user(session_id) if session_id else None
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
     index_path = Path("static/index.html")
     if index_path.exists():
         return FileResponse(index_path)
-    return HTMLResponse(
-        "<h1>Zoom Transcriber</h1>"
-        "<p><a href='/docs'>📖 API Docs</a></p>"
-    )
+    return HTMLResponse("<h1>Zoom Transcriber</h1><p>static/index.html not found</p>")
