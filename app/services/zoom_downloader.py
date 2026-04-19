@@ -104,8 +104,7 @@ async def download_audio(
 
     if not Path(expected_output).exists():
         raise ZoomDownloadError(
-            "Audio extraction succeeded but output file was not found. "
-            "Ensure ffmpeg is installed."
+            "החילוץ הצליח אך קובץ האודיו לא נמצא — ודא ש-ffmpeg מותקן."
         )
 
     size_mb = Path(expected_output).stat().st_size / 1024 / 1024
@@ -141,25 +140,23 @@ def _raise_user_friendly_error(raw_error: str, had_cookies: bool) -> None:
     if any(k in err for k in ("password", "passcode", "403", "401", "forbidden", "login")):
         if had_cookies:
             raise ZoomDownloadError(
-                "Authentication failed even with session cookies. "
-                "Try refreshing the Zoom recording page in your browser, "
-                "then click 'Send to Transcriber' in the extension again."
+                "האימות נכשל למרות שנשלחו עוגיות סשן. "
+                "רענן את דף ההקלטה בדפדפן ולחץ שוב על 'שלח למתמלל' בתוסף."
             )
         raise ZoomDownloadError(
-            "This recording requires authentication. "
-            "Open the recording in your browser while logged into Zoom, "
-            "then use the Chrome extension to send it here."
+            "ההקלטה דורשת אימות. "
+            "פתח את ההקלטה בדפדפן תוך כדי שאתה מחובר ל-Zoom, "
+            "ואז השתמש בתוסף Chrome לשלוח אותה לכאן."
         )
 
     if "404" in err or "not found" in err:
         raise ZoomDownloadError(
-            "Recording not found (404). The link may have expired or been deleted."
+            "ההקלטה לא נמצאה (404). הקישור אולי פג תוקפו או נמחק."
         )
 
     if "private" in err or "unavailable" in err:
         raise ZoomDownloadError(
-            "This recording is private. Use the Chrome extension while "
-            "viewing it in your browser to bypass this restriction."
+            "ההקלטה פרטית. השתמש בתוסף Chrome בזמן צפייה בה בדפדפן."
         )
 
-    raise ZoomDownloadError(f"Download failed: {raw_error[:300]}")
+    raise ZoomDownloadError(f"הורדה נכשלה: {raw_error[:300]}")

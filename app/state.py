@@ -137,8 +137,8 @@ async def _mark_interrupted_tasks_failed():
     placeholders = ",".join("?" * len(in_flight))
     db = await _get_db()
     result = await db.execute(
-        f"UPDATE tasks SET status=?, progress=0, message=? WHERE status IN ({placeholders})",
-        [TaskStatus.FAILED.value, "Server restarted — task was interrupted"] + in_flight,
+        f"UPDATE tasks SET status=?, progress=0, message=?, error=? WHERE status IN ({placeholders})",
+        [TaskStatus.FAILED.value, "השרת הופעל מחדש — המשימה הופסקה", "השרת הופעל מחדש — נסה שוב"] + in_flight,
     )
     if result.rowcount:
         logger.warning(f"Marked {result.rowcount} interrupted task(s) as failed on startup")
