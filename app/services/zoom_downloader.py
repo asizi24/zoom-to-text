@@ -71,12 +71,13 @@ async def download_audio(
             "preferredquality": "96",   # 96 kbps — clear speech, small file
         }],
         "outtmpl": output_template,
-        "quiet": True,
+        "quiet": False,
         "no_warnings": False,
         "noplaylist": True,
         "socket_timeout": 90,
         "retries": 3,
         "fragment_retries": 5,
+        "progress_hooks": [_make_progress_hook(task_id)],
         # Mimic a real Chrome browser session
         "http_headers": {
             "User-Agent": (
@@ -94,7 +95,12 @@ async def download_audio(
 
     try:
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, _run_ydl, ydl_opts, url)
+        await asyncio.wait_for(
+            loop.run_in_executor(None, _run_ydl, ydl_opts, url),
+            timeout=600,  # 10 minutes max for download
+        )
+    except asyncio.TimeoutError:
+        raise ZoomDownloadError("ההורדה לקחה יותר מ-10 דקות ופסקה — הקובץ גדול מדי או שהחיבור איטי")
     except yt_dlp.utils.DownloadError as exc:
         _raise_user_friendly_error(str(exc), bool(cookies_netscape))
     finally:
@@ -126,6 +132,19 @@ async def cleanup_audio(file_path: str | None):
 
 
 # ── Internals ─────────────────────────────────────────────────────────────────────
+
+def _make_progress_hook(task_id: str):
+    """Log download progress so we can see it in Fly.io logs."""
+    def hook(d: dict) -> None:
+        if d["status"] == "downloading":
+            pct = d.get("_percent_str", "?%").strip()
+            speed = d.get("_speed_str", "?").strip()
+            eta = d.get("_eta_str", "?").strip()
+            logger.info(f"Task {task_id} — download {pct} speed={speed} eta={eta}")
+        elif d["status"] == "finished":
+            logger.info(f"Task {task_id} — download finished, extracting audio...")
+    return hook
+
 
 def _run_ydl(opts: dict, url: str):
     """Synchronous yt-dlp call — runs inside a thread pool executor."""
