@@ -118,14 +118,19 @@ def _get_client() -> genai.Client:
 
 # ── Generation config ─────────────────────────────────────────────────────────────
 
-# Disable thinking on Gemini 2.5 Flash: thinking output appears as preamble text
-# before the JSON, which breaks the parser.  ThinkingConfig was added in google-genai
-# ≥1.5 — fall back gracefully on older SDK versions.
-_thinking_cfg = (
-    types.ThinkingConfig(thinking_budget=0)
-    if hasattr(types, "ThinkingConfig")
-    else None
-)
+# Attempt to disable thinking on Gemini 2.5 Flash so the model doesn't emit
+# reasoning text as preamble before the JSON.  ThinkingConfig was added in
+# google-genai ≥1.5 and the exact constructor signature varies — wrap in
+# try/except so a missing or mis-versioned ThinkingConfig never crashes the app.
+try:
+    _thinking_cfg = (
+        types.ThinkingConfig(thinking_budget=0)
+        if hasattr(types, "ThinkingConfig")
+        else None
+    )
+except Exception:
+    _thinking_cfg = None
+
 _GEN_CONFIG = types.GenerateContentConfig(
     temperature=0.3,
     max_output_tokens=65536,
