@@ -15,6 +15,7 @@ import logging
 import os
 import tempfile
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 import yt_dlp
 
@@ -28,6 +29,21 @@ class ZoomDownloadError(Exception):
 
 
 # ── Public interface ──────────────────────────────────────────────────────────────
+
+def _normalize_zoom_url(url: str) -> str:
+    """
+    Zoom share links sometimes arrive as rec/play URLs with the real share URL
+    buried inside an `originRequestUrl` query parameter. Extract and use that.
+    """
+    parsed = urlparse(url)
+    if "/rec/play" in parsed.path:
+        qs = parse_qs(parsed.query)
+        origin = qs.get("originRequestUrl", [None])[0]
+        if origin:
+            logger.info(f"Extracted share URL from originRequestUrl: {origin}")
+            return origin
+    return url
+
 
 async def download_audio(
     url: str,
@@ -44,6 +60,7 @@ async def download_audio(
                       the Chrome extension (document.cookie isn't enough — we need
                       the full header-level cookies including HttpOnly ones).
     """
+    url = _normalize_zoom_url(url)
     settings.downloads_dir.mkdir(parents=True, exist_ok=True)
     output_template = str(settings.downloads_dir / f"{task_id}.%(ext)s")
     expected_output  = str(settings.downloads_dir / f"{task_id}.mp3")
