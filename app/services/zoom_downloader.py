@@ -112,12 +112,9 @@ async def download_audio(
 
     try:
         loop = asyncio.get_running_loop()
-        await asyncio.wait_for(
-            loop.run_in_executor(None, _run_ydl, ydl_opts, url),
-            timeout=600,  # 10 minutes max for download
-        )
-    except asyncio.TimeoutError:
-        raise ZoomDownloadError("ההורדה לקחה יותר מ-10 דקות ופסקה — הקובץ גדול מדי או שהחיבור איטי")
+        # No asyncio timeout here — yt-dlp has socket_timeout=90 for hang protection.
+        # An artificial timeout kills long-but-working ffmpeg extraction on slow CPUs.
+        await loop.run_in_executor(None, _run_ydl, ydl_opts, url)
     except yt_dlp.utils.DownloadError as exc:
         _raise_user_friendly_error(str(exc), bool(cookies_netscape))
     finally:
