@@ -118,9 +118,18 @@ def _get_client() -> genai.Client:
 
 # ── Generation config ─────────────────────────────────────────────────────────────
 
+# Disable thinking on Gemini 2.5 Flash: thinking output appears as preamble text
+# before the JSON, which breaks the parser.  ThinkingConfig was added in google-genai
+# ≥1.5 — fall back gracefully on older SDK versions.
+_thinking_cfg = (
+    types.ThinkingConfig(thinking_budget=0)
+    if hasattr(types, "ThinkingConfig")
+    else None
+)
 _GEN_CONFIG = types.GenerateContentConfig(
     temperature=0.3,
     max_output_tokens=65536,
+    **({} if _thinking_cfg is None else {"thinking_config": _thinking_cfg}),
 )
 
 # Timeout for each async Gemini call (10 minutes)
@@ -168,12 +177,31 @@ def _generate_with_retry(client: genai.Client, contents, max_retries: int = 3):
 # ── Parsing ───────────────────────────────────────────────────────────────────────
 
 def _parse_response(text: str) -> LessonResult:
-    """Parse Gemini JSON into a LessonResult, stripping any accidental markdown fences."""
+    """
+    Parse Gemini JSON into a LessonResult.
+
+    Handles several real-world response formats:
+      1. Bare JSON (ideal)
+      2. ```json ... ``` code fences (Gemini sometimes adds these despite instructions)
+      3. Thinking-model output — preamble text before the JSON object
+         (Gemini 2.5 Flash can emit reasoning text before the JSON)
+      4. Any trailing text after the closing }
+
+    Strategy: strip fences first, then find the outermost { … } and parse that.
+    """
     stripped = text.strip()
+
+    # 1. Strip markdown code fences
     if stripped.startswith("```"):
         lines = stripped.split("\n")
         stripped = "\n".join(lines[1:])
         stripped = stripped.rsplit("```", 1)[0].strip()
+
+    # 2. Find the outermost JSON object — handles preamble / thinking output
+    start = stripped.find("{")
+    end = stripped.rfind("}")
+    if start != -1 and end > start:
+        stripped = stripped[start : end + 1]
 
     try:
         data = json.loads(stripped)
