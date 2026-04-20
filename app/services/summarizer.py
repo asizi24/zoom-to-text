@@ -382,7 +382,16 @@ def _ask_sync(context: str, question: str) -> str:
     return response.text
 
 
+_ASK_TIMEOUT = 120.0  # 2 minutes — chat answers should be fast
+
+
 async def ask_about_lesson(context: str, question: str) -> str:
     """Async: answer a student question based on the lesson content."""
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _ask_sync, context, question)
+    try:
+        return await asyncio.wait_for(
+            loop.run_in_executor(None, _ask_sync, context, question),
+            timeout=_ASK_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        raise TimeoutError("⏱️ Gemini לא הגיב תוך 2 דקות — נסה שוב")

@@ -13,9 +13,14 @@ The caller always receives NEW temp files it owns and must delete. The original
 audio path is never modified.
 """
 import logging
+import os
 import subprocess
 import tempfile
 from pathlib import Path
+
+# Maximum time (seconds) for any single ffmpeg/ffprobe call.
+# A 10-hour recording at fast read speeds should finish in < 5 minutes.
+_FFMPEG_TIMEOUT = 600
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +98,7 @@ def _get_duration(path: str) -> float:
             "-of", "default=noprint_wrappers=1:nokey=1",
             path,
         ],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, check=True, timeout=30,
     )
     return float(result.stdout.strip())
 
@@ -109,8 +114,10 @@ def _remove_silence(audio_path: str) -> str:
       areverse           → flip back
 
     Returns path to a new temp .mp3 file.
+    Uses mkstemp (not deprecated mktemp) to atomically create the temp file.
     """
-    out = tempfile.mktemp(suffix=".mp3", prefix="zoom_stripped_")
+    fd, out = tempfile.mkstemp(suffix=".mp3", prefix="zoom_stripped_")
+    os.close(fd)  # ffmpeg will write to the path; close the OS fd we got from mkstemp
 
     silence_filter = (
         f"silenceremove="
@@ -138,6 +145,7 @@ def _remove_silence(audio_path: str) -> str:
             out,
         ],
         check=True,
+        timeout=_FFMPEG_TIMEOUT,
     )
     return out
 
@@ -157,7 +165,8 @@ def _split_chunks(audio_path: str) -> list[str]:
 
     for i in range(n_chunks):
         start = i * CHUNK_SECONDS
-        out   = tempfile.mktemp(suffix=".mp3", prefix=f"zoom_chunk{i:02d}_")
+        fd, out = tempfile.mkstemp(suffix=".mp3", prefix=f"zoom_chunk{i:02d}_")
+        os.close(fd)  # ffmpeg will overwrite via -y; close the OS fd
         subprocess.run(
             [
                 "ffmpeg", "-y",
@@ -169,6 +178,7 @@ def _split_chunks(audio_path: str) -> list[str]:
                 out,
             ],
             check=True,
+            timeout=_FFMPEG_TIMEOUT,
         )
         chunks.append(out)
 
@@ -177,9 +187,11 @@ def _split_chunks(audio_path: str) -> list[str]:
 
 def _copy_to_temp(audio_path: str) -> str:
     """Copy a file to a new temp path (so the caller always owns the returned paths)."""
-    out = tempfile.mktemp(suffix=Path(audio_path).suffix, prefix="zoom_chunk_")
+    fd, out = tempfile.mkstemp(suffix=Path(audio_path).suffix, prefix="zoom_chunk_")
+    os.close(fd)  # ffmpeg will overwrite via -y; close the OS fd
     subprocess.run(
         ["ffmpeg", "-y", "-i", audio_path, "-c", "copy", "-loglevel", "error", out],
         check=True,
+        timeout=_FFMPEG_TIMEOUT,
     )
     return out

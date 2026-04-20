@@ -46,6 +46,10 @@ CREATE TABLE IF NOT EXISTS tasks (
 )
 """
 
+CREATE_TASKS_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks (user_id)
+"""
+
 CREATE_USERS_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS users (
     id         TEXT PRIMARY KEY,
@@ -88,6 +92,9 @@ async def _get_db() -> aiosqlite.Connection:
         _db = await aiosqlite.connect(DB_PATH)
         await _db.execute("PRAGMA journal_mode=WAL")
         await _db.execute("PRAGMA synchronous=NORMAL")
+        # Set row_factory once on the shared connection so all cursors return
+        # aiosqlite.Row objects — avoids repeated mutation of the shared connection.
+        _db.row_factory = aiosqlite.Row
         logger.info(f"SQLite connection opened: {DB_PATH}")
     return _db
 
@@ -110,6 +117,10 @@ async def init_db():
     await db.execute(CREATE_SESSIONS_TABLE_SQL)
     await db.commit()
 
+    # Add index on user_id for fast per-user task listings
+    # (must run after user_id column exists, so after migration below)
+
+
     # Migrate: add user_id column to tasks if it doesn't exist yet
     async with db.execute("PRAGMA table_info(tasks)") as cursor:
         cols = [row[1] for row in await cursor.fetchall()]
@@ -117,6 +128,10 @@ async def init_db():
         await db.execute("ALTER TABLE tasks ADD COLUMN user_id TEXT")
         await db.commit()
         logger.info("Migrated tasks table: added user_id column")
+
+    # Create index now that user_id column is guaranteed to exist
+    await db.execute(CREATE_TASKS_INDEX_SQL)
+    await db.commit()
 
     await _mark_interrupted_tasks_failed()
     logger.info(f"Database ready: {DB_PATH}")
@@ -196,8 +211,39 @@ async def fail_task(task_id: str, error: str):
 
 async def get_task(task_id: str) -> Optional[TaskResponse]:
     db = await _get_db()
-    db.row_factory = aiosqlite.Row
     async with db.execute("SELECT * FROM tasks WHERE id=?", [task_id]) as cursor:
+        row = await cursor.fetchone()
+
+    if row is None:
+        return None
+
+    result = None
+    if row["result_json"]:
+        result = LessonResult.model_validate_json(row["result_json"])
+
+    return TaskResponse(
+        task_id=row["id"],
+        status=TaskStatus(row["status"]),
+        progress=row["progress"],
+        message=row["message"],
+        created_at=row["created_at"],
+        url=row["url"],
+        result=result,
+        error=row["error"],
+    )
+
+
+async def get_task_for_user(task_id: str, user_id: str) -> Optional[TaskResponse]:
+    """
+    Return a task only if it belongs to user_id.
+    Returns None if not found OR if owned by a different user — both look like 404
+    to prevent task-id enumeration across users.
+    """
+    db = await _get_db()
+    async with db.execute(
+        "SELECT * FROM tasks WHERE id=? AND (user_id=? OR user_id IS NULL)",
+        [task_id, user_id],
+    ) as cursor:
         row = await cursor.fetchone()
 
     if row is None:
@@ -221,7 +267,6 @@ async def get_task(task_id: str) -> Optional[TaskResponse]:
 
 async def list_tasks(limit: int = 50, user_id: Optional[str] = None) -> list[dict]:
     db = await _get_db()
-    db.row_factory = aiosqlite.Row
     if user_id:
         async with db.execute(
             "SELECT id, status, progress, message, created_at, url FROM tasks "
@@ -250,7 +295,6 @@ async def delete_task(task_id: str):
 async def get_or_create_user(email: str) -> str:
     """Return user_id for the email, creating the user row if this is their first login."""
     db = await _get_db()
-    db.row_factory = aiosqlite.Row
     async with db.execute("SELECT id FROM users WHERE email=?", [email.lower()]) as cursor:
         row = await cursor.fetchone()
     if row:
@@ -286,7 +330,6 @@ async def consume_magic_token(token: str) -> Optional[str]:
     Marks the token used=1 on success.
     """
     db = await _get_db()
-    db.row_factory = aiosqlite.Row
     async with db.execute(
         "SELECT user_id, expires_at, used FROM magic_tokens WHERE token=?", [token]
     ) as cursor:
@@ -319,7 +362,6 @@ async def create_session(user_id: str) -> str:
 async def get_session_user(session_id: str) -> Optional[str]:
     """Return user_id if session exists and has not expired. None otherwise."""
     db = await _get_db()
-    db.row_factory = aiosqlite.Row
     async with db.execute(
         "SELECT user_id, expires_at FROM sessions WHERE id=?", [session_id]
     ) as cursor:

@@ -3,6 +3,8 @@ Application configuration using Pydantic BaseSettings.
 All values can be overridden via environment variables or the .env file.
 """
 from pathlib import Path
+from typing import Optional
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -41,8 +43,17 @@ class Settings(BaseSettings):
     max_upload_bytes: int = 600 * 1024 * 1024  # 600 MB
 
     # ── Paths ───────────────────────────────────────────────────────────────────
-    data_dir: Path = Path("data")          # Override with DATA_DIR=/tmp/data on Cloud Run
-    downloads_dir: Path = Path("data/downloads")  # Derived from data_dir below
+    # Override with DATA_DIR=/tmp/data on Cloud Run / Fly.io
+    data_dir: Path = Path("data")
+    # downloads_dir is always derived from data_dir — do NOT set this independently.
+    # It is exposed here only so other modules can reference settings.downloads_dir.
+    downloads_dir: Optional[Path] = None
+
+    @model_validator(mode="after")
+    def derive_downloads_dir(self) -> "Settings":
+        """Always derive downloads_dir from data_dir so DATA_DIR env var works correctly."""
+        object.__setattr__(self, "downloads_dir", self.data_dir / "downloads")
+        return self
 
     # ── App ─────────────────────────────────────────────────────────────────────
     app_title: str = "Zoom Transcriber"

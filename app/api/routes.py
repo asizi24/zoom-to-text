@@ -13,6 +13,7 @@ from pathlib import Path
 
 import aiofiles
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
+from pydantic import BaseModel, Field
 
 from app import state
 from app.api.deps import get_current_user
@@ -132,8 +133,9 @@ async def get_task(task_id: str, user_id: str = Depends(get_current_user)):
     """
     Poll this endpoint to check job progress.
     Frontend polls every 2 seconds until status is `completed` or `failed`.
+    Returns 404 if not found or owned by a different user (prevents enumeration).
     """
-    task = await state.get_task(task_id)
+    task = await state.get_task_for_user(task_id, user_id)
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
     return task
@@ -141,16 +143,14 @@ async def get_task(task_id: str, user_id: str = Depends(get_current_user)):
 
 @router.delete("/tasks/{task_id}", status_code=204)
 async def delete_task(task_id: str, user_id: str = Depends(get_current_user)):
-    """Delete a task record from the database."""
-    task = await state.get_task(task_id)
+    """Delete a task record from the database (only the owning user may delete)."""
+    task = await state.get_task_for_user(task_id, user_id)
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
     await state.delete_task(task_id)
 
 
 # ── Chat with transcript ───────────────────────────────────────────────────────────
-
-from pydantic import BaseModel, Field
 
 class AskRequest(BaseModel):
     question: str = Field(..., description="Question about the lesson content")
@@ -161,8 +161,9 @@ async def ask_question(task_id: str, body: AskRequest, user_id: str = Depends(ge
     """
     Ask a question about a completed lesson.
     Uses the stored summary + chapters as context for a Gemini-powered answer.
+    Returns 404 if not found or owned by a different user.
     """
-    task = await state.get_task(task_id)
+    task = await state.get_task_for_user(task_id, user_id)
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
     if task.result is None:
