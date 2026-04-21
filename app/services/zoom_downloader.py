@@ -49,21 +49,28 @@ async def download_audio(
     url: str,
     task_id: str,
     cookies_netscape: str | None = None,
+    extract_to_mp3: bool = True,
 ) -> str:
     """
     Download and extract audio from a Zoom recording URL.
 
-    Returns the path to the extracted .mp3 file.
+    Returns the path to the downloaded audio file.
     The caller is responsible for deleting the file after processing.
 
     cookies_netscape: Cookie string in Netscape/Mozilla format, as provided by
                       the Chrome extension (document.cookie isn't enough — we need
                       the full header-level cookies including HttpOnly ones).
+
+    extract_to_mp3: When True (default) re-encodes to MP3 via ffmpeg — suitable
+                    for Whisper transcription.  When False, the raw file is kept
+                    in its native container (M4A / MP4) — suitable for GEMINI_DIRECT
+                    mode where Gemini's Files API accepts these formats natively and
+                    the ffmpeg step (which can take 15-20 min on a shared CPU) is
+                    completely unnecessary.
     """
     url = _normalize_zoom_url(url)
     settings.downloads_dir.mkdir(parents=True, exist_ok=True)
     output_template = str(settings.downloads_dir / f"{task_id}.%(ext)s")
-    expected_output  = str(settings.downloads_dir / f"{task_id}.mp3")
 
     # Write cookies to a temp file — yt-dlp reads them from disk
     cookie_file_path: str | None = None
@@ -82,11 +89,6 @@ async def download_audio(
         # Prefer audio-only stream; fall back to lowest-quality video + best audio
         # (audio track is identical across all video resolutions, so no quality loss)
         "format": "bestaudio[ext=m4a]/bestaudio/worstvideo+bestaudio/worst",
-        "postprocessors": [{
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "preferredquality": "96",   # 96 kbps — clear speech, small file
-        }],
         "outtmpl": output_template,
         "quiet": False,
         "no_warnings": False,
@@ -107,6 +109,14 @@ async def download_audio(
         },
     }
 
+    if extract_to_mp3:
+        # Re-encode to MP3 for Whisper transcription (needs PCM-friendly format)
+        ydl_opts["postprocessors"] = [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+            "preferredquality": "96",   # 96 kbps — clear speech, small file
+        }]
+
     if cookie_file_path:
         ydl_opts["cookiefile"] = cookie_file_path
 
@@ -122,10 +132,20 @@ async def download_audio(
         if cookie_file_path and Path(cookie_file_path).exists():
             os.unlink(cookie_file_path)
 
-    if not Path(expected_output).exists():
-        raise ZoomDownloadError(
-            "החילוץ הצליח אך קובץ האודיו לא נמצא — ודא ש-ffmpeg מותקן."
-        )
+    if extract_to_mp3:
+        expected_output = str(settings.downloads_dir / f"{task_id}.mp3")
+        if not Path(expected_output).exists():
+            raise ZoomDownloadError(
+                "החילוץ הצליח אך קובץ האודיו לא נמצא — ודא ש-ffmpeg מותקן."
+            )
+    else:
+        # Find whichever file yt-dlp actually saved (M4A, MP4, WEBM, etc.)
+        candidates = sorted(settings.downloads_dir.glob(f"{task_id}.*"))
+        if not candidates:
+            raise ZoomDownloadError(
+                "ההורדה הצליחה אך הקובץ לא נמצא — בעיה לא צפויה."
+            )
+        expected_output = str(candidates[0])
 
     size_mb = Path(expected_output).stat().st_size / 1024 / 1024
     logger.info(f"Downloaded: {expected_output} ({size_mb:.1f} MB)")

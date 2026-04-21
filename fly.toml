@@ -28,6 +28,9 @@ primary_region = "ams"
     path = "/health"
     timeout = "5s"
 
+[env]
+  DATA_DIR = "/data"
+
 [[mounts]]
   source = "zoom_data"
   destination = "/data"

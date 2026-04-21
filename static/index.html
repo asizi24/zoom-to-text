@@ -913,8 +913,11 @@
     visualProgress   = pct;
 
     _applyProgressBar(pct);
-    document.getElementById('status-label').innerHTML =
-      '<span class="spinner"></span>' + (msg || 'מעבד...');
+    const _sl = document.getElementById('status-label');
+    _sl.textContent = '';
+    const _sp = document.createElement('span'); _sp.className = 'spinner';
+    _sl.appendChild(_sp);
+    _sl.appendChild(document.createTextNode(msg || 'מעבד...'));
 
     _updateEta(pct);
 
@@ -947,17 +950,35 @@
     // Summary
     document.getElementById('summary-text').textContent = result.summary || '';
 
-    // Chapters
+    // Chapters — built with DOM APIs (no innerHTML) to prevent XSS
     const cl = document.getElementById('chapters-list');
-    cl.innerHTML = '';
+    cl.textContent = '';
     (result.chapters || []).forEach(ch => {
-      const kp = (ch.key_points || []).map(p => `<li>${p}</li>`).join('');
-      cl.innerHTML += `
-        <div class="chapter">
-          <div class="chapter-title">${ch.title}</div>
-          <div class="chapter-content">${ch.content}</div>
-          ${kp ? `<ul class="key-points">${kp}</ul>` : ''}
-        </div>`;
+      const chDiv = document.createElement('div');
+      chDiv.className = 'chapter';
+
+      const titleDiv = document.createElement('div');
+      titleDiv.className = 'chapter-title';
+      titleDiv.textContent = ch.title || '';
+      chDiv.appendChild(titleDiv);
+
+      const contentDiv = document.createElement('div');
+      contentDiv.className = 'chapter-content';
+      contentDiv.textContent = ch.content || '';
+      chDiv.appendChild(contentDiv);
+
+      if ((ch.key_points || []).length) {
+        const ul = document.createElement('ul');
+        ul.className = 'key-points';
+        (ch.key_points || []).forEach(p => {
+          const li = document.createElement('li');
+          li.textContent = p;
+          ul.appendChild(li);
+        });
+        chDiv.appendChild(ul);
+      }
+
+      cl.appendChild(chDiv);
     });
     if (!(result.chapters || []).length)
       document.getElementById('chapters-section').style.display = 'none';
@@ -968,22 +989,43 @@
       document.getElementById('transcript-section').style.display = 'block';
     }
 
-    // Quiz
+    // Quiz — built with DOM APIs (no innerHTML) to prevent XSS
     quizScore = { correct: 0, total: 0 };
     const ql = document.getElementById('quiz-list');
-    ql.innerHTML = '';
+    ql.textContent = '';
     (result.quiz || []).forEach((q, i) => {
       quizScore.total++;
-      const opts = (q.options || []).map(o =>
-        `<button class="opt-btn" onclick="checkAnswer(this,'${esc(o)}','${esc(q.correct_answer)}')">${o}</button>`
-      ).join('');
-      ql.innerHTML += `
-        <div class="q-card">
-          <div class="q-num">שאלה ${i + 1}</div>
-          <div class="q-text">${q.question}</div>
-          <div class="options">${opts}</div>
-          <div class="explanation">💡 ${q.explanation || ''}</div>
-        </div>`;
+
+      const card = document.createElement('div');
+      card.className = 'q-card';
+
+      const numDiv = document.createElement('div');
+      numDiv.className = 'q-num';
+      numDiv.textContent = `שאלה ${i + 1}`;
+      card.appendChild(numDiv);
+
+      const qText = document.createElement('div');
+      qText.className = 'q-text';
+      qText.textContent = q.question || '';
+      card.appendChild(qText);
+
+      const optsDiv = document.createElement('div');
+      optsDiv.className = 'options';
+      (q.options || []).forEach(o => {
+        const btn = document.createElement('button');
+        btn.className = 'opt-btn';
+        btn.textContent = o;
+        btn.addEventListener('click', function() { checkAnswer(this, o, q.correct_answer); });
+        optsDiv.appendChild(btn);
+      });
+      card.appendChild(optsDiv);
+
+      const expDiv = document.createElement('div');
+      expDiv.className = 'explanation';
+      expDiv.textContent = `💡 ${q.explanation || ''}`;
+      card.appendChild(expDiv);
+
+      ql.appendChild(card);
     });
 
     document.getElementById('results-card').style.display = 'block';
@@ -1146,13 +1188,28 @@
         const dt = new Date(t.created_at).toLocaleString('he-IL', { dateStyle: 'short', timeStyle: 'short' });
         const shortUrl = (t.url || '').replace(/^upload:/, '📁 ').replace('https://', '').slice(0, 60);
 
-        item.innerHTML = `
-          <span class="h-status">${statusIcon}</span>
-          <div class="h-info">
-            <div class="h-url">${shortUrl || 'לא ידוע'}</div>
-            <div class="h-meta">${dt}</div>
-          </div>
-          <span class="h-badge ${badgeClass}">${badgeText}</span>`;
+        // Build history item with DOM APIs to prevent XSS from stored URLs
+        const statusSpan = document.createElement('span');
+        statusSpan.className = 'h-status';
+        statusSpan.textContent = statusIcon;
+        item.appendChild(statusSpan);
+
+        const infoDiv = document.createElement('div');
+        infoDiv.className = 'h-info';
+        const urlDiv = document.createElement('div');
+        urlDiv.className = 'h-url';
+        urlDiv.textContent = shortUrl || 'לא ידוע';
+        infoDiv.appendChild(urlDiv);
+        const metaDiv = document.createElement('div');
+        metaDiv.className = 'h-meta';
+        metaDiv.textContent = dt;
+        infoDiv.appendChild(metaDiv);
+        item.appendChild(infoDiv);
+
+        const badge = document.createElement('span');
+        badge.className = `h-badge ${badgeClass}`;
+        badge.textContent = badgeText;
+        item.appendChild(badge);
 
         if (isCompleted) {
           item.onclick = () => loadHistoryTask(t.id);

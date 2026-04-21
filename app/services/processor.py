@@ -89,6 +89,10 @@ async def run_pipeline(
             url=url,
             task_id=task_id,
             cookies_netscape=cookies,
+            # GEMINI_DIRECT sends the raw file to Gemini Files API which accepts
+            # M4A/MP4 natively — skipping ffmpeg re-encode saves 15-20 min on
+            # a shared Fly.io CPU.
+            extract_to_mp3=(mode != ProcessingMode.GEMINI_DIRECT),
         )
         await state.update_task(
             task_id, TaskStatus.DOWNLOADING, 40, "✅ ההורדה הושלמה. מעבד אודיו..."
