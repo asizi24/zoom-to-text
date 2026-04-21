@@ -207,6 +207,24 @@ def _response_text(response) -> str:
     return response.text or ""
 
 
+def _sanitize_json_escapes(text: str) -> str:
+    """
+    Fix invalid JSON escape sequences that Gemini sometimes emits.
+
+    Gemini occasionally produces strings like '...path \\מ...' or '...(AWS \\X)...'
+    where a backslash precedes a character that is not a valid JSON escape sequence.
+    json.loads rejects these with 'Invalid \\escape'.
+
+    Strategy: double any stray backslash so the parser sees a literal backslash
+    followed by the character (valid JSON representing the original text).
+
+    Valid JSON single-char escapes: \" \\ \/ \b \f \n \r \t
+    Valid JSON unicode escape:       \\uXXXX  (u + exactly 4 hex digits)
+    Everything else → double the backslash.
+    """
+    return re.sub(r'\\(?!["\\/bfnrtu]|u[0-9a-fA-F]{4})', r'\\\\', text)
+
+
 def _parse_response(text: str) -> LessonResult:
     """
     Parse Gemini JSON into a LessonResult.
@@ -217,8 +235,9 @@ def _parse_response(text: str) -> LessonResult:
       3. Thinking-model output — preamble text before the JSON object
          (Gemini 2.5 Flash can emit reasoning text before the JSON)
       4. Any trailing text after the closing }
+      5. Invalid JSON escape sequences (backslash before Hebrew / special chars)
 
-    Strategy: strip fences first, then find the outermost { … } and parse that.
+    Strategy: strip fences → find JSON start via "summary" key → sanitize escapes → parse.
     """
     stripped = text.strip()
 
@@ -237,6 +256,11 @@ def _parse_response(text: str) -> LessonResult:
     json_end = stripped.rfind("}")
     if json_start != -1 and json_end > json_start:
         stripped = stripped[json_start : json_end + 1]
+
+    # 3. Fix any invalid escape sequences before handing off to json.loads.
+    #    Gemini sometimes emits \X where X is not a valid JSON escape char
+    #    (e.g. backslash before a Hebrew letter or an open-paren).
+    stripped = _sanitize_json_escapes(stripped)
 
     try:
         data = json.loads(stripped)
