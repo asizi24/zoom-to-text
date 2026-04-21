@@ -23,6 +23,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from typing import Callable
@@ -181,6 +182,31 @@ def _generate_with_retry(client: genai.Client, contents, max_retries: int = 3):
 
 # ── Parsing ───────────────────────────────────────────────────────────────────────
 
+def _response_text(response) -> str:
+    """
+    Extract only non-thinking text from a Gemini response.
+
+    Gemini 2.5 Flash with thinking enabled emits "thought" parts before the
+    actual answer.  When those are included in response.text the JSON parser
+    sees a preamble full of {…} references and breaks.
+
+    Strategy: iterate the candidate parts and skip any part where thought=True.
+    Falls back to response.text if the parts API is unavailable.
+    """
+    try:
+        parts = response.candidates[0].content.parts
+        non_thought = [
+            p.text
+            for p in parts
+            if not getattr(p, "thought", False) and getattr(p, "text", None)
+        ]
+        if non_thought:
+            return "\n".join(non_thought)
+    except Exception:
+        pass
+    return response.text or ""
+
+
 def _parse_response(text: str) -> LessonResult:
     """
     Parse Gemini JSON into a LessonResult.
@@ -202,11 +228,15 @@ def _parse_response(text: str) -> LessonResult:
         stripped = "\n".join(lines[1:])
         stripped = stripped.rsplit("```", 1)[0].strip()
 
-    # 2. Find the outermost JSON object — handles preamble / thinking output
-    start = stripped.find("{")
-    end = stripped.rfind("}")
-    if start != -1 and end > start:
-        stripped = stripped[start : end + 1]
+    # 2. Find the JSON object using our known root key "summary".
+    #    Gemini thinking preamble often contains bare { } characters when
+    #    referencing JSON schemas, so find("{") picks up the wrong brace.
+    #    Searching for '{"summary":' reliably skips all preamble.
+    m = re.search(r'\{\s*"summary"\s*:', stripped)
+    json_start = m.start() if m else stripped.find("{")
+    json_end = stripped.rfind("}")
+    if json_start != -1 and json_end > json_start:
+        stripped = stripped[json_start : json_end + 1]
 
     try:
         data = json.loads(stripped)
@@ -281,7 +311,7 @@ def _summarize_audio_sync(
     for attempt in range(2):
         response = _generate_with_retry(client, [_SYSTEM_PROMPT, audio_file])
         try:
-            result = _parse_response(response.text)
+            result = _parse_response(_response_text(response))
             break
         except RuntimeError as e:
             last_error = e
@@ -319,7 +349,7 @@ def _summarize_text_sync(
         for attempt in range(2):
             response = _generate_with_retry(client, prompt)
             try:
-                result = _parse_response(response.text)
+                result = _parse_response(_response_text(response))
                 break
             except RuntimeError as e:
                 last_error = e
@@ -362,7 +392,7 @@ def _summarize_text_sync(
         + "\n\n---\n\n".join(partial_summaries)
     )
     final_response = _generate_with_retry(client, merge_prompt)
-    return _parse_response(final_response.text)
+    return _parse_response(_response_text(final_response))
 
 
 # ── Async wrappers ────────────────────────────────────────────────────────────────
