@@ -94,6 +94,80 @@ _SYSTEM_PROMPT = """
   ✅ ההסבר יציין במפורש מדוע כל אחת מ-3 האפשרויות השגויות אינה נכונה
 """
 
+# ── Critique prompt ───────────────────────────────────────────────────────────────
+
+_CRITIQUE_PROMPT = """
+אתה מומחה להערכת שאלות בחינה ברמה אקדמית.
+קיבלת רשימת שאלות אמריקאיות מתוך מבחן על שיעור אקדמי.
+דרג כל שאלה בסולם 1-5 לפי ארבעה קריטריונים:
+
+- clarity    (1-5): האם השאלה ברורה וחד-משמעית?
+- difficulty (1-5): האם השאלה דורשת הבנה אמיתית (לא שינון)? 1=שינון טהור, 5=ניתוח/סינתזה
+- distractors(1-5): האם כל שלוש האפשרויות השגויות מייצגות טעות חשיבה שכיחה?
+- accuracy   (1-5): האם התשובה הנכונה אכן נכונה ומוצדקת?
+
+avg = ממוצע ארבעת הציונים.
+
+══════════════════════════════════════════════════
+דוגמאות few-shot:
+══════════════════════════════════════════════════
+
+שאלה גרועה (avg נמוך):
+  ❌ "מה השנה בה פורסמה תיאוריית היחסות המיוחדת?"
+  → clarity:5, difficulty:1, distractors:2, accuracy:5 → avg:3.25
+  feedback: "שאלת שינון ישיר. תלמיד עם זיכרון טוב יענה נכון ללא הבנה"
+
+שאלה טובה (avg גבוה):
+  ✅ "מדוע זמן מקומי יאט עבור משקיף הנע במהירות גבוהה יחסית למשקיף אחר?"
+  → clarity:5, difficulty:5, distractors:4, accuracy:5 → avg:4.75
+  feedback: "דורשת הבנת dilat time. האפשרויות השגויות מייצגות בלבולים קלאסיים"
+
+שאלה בינונית (avg גבולי):
+  🟡 "איזה מהבאים הוא יתרון של TCP על UDP?"
+  → clarity:4, difficulty:3, distractors:3, accuracy:5 → avg:3.75
+  feedback: "ניתן לשפר את האפשרויות השגויות"
+
+══════════════════════════════════════════════════
+
+החזר JSON בלבד (אין טקסט לפני או אחרי):
+{
+  "questions": [
+    {
+      "index": 0,
+      "question": "טקסט השאלה",
+      "clarity": 1-5,
+      "difficulty": 1-5,
+      "distractors": 1-5,
+      "accuracy": 1-5,
+      "avg": 1.0-5.0,
+      "feedback": "הערה קצרה (עברית)"
+    }
+  ]
+}
+"""
+
+_REVISE_PROMPT_HEADER = """
+אתה מומחה לכתיבת שאלות בחינה ברמה אקדמית.
+קיבלת מבחן שעבר ביקורת — חלק מהשאלות קיבלו ציון ממוצע נמוך מ-THRESHOLD_PLACEHOLDER.
+עליך לכתוב מחדש את השאלות שסומנו כ-NEEDS_REVISION, תוך שמירה על השאלות הטובות כמות שהן.
+
+חוקי שכתוב:
+  • כל שאלה שתחליף את NEEDS_REVISION חייבת לבדוק הבנה, יישום, ניתוח — לא שינון
+  • ארבע האפשרויות יהיו באותו אורך ובאותה מבנה דקדוקי
+  • כל אפשרות שגויה מייצגת טעות חשיבה שכיחה
+  • ההסבר מציין מדוע כל אחת מהאפשרויות השגויות שגויה
+
+מבחן מקורי עם סימון NEEDS_REVISION:
+"""
+# NOTE: We intentionally do NOT use .format() for this prompt because both
+# the exam JSON and the summary may contain curly braces, which would cause
+# KeyError. We build the final prompt by simple string concatenation instead.
+_REVISE_PROMPT_SUFFIX = """
+
+החזר JSON בלבד (אין טקסט לפני או אחרי):
+{"quiz": [<רשימת כל השאלות המעודכנות, כולל OK, כולל NEEDS_REVISION>]}
+"""
+
 # ── Client (singleton) ────────────────────────────────────────────────────────────
 
 _client: genai.Client | None = None
@@ -295,6 +369,143 @@ def _parse_response(text: str) -> LessonResult:
     )
 
 
+# ── Exam critique helpers ─────────────────────────────────────────────────────────
+
+def critique_exam(exam: list, summary: str) -> dict:
+    """
+    Synchronous: score each question 1-5 on 4 rubrics via Gemini.
+
+    Returns a dict:
+      {"questions": [{"index": int, "question": str, "clarity": int,
+                      "difficulty": int, "distractors": int, "accuracy": int,
+                      "avg": float, "feedback": str}, ...]}
+
+    Runs in a thread executor (same pattern as _summarize_*_sync).
+    """
+    client = _get_client()
+
+    # Serialize the exam for Gemini
+    exam_text = json.dumps(
+        [
+            {
+                "index": i,
+                "question": q.question,
+                "options": q.options,
+                "correct_answer": q.correct_answer,
+                "explanation": q.explanation,
+            }
+            for i, q in enumerate(exam)
+        ],
+        ensure_ascii=False,
+        indent=2,
+    )
+
+    prompt = f"{_CRITIQUE_PROMPT}\n\nשאלות המבחן:\n{exam_text}"
+    response = _generate_with_retry(client, prompt)
+    text = _response_text(response).strip()
+
+    # Strip fences if present
+    if text.startswith("```"):
+        lines = text.split("\n")
+        text = "\n".join(lines[1:]).rsplit("```", 1)[0].strip()
+
+    text = _sanitize_json_escapes(text)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        logger.error(f"Critique JSON parse error: {exc}\nRaw: {text[:300]}")
+        # Non-fatal: return empty critique → revise won't run
+        return {"questions": []}
+
+    return data
+
+
+def revise_exam(exam: list, critique: dict, summary: str) -> list:
+    """
+    Synchronous: rewrite questions whose avg score < settings.exam_critique_threshold.
+
+    Returns a new list[QuizQuestion] — preserving good questions, replacing bad ones.
+    Runs in a thread executor.
+    """
+    client = _get_client()
+    threshold = settings.exam_critique_threshold
+
+    # Build score lookup by index
+    score_by_idx = {
+        q["index"]: q.get("avg", 5.0)
+        for q in critique.get("questions", [])
+    }
+
+    # Mark questions for revision
+    marked = []
+    for i, q in enumerate(exam):
+        avg = score_by_idx.get(i, 5.0)
+        entry = {
+            "index": i,
+            "question": q.question,
+            "options": q.options,
+            "correct_answer": q.correct_answer,
+            "explanation": q.explanation,
+            "avg_score": avg,
+            "status": "NEEDS_REVISION" if avg < threshold else "OK",
+        }
+        marked.append(entry)
+
+    marked_json = json.dumps(marked, ensure_ascii=False, indent=2)
+
+    # Build prompt via concatenation — NOT .format() — because marked_json and summary
+    # contain curly braces that would cause KeyError with Python's str.format().
+    header = _REVISE_PROMPT_HEADER.replace("THRESHOLD_PLACEHOLDER", str(threshold))
+    prompt = (
+        header
+        + marked_json
+        + "\n\nסיכום השיעור להקשר:\n"
+        + summary
+        + _REVISE_PROMPT_SUFFIX
+    )
+
+    response = _generate_with_retry(client, prompt)
+    text = _response_text(response).strip()
+
+    # Strip fences
+    if text.startswith("```"):
+        lines = text.split("\n")
+        text = "\n".join(lines[1:]).rsplit("```", 1)[0].strip()
+
+    text = _sanitize_json_escapes(text)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        logger.error(f"Revise JSON parse error: {exc}\nRaw: {text[:300]}")
+        # Non-fatal fallback: return original exam unchanged
+        return exam
+
+    revised_questions = []
+    for q_data in data.get("quiz", []):
+        revised_questions.append(
+            QuizQuestion(
+                question=q_data.get("question", ""),
+                options=q_data.get("options", []),
+                correct_answer=q_data.get("correct_answer", ""),
+                explanation=q_data.get("explanation", ""),
+            )
+        )
+
+    if not revised_questions:
+        logger.warning("revise_exam: Gemini returned empty quiz — keeping original")
+        return exam
+
+    return revised_questions
+
+
+def _needs_revision(critique: dict, threshold: float) -> bool:
+    """Return True if at least one question scored below the threshold."""
+    return any(
+        q.get("avg", 5.0) < threshold
+        for q in critique.get("questions", [])
+    )
+
+
 # ── Direct audio mode ─────────────────────────────────────────────────────────────
 
 def _summarize_audio_sync(
@@ -351,6 +562,10 @@ def _summarize_audio_sync(
     except Exception:
         pass
 
+    # NOTE: GEMINI_DIRECT processes the full audio in one pass — Gemini sees all context
+    # (tone, pauses, emphasis) and typically produces higher-quality questions.
+    # We skip the critique pipeline here because there is no separate text transcript
+    # to attach to the critique request (the audio file was already deleted above).
     return result
 
 
@@ -363,7 +578,14 @@ def _summarize_text_sync(
     transcript: str,
     progress_cb: _ProgressCallback | None = None,
 ) -> LessonResult:
-    """Send transcript text to Gemini. Handles chunking for very long classes."""
+    """
+    Send transcript text to Gemini. Handles chunking for very long classes.
+
+    When settings.enable_exam_critique=True, runs an extra two-pass quality check:
+      pass 1 — critique_exam: score each question 1-5 on 4 rubrics
+      pass 2 — revise_exam:   rewrite questions that scored below the threshold
+                               (skipped if all questions are already above threshold)
+    """
     client = _get_client()
 
     if len(transcript) <= _MAX_CHUNK_CHARS:
@@ -381,7 +603,8 @@ def _summarize_text_sync(
                     logger.warning("JSON parse failed on first attempt, retrying...")
         if result is None:
             raise last_error
-        return result
+
+        return _apply_critique_pipeline(result, progress_cb)
 
     # Long transcript: chunk → partial summaries → final merge
     chunks = [
@@ -400,14 +623,15 @@ def _summarize_text_sync(
     for i, chunk in enumerate(chunks, 1):
         logger.info(f"Summarizing chunk {i}/{n}")
         if progress_cb:
-            # Map chunk progress proportionally into the 82–93% range
-            pct = 82 + int(11 * i / n)
+            # Map chunk progress proportionally into the 82–88% range
+            # (leaving 88-95 for critique + revise)
+            pct = 82 + int(6 * i / n)
             progress_cb(pct, f"🔄 מסכם חלק {i} מתוך {n}...")
         resp = _generate_with_retry(client, f"{partial_prompt}\n\nחלק {i}:\n{chunk}")
         partial_summaries.append(resp.text)
 
     if progress_cb:
-        progress_cb(95, "🔗 מאחד את כל החלקים לסיכום מלא ומבחן...")
+        progress_cb(86, "🔗 מאחד את כל החלקים לסיכום מלא ומבחן...")
 
     merge_prompt = (
         f"{_SYSTEM_PROMPT}\n\n"
@@ -416,7 +640,65 @@ def _summarize_text_sync(
         + "\n\n---\n\n".join(partial_summaries)
     )
     final_response = _generate_with_retry(client, merge_prompt)
-    return _parse_response(_response_text(final_response))
+    result = _parse_response(_response_text(final_response))
+
+    return _apply_critique_pipeline(result, progress_cb)
+
+
+def _apply_critique_pipeline(
+    result: LessonResult,
+    progress_cb: _ProgressCallback | None = None,
+) -> LessonResult:
+    """
+    Run the critique → revise pipeline on a finished LessonResult.
+
+    Mutates `result.quiz` and sets `result.exam_critique_log` in-place.
+    No-ops if ENABLE_EXAM_CRITIQUE=False or the exam is empty.
+    Safe to call from any sync context (runs in a thread executor).
+    """
+    if not settings.enable_exam_critique or not result.quiz:
+        return result
+
+    threshold = settings.exam_critique_threshold
+    logger.info(
+        f"Critique pipeline: scoring {len(result.quiz)} questions "
+        f"(threshold={threshold})"
+    )
+
+    # ── Pass 1: Critique ──────────────────────────────────────────────────────
+    if progress_cb:
+        progress_cb(90, "🔍 בודק איכות שאלות המבחן...")
+
+    critique = critique_exam(result.quiz, result.summary)
+    result.exam_critique_log = critique  # always save for debugging
+
+    # Log per-question scores
+    for q in critique.get("questions", []):
+        logger.info(
+            f"  Q{q.get('index', '?')}: avg={q.get('avg', '?'):.2f} — "
+            f"{q.get('feedback', '')[:60]}"
+        )
+
+    # ── Pass 2: Revise (only if needed) ──────────────────────────────────────
+    if _needs_revision(critique, threshold):
+        low_count = sum(
+            1 for q in critique.get("questions", []) if q.get("avg", 5.0) < threshold
+        )
+        logger.info(
+            f"Revising {low_count}/{len(result.quiz)} questions "
+            f"(below threshold {threshold})"
+        )
+        if progress_cb:
+            progress_cb(95, f"✏️ משפר {low_count} שאלות שלא עמדו בסף האיכות...")
+
+        revised_quiz = revise_exam(result.quiz, critique, result.summary)
+        result.quiz = revised_quiz
+    else:
+        logger.info("All questions above threshold — skipping revise pass")
+        if progress_cb:
+            progress_cb(95, "✅ כל שאלות המבחן עברו את בדיקת האיכות")
+
+    return result
 
 
 # ── Async wrappers ────────────────────────────────────────────────────────────────
