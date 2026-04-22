@@ -43,11 +43,13 @@ class Chapter(BaseModel):
 
 
 class LessonResult(BaseModel):
-    transcript: Optional[str] = None  # Raw transcript (only in WHISPER_LOCAL mode)
-    summary:    str = ""
-    chapters:   list[Chapter] = []
-    quiz:       list[QuizQuestion] = []
-    language:   str = "he"
+    transcript:        Optional[str] = None  # Raw transcript (only in WHISPER_LOCAL mode)
+    summary:           str = ""
+    chapters:          list[Chapter] = []
+    quiz:              list[QuizQuestion] = []
+    language:          str = "he"
+    # Critique pipeline debug log — populated when ENABLE_EXAM_CRITIQUE=True
+    exam_critique_log: Optional[dict] = None
 
 
 # ── API request/response schemas ────────────────────────────────────────────────

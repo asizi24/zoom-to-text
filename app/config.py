@@ -55,6 +55,14 @@ class Settings(BaseSettings):
         object.__setattr__(self, "downloads_dir", self.data_dir / "downloads")
         return self
 
+    # ── Exam quality pipeline ───────────────────────────────────────────────────
+    # When True, every generated exam goes through a critique + optional revise pass.
+    # This costs one extra Gemini call (critique), and potentially a second (revise)
+    # only when at least one question scores below the threshold.
+    enable_exam_critique: bool = True
+    # Average score threshold below which a question is sent for revision (1–5 scale).
+    exam_critique_threshold: float = 3.5
+
     # ── App ─────────────────────────────────────────────────────────────────────
     app_title: str = "Zoom Transcriber"
     # Base URL shown in responses (used by the Chrome extension to know where to post)
