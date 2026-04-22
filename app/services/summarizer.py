@@ -292,7 +292,7 @@ def _sanitize_json_escapes(text: str) -> str:
     Strategy: double any stray backslash so the parser sees a literal backslash
     followed by the character (valid JSON representing the original text).
 
-    Valid JSON single-char escapes: \" \\ \/ \b \f \n \r \t
+    Valid JSON single-char escapes: \\ \" / b f n r t  (slash needs no backslash prefix)
     Valid JSON unicode escape:       \\uXXXX  (u + exactly 4 hex digits)
     Everything else → double the backslash.
     """
