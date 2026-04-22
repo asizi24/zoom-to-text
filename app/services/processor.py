@@ -21,9 +21,10 @@ Progress milestones (WHISPER paths):
   5%  → Downloading
   40% → Download complete
   50% → Transcribing
-  80% → Summarizing
-  82–93% → Per-chunk progress (long transcripts only)
-  95% → Merging chunks (long transcripts only)
+  80% → Summarizing (initial Gemini generation)
+  82–88% → Per-chunk progress (long transcripts only)
+  88% → Merging chunks / Critique running
+  95% → Revising low-quality questions (if needed)
   100%→ Complete
 """
 import asyncio
