@@ -3,7 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="עוזר לימודי חכם מבוסס AI: הדבק קישור Zoom או העלה הקלטה וקבל תמלול מדויק, סיכום מובנה, פרקים עם נקודות מפתח ומבחן אמריקאי — הכל תוך דקות." />
   <title>Zoom Transcriber — עוזר לימודי</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Rubik:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
   <style>
     :root {
@@ -14,7 +17,7 @@
       --error:   #ef4444;
       --warning: #f59e0b;
       --text:    #e2e8f0;
-      --muted:   rgba(226,232,240,.4);
+      --muted:   rgba(226,232,240,.6);
       --border:  rgba(255,255,255,.1);
       --card-bg: rgba(255,255,255,.055);
       --radius:  24px;
@@ -596,7 +599,7 @@
 
   <!-- File upload tab -->
   <div class="tab-pane" id="tab-file">
-    <div class="drop-zone" id="drop-zone">
+    <div class="drop-zone" id="drop-zone" tabindex="0" role="button" aria-label="אזור גרירה — גרור קובץ או הקש Enter לבחירת קובץ">
       <div class="icon">☁️</div>
       <h3>גרור קובץ לכאן או לחץ לבחירה</h3>
       <p>MP3, MP4, M4A, WAV, MKV, WEBM — עד 600MB</p>
@@ -704,7 +707,7 @@
 <div class="card" id="history-card" style="margin-top:16px;">
   <div class="history-header">
     <h2>🕘 היסטוריה</h2>
-    <button class="history-close" onclick="toggleHistory()">✕</button>
+    <button class="history-close" onclick="toggleHistory()" aria-label="סגירת היסטוריה">✕</button>
   </div>
   <div id="history-content"></div>
 </div>
@@ -778,6 +781,12 @@
   const fileInput = document.getElementById('file-input');
 
   dropZone.addEventListener('click',     () => fileInput.click());
+  dropZone.addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      fileInput.click();
+    }
+  });
   dropZone.addEventListener('dragover',  e => { e.preventDefault(); dropZone.classList.add('over'); });
   dropZone.addEventListener('dragleave', () => dropZone.classList.remove('over'));
   dropZone.addEventListener('drop', e => {
