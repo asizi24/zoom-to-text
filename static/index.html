@@ -17,7 +17,7 @@
       --error:   #ef4444;
       --warning: #f59e0b;
       --text:    #e2e8f0;
-      --muted:   rgba(226,232,240,.6);
+      --muted:   rgba(226,232,240,.75);
       --border:  rgba(255,255,255,.1);
       --card-bg: rgba(255,255,255,.055);
       --radius:  24px;
@@ -128,7 +128,7 @@
       direction: ltr; text-align: left;
       outline: none; transition: all .22s;
     }
-    .url-input::placeholder { color: rgba(255,255,255,.2); }
+    .url-input::placeholder { color: rgba(255,255,255,.55); }
     .url-input:focus {
       border-color: rgba(124,58,237,.6);
       box-shadow: 0 0 0 3px rgba(124,58,237,.18);
@@ -162,7 +162,7 @@
     .mode-name { font-weight: 700; font-size: .8rem; color: var(--text); margin-bottom: 3px; }
     .mode-desc { font-size: .7rem; color: var(--muted); line-height: 1.4; }
     .mode-opt.selected .mode-name { color: #c4b5fd; }
-    .mode-opt.selected .mode-desc { color: rgba(196,181,253,.5); }
+    .mode-opt.selected .mode-desc { color: rgba(196,181,253,.78); }
 
     /* ── CTA button ── */
     .btn {
@@ -182,7 +182,7 @@
     kbd {
       padding: 2px 7px; background: rgba(255,255,255,.08);
       border: 1px solid rgba(255,255,255,.13); border-radius: 5px;
-      font-size: .72rem; color: rgba(255,255,255,.4);
+      font-size: .72rem; color: rgba(255,255,255,.7);
     }
 
     /* ── Error ── */
@@ -376,7 +376,7 @@
       backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
       border: 1px solid rgba(255,255,255,.12); border-radius: 99px;
       cursor: pointer; font-size: .82rem; font-weight: 500;
-      color: rgba(255,255,255,.55);
+      color: rgba(255,255,255,.78);
       box-shadow: 0 4px 20px rgba(0,0,0,.35);
       transition: all .2s; font-family: inherit;
     }
@@ -389,7 +389,7 @@
     }
     .stat {
       display: flex; align-items: center; gap: 6px;
-      font-size: .73rem; color: rgba(255,255,255,.22); font-weight: 500;
+      font-size: .73rem; color: rgba(255,255,255,.65); font-weight: 500;
     }
     .stat-dot { width: 5px; height: 5px; border-radius: 50%; background: #10b981; flex-shrink: 0; }
 
@@ -570,7 +570,7 @@
   <div class="orb orb3"></div>
 </div>
 
-<div class="wrapper">
+<main class="wrapper">
 
   <!-- Brand -->
   <div class="brand">
@@ -712,7 +712,7 @@
   <div id="history-content"></div>
 </div>
 
-</div><!-- /wrapper -->
+</main><!-- /wrapper -->
 
 <!-- ═══════════════ HISTORY TOGGLE BUTTON ═══════════════ -->
 <button class="history-toggle-btn" onclick="toggleHistory()" id="history-toggle-btn">
