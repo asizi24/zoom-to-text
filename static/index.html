@@ -583,6 +583,83 @@
       #chapters-section { page-break-before: always; }
       #quiz-list > .q-card { page-break-inside: avoid; }
     }
+
+    /* ── Chat panel ── */
+    #chat-card { margin-top: 16px; }
+    .chat-messages {
+      max-height: 400px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      padding: 4px 0 12px;
+    }
+    .chat-bubble {
+      max-width: 85%;
+      padding: 10px 14px;
+      border-radius: 12px;
+      font-size: .92rem;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .chat-bubble.user {
+      align-self: flex-end;
+      background: #4f46e5;
+      color: #fff;
+      border-bottom-right-radius: 3px;
+    }
+    .chat-bubble.model {
+      align-self: flex-start;
+      background: #f3f4f6;
+      color: #111827;
+      border-bottom-left-radius: 3px;
+    }
+    .chat-bubble.model.streaming::after {
+      content: '▌';
+      animation: blink .7s step-end infinite;
+    }
+    @keyframes blink { 50% { opacity: 0; } }
+    .chat-input-row {
+      display: flex;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    .chat-input-row textarea {
+      flex: 1;
+      resize: none;
+      border: 1.5px solid #e5e7eb;
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-size: .92rem;
+      font-family: inherit;
+      line-height: 1.5;
+      outline: none;
+      transition: border-color .15s;
+    }
+    .chat-input-row textarea:focus { border-color: #4f46e5; }
+    .chat-send-btn {
+      background: #4f46e5;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: 0 18px;
+      font-size: .95rem;
+      cursor: pointer;
+      transition: background .15s;
+      white-space: nowrap;
+    }
+    .chat-send-btn:disabled { background: #a5b4fc; cursor: not-allowed; }
+    .chat-clear-btn {
+      background: none;
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+      padding: 4px 10px;
+      font-size: .8rem;
+      color: #6b7280;
+      cursor: pointer;
+    }
+    .chat-clear-btn:hover { border-color: #ef4444; color: #ef4444; }
   </style>
 </head>
 <body>
@@ -742,6 +819,20 @@
   </div>
 
   <button class="reset-btn" onclick="reset()">↩️ עיבוד שיעור נוסף</button>
+</div>
+
+<!-- ═══════════════ CHAT CARD ═══════════════ -->
+<div class="card" id="chat-card" style="display:none;">
+  <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;">
+    <span class="section-title" style="margin-bottom:0; font-size:.95rem; border-right-color:#4f46e5;">💬 שאל על השיעור</span>
+    <button class="chat-clear-btn" onclick="clearChat()" id="chat-clear-btn" style="display:none;">נקה שיחה</button>
+  </div>
+  <div class="chat-messages" id="chat-messages"></div>
+  <div class="chat-input-row">
+    <textarea id="chat-input" rows="2" placeholder="שאל שאלה על השיעור..." dir="rtl"
+      onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendChat();}"></textarea>
+    <button class="chat-send-btn" id="chat-send-btn" onclick="sendChat()">שלח</button>
+  </div>
 </div>
 
 <!-- ═══════════════ HISTORY CARD ═══════════════ -->
@@ -909,7 +1000,7 @@
 
         if (task.status === 'completed') {
           clearInterval(pollTimer);
-          showResults(task.result);
+          showResults(task.result, taskId);
         } else if (task.status === 'failed') {
           clearInterval(pollTimer);
           hideLiveTranscript();
@@ -1047,6 +1138,7 @@
   function hideLiveTranscript() {
     stopTranscriptPolling();
     document.getElementById('live-transcript-card').style.display = 'none';
+    hideChatPanel();
   }
 
   function toggleTranscriptPin() {
@@ -1059,7 +1151,7 @@
   // ══════════════════════════════════════════════════════════════════════════
   // Results rendering
   // ══════════════════════════════════════════════════════════════════════════
-  function showResults(result) {
+  function showResults(result, taskId) {
     hideLiveTranscript();
     hideProgress();
     currentResult = result;
@@ -1150,6 +1242,8 @@
 
     document.getElementById('results-card').style.display = 'block';
     window.scrollTo({ top: 0, behavior: 'smooth' });
+
+    if (taskId) showChatPanel(taskId);
   }
 
   function esc(s) { return (s || '').replace(/'/g, "\\'").replace(/"/g, '&quot;'); }
@@ -1350,7 +1444,7 @@
       if (task.result) {
         currentSource = task.url || '';
         toggleHistory();
-        showResults(task.result);
+        showResults(task.result, taskId);
       }
     } catch {
       alert('שגיאה בטעינת המשימה');
@@ -1384,6 +1478,7 @@
     if (pollTimer)  clearInterval(pollTimer);
     if (creepTimer) { clearInterval(creepTimer); creepTimer = null; }
     hideLiveTranscript();
+    hideChatPanel();
     document.getElementById('results-card').style.display = 'none';
     document.getElementById('input-card').style.display   = 'block';
     document.querySelector('.brand').style.display        = 'block';
@@ -1407,6 +1502,122 @@
   if (_taskFromUrl) {
     showProgress();
     startPolling(_taskFromUrl);
+  }
+
+  // ── Chat with recording ──────────────────────────────────────────
+  let currentChatTaskId = null;
+  let chatStreaming = false;
+
+  function showChatPanel(taskId) {
+    currentChatTaskId = taskId;
+    document.getElementById('chat-card').style.display = 'block';
+    loadChatHistory();
+  }
+
+  function hideChatPanel() {
+    document.getElementById('chat-card').style.display = 'none';
+    currentChatTaskId = null;
+    const msgs = document.getElementById('chat-messages');
+    if (msgs) msgs.innerHTML = '';
+    const clearBtn = document.getElementById('chat-clear-btn');
+    if (clearBtn) clearBtn.style.display = 'none';
+  }
+
+  async function loadChatHistory() {
+    if (!currentChatTaskId) return;
+    try {
+      const r = await fetch(`/api/tasks/${currentChatTaskId}/chat`);
+      if (!r.ok) return;
+      const data = await r.json();
+      const msgs = document.getElementById('chat-messages');
+      msgs.innerHTML = '';
+      for (const msg of (data.history || [])) {
+        appendChatBubble(msg.role, msg.content, false);
+      }
+      if (data.history && data.history.length > 0) {
+        document.getElementById('chat-clear-btn').style.display = '';
+        msgs.scrollTop = msgs.scrollHeight;
+      }
+    } catch (e) { console.warn('Failed to load chat history', e); }
+  }
+
+  function appendChatBubble(role, text, streaming = false) {
+    const msgs = document.getElementById('chat-messages');
+    const div = document.createElement('div');
+    div.className = `chat-bubble ${role}${streaming ? ' streaming' : ''}`;
+    div.textContent = text;
+    msgs.appendChild(div);
+    msgs.scrollTop = msgs.scrollHeight;
+    return div;
+  }
+
+  async function sendChat() {
+    if (chatStreaming || !currentChatTaskId) return;
+    const input = document.getElementById('chat-input');
+    const question = input.value.trim();
+    if (!question) return;
+
+    input.value = '';
+    chatStreaming = true;
+    document.getElementById('chat-send-btn').disabled = true;
+
+    appendChatBubble('user', question, false);
+
+    const modelBubble = appendChatBubble('model', '', true);
+    let fullText = '';
+
+    try {
+      const r = await fetch(`/api/tasks/${currentChatTaskId}/chat`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({question}),
+      });
+
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      if (!r.body) throw new Error('No response body');
+
+      const reader = r.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+
+      while (true) {
+        const {done, value} = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, {stream: true});
+        const lines = buf.split('\n');
+        buf = lines.pop(); // keep incomplete line
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const payload = line.slice(6).trim();
+          if (!payload) continue;
+          try {
+            const evt = JSON.parse(payload);
+            if (evt.text) {
+              fullText += evt.text;
+              modelBubble.textContent = fullText;
+              const m = document.getElementById('chat-messages');
+              m.scrollTop = m.scrollHeight;
+            }
+            if (evt.done) break;
+            if (evt.error) throw new Error(evt.error);
+          } catch (_) {}
+        }
+      }
+    } catch (err) {
+      modelBubble.textContent = `שגיאה: ${err.message}`;
+    } finally {
+      modelBubble.classList.remove('streaming');
+      chatStreaming = false;
+      document.getElementById('chat-send-btn').disabled = false;
+      document.getElementById('chat-clear-btn').style.display = '';
+    }
+  }
+
+  async function clearChat() {
+    if (!currentChatTaskId) return;
+    await fetch(`/api/tasks/${currentChatTaskId}/chat`, {method: 'DELETE'});
+    document.getElementById('chat-messages').innerHTML = '';
+    document.getElementById('chat-clear-btn').style.display = 'none';
   }
 </script>
 </body>
