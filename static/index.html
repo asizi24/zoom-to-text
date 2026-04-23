@@ -393,6 +393,37 @@
     }
     .stat-dot { width: 5px; height: 5px; border-radius: 50%; background: #10b981; flex-shrink: 0; }
 
+    /* ── Live transcript preview ── */
+    #live-transcript-card { display: none; }
+    .live-transcript-header {
+      display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;
+    }
+    .pin-btn {
+      background: none; border: 1px solid rgba(255,255,255,.12);
+      border-radius: 8px; padding: 4px 10px; cursor: pointer;
+      color: var(--muted); font-size: .78rem; transition: all .2s; font-family: inherit;
+    }
+    .pin-btn:hover { border-color: rgba(124,58,237,.5); color: #c4b5fd; }
+    .pin-btn.pinned { border-color: rgba(124,58,237,.5); color: #c4b5fd; background: rgba(124,58,237,.1); }
+    #live-transcript-box {
+      min-height: 72px; max-height: 220px; overflow-y: auto;
+      background: rgba(0,0,0,.25); border-radius: 10px;
+      border: 1px solid rgba(255,255,255,.07);
+      padding: 14px 16px; font-size: .82rem; line-height: 1.75;
+      color: var(--muted); direction: rtl;
+      font-family: 'Rubik', system-ui, sans-serif;
+      white-space: pre-wrap; word-break: break-word;
+    }
+    .live-transcript-status {
+      font-size: .73rem; color: rgba(255,255,255,.3); margin-top: 7px; text-align: left;
+    }
+    .typing-cursor {
+      display: inline-block; width: 2px; height: 1em;
+      background: #a78bfa; margin-right: 2px;
+      animation: blink .8s step-end infinite; vertical-align: text-bottom;
+    }
+    @keyframes blink { 50% { opacity: 0; } }
+
     /* ── Animations ── */
     @keyframes fadeIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } }
     @keyframes spin   { to { transform: rotate(360deg); } }
@@ -661,6 +692,16 @@
   <div class="progress-eta" id="progress-eta"></div>
 </div>
 
+<!-- ═══════════════ LIVE TRANSCRIPT CARD ═══════════════ -->
+<div class="card" id="live-transcript-card" style="margin-top:16px;">
+  <div class="live-transcript-header">
+    <span class="section-title" style="margin-bottom:0; font-size:.95rem; border-right-color:#7c3aed;">📝 תמלול חי</span>
+    <button id="transcript-pin-btn" class="pin-btn" onclick="toggleTranscriptPin()" title="נעל/שחרר גלילה אוטומטית">📌 נעל</button>
+  </div>
+  <div id="live-transcript-box"><span class="typing-cursor"></span></div>
+  <div class="live-transcript-status" id="live-transcript-status">ממתין לטקסט...</div>
+</div>
+
 <!-- ═══════════════ RESULTS CARD ═══════════════ -->
 <div class="card" id="results-card" style="margin-top:16px;">
 
@@ -738,6 +779,11 @@
   let lastRealProgress  = 0;
   let lastProgressTime  = 0;
   let visualProgress    = 0;
+
+  // Live transcript preview state
+  let transcriptTimer  = null;
+  let transcriptOffset = 0;
+  let transcriptPinned = false;
 
   // ══════════════════════════════════════════════════════════════════════════
   // Keyboard shortcut — Enter to submit
@@ -826,6 +872,7 @@
     processingStartTime = Date.now();
     showProgress();
     startPolling(taskId);
+    startTranscriptPolling(taskId);
   }
 
   async function submitUrl(url) {
@@ -865,6 +912,7 @@
           showResults(task.result);
         } else if (task.status === 'failed') {
           clearInterval(pollTimer);
+          hideLiveTranscript();
           hideProgress();
           showError(task.error || 'העיבוד נכשל');
         }
@@ -947,9 +995,72 @@
   }
 
   // ══════════════════════════════════════════════════════════════════════════
+  // Live transcript preview
+  // ══════════════════════════════════════════════════════════════════════════
+  function startTranscriptPolling(taskId) {
+    // GEMINI_DIRECT sends audio directly to Gemini — no text transcript during processing
+    if (selectedMode === 'gemini_direct') return;
+
+    transcriptOffset = 0;
+    transcriptPinned = false;
+
+    const box = document.getElementById('live-transcript-box');
+    box.textContent = '';
+    const cursor = document.createElement('span');
+    cursor.className = 'typing-cursor';
+    box.appendChild(cursor);
+
+    const pinBtn = document.getElementById('transcript-pin-btn');
+    pinBtn.textContent = '📌 נעל';
+    pinBtn.classList.remove('pinned');
+
+    document.getElementById('live-transcript-card').style.display = 'block';
+    document.getElementById('live-transcript-status').textContent = 'ממתין לטקסט...';
+
+    transcriptTimer = setInterval(async () => {
+      try {
+        const r = await fetch(`/api/tasks/${taskId}/transcript?offset=${transcriptOffset}`);
+        if (!r.ok) return;
+        const data = await r.json();
+        if (data.text) {
+          transcriptOffset = data.total;
+          // Remove cursor, append delta, re-add cursor
+          const cur = box.querySelector('.typing-cursor');
+          if (cur) cur.remove();
+          box.appendChild(document.createTextNode(data.text));
+          const newCursor = document.createElement('span');
+          newCursor.className = 'typing-cursor';
+          box.appendChild(newCursor);
+          // Auto-scroll to bottom unless user has pinned
+          if (!transcriptPinned) box.scrollTop = box.scrollHeight;
+          document.getElementById('live-transcript-status').textContent =
+            data.total.toLocaleString('he-IL') + ' תווים';
+        }
+      } catch { /* retry on next tick */ }
+    }, 2000);
+  }
+
+  function stopTranscriptPolling() {
+    if (transcriptTimer) { clearInterval(transcriptTimer); transcriptTimer = null; }
+  }
+
+  function hideLiveTranscript() {
+    stopTranscriptPolling();
+    document.getElementById('live-transcript-card').style.display = 'none';
+  }
+
+  function toggleTranscriptPin() {
+    transcriptPinned = !transcriptPinned;
+    const btn = document.getElementById('transcript-pin-btn');
+    btn.classList.toggle('pinned', transcriptPinned);
+    btn.textContent = transcriptPinned ? '📌 נעול' : '📌 נעל';
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
   // Results rendering
   // ══════════════════════════════════════════════════════════════════════════
   function showResults(result) {
+    hideLiveTranscript();
     hideProgress();
     currentResult = result;
     document.getElementById('input-card').style.display = 'none';
@@ -1272,6 +1383,7 @@
   function reset() {
     if (pollTimer)  clearInterval(pollTimer);
     if (creepTimer) { clearInterval(creepTimer); creepTimer = null; }
+    hideLiveTranscript();
     document.getElementById('results-card').style.display = 'none';
     document.getElementById('input-card').style.display   = 'block';
     document.querySelector('.brand').style.display        = 'block';
