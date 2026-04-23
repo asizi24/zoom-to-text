@@ -12,7 +12,7 @@ import logging
 from pathlib import Path
 
 import aiofiles
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 
 from app import state
@@ -148,6 +148,32 @@ async def delete_task(task_id: str, user_id: str = Depends(get_current_user)):
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
     await state.delete_task(task_id)
+
+
+# ── Live transcript preview ───────────────────────────────────────────────────────
+
+@router.get("/tasks/{task_id}/transcript")
+async def get_partial_transcript(
+    task_id: str,
+    offset: int = Query(0, ge=0, description="Character offset — return only text after this position"),
+    user_id: str = Depends(get_current_user),
+):
+    """
+    Return the live partial transcript delta for WHISPER-mode tasks.
+
+    Poll this endpoint while status == 'transcribing' to stream transcript
+    text as it is produced. Use ?offset=N to get only the new characters
+    since the last poll — the frontend tracks the offset locally and sends
+    it on each request so only the delta is transferred.
+
+    Response: {"text": "<new chars>", "total": <total length so far>}
+    """
+    task = await state.get_task_for_user(task_id, user_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    delta, total = await state.get_partial_transcript(task_id, from_offset=offset)
+    return {"text": delta, "total": total}
 
 
 # ── Chat with transcript ───────────────────────────────────────────────────────────
