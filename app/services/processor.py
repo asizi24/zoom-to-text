@@ -170,7 +170,7 @@ async def _process_audio(
             50,
             "☁️ מסיר שקט ושולח ל-OpenAI Whisper API...",
         )
-        transcript, _ = await transcriber.transcribe_via_api(audio_path, language)
+        transcript, _ = await transcriber.transcribe_via_api(audio_path, language, task_id=task_id)
 
         await state.update_task(
             task_id,
@@ -189,7 +189,7 @@ async def _process_audio(
             50,
             "🎙️ מתמלל עם Whisper מקומי (עשוי לקחת מספר דקות)...",
         )
-        transcript, detected_lang = await transcriber.transcribe(audio_path, language)
+        transcript, detected_lang = await transcriber.transcribe(audio_path, language, task_id=task_id)
 
         await state.update_task(
             task_id,

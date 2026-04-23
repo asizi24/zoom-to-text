@@ -93,10 +93,18 @@ async def unload_model_if_idle():
 
 # ── LOCAL transcription ───────────────────────────────────────────────────────
 
-def _transcribe_sync(model, audio_path: str, language: str) -> tuple[str, str]:
+def _transcribe_sync(
+    model,
+    audio_path: str,
+    language: str,
+    segment_cb=None,
+) -> tuple[str, str]:
     """
-    Blocking transcription call — identical to the original implementation.
+    Blocking transcription — runs in a thread executor.
     Returns (full_transcript_text, detected_language_code).
+
+    segment_cb: optional sync callable(text: str) called every ~10 segments or
+    ~5 seconds so callers can stream live text to the DB for the preview panel.
     """
     lang_hint = language if language != "auto" else None
 
@@ -109,21 +117,69 @@ def _transcribe_sync(model, audio_path: str, language: str) -> tuple[str, str]:
         word_timestamps=False,                  # Saves memory
     )
 
-    full_text = " ".join(seg.text.strip() for seg in segments if seg.text.strip())
-    return full_text, info.language
+    full_texts: list[str] = []
+    buffer: list[str] = []
+    last_flush = time.time()
+
+    for seg in segments:
+        text = seg.text.strip()
+        if not text:
+            continue
+        full_texts.append(text)
+
+        if segment_cb is not None:
+            buffer.append(text)
+            now = time.time()
+            # Flush every 10 segments or every 5 seconds to avoid DB overload
+            if len(buffer) >= 10 or now - last_flush >= 5.0:
+                segment_cb(" ".join(buffer) + " ")
+                buffer = []
+                last_flush = now
+
+    # Final flush — make sure nothing is left in the buffer
+    if segment_cb is not None and buffer:
+        segment_cb(" ".join(buffer) + " ")
+
+    return " ".join(full_texts), info.language
 
 
-async def transcribe(audio_path: str, language: str = "he") -> tuple[str, str]:
+async def transcribe(
+    audio_path: str,
+    language: str = "he",
+    task_id: str | None = None,
+) -> tuple[str, str]:
     """
     Transcribe an audio file locally with Faster-Whisper.
     Returns (transcript_text, detected_language).
+
+    Pass task_id to enable live transcript preview: each segment batch is
+    appended to the task's partial_transcript column so the UI can poll it.
     """
+    from app import state as _state  # local import avoids circular at module level
+
     model = await _get_model()
     loop  = asyncio.get_running_loop()
 
+    # Build a thread-safe segment callback that fires-and-forgets into the event loop.
+    # Errors from append_partial_transcript are logged via a done-callback so they
+    # don't silently disappear inside the Future.
+    if task_id is not None:
+        def segment_cb(text: str, _tid=task_id, _loop=loop) -> None:
+            future = asyncio.run_coroutine_threadsafe(
+                _state.append_partial_transcript(_tid, text),
+                _loop,
+            )
+            future.add_done_callback(
+                lambda f: f.exception() and logger.warning(
+                    "partial transcript write failed for %s: %s", _tid, f.exception()
+                )
+            )
+    else:
+        segment_cb = None
+
     logger.info(f"[Local Whisper] Transcribing: {audio_path} (language: {language})")
     transcript, detected_lang = await loop.run_in_executor(
-        None, _transcribe_sync, model, audio_path, language
+        None, _transcribe_sync, model, audio_path, language, segment_cb
     )
 
     global _last_used
@@ -138,7 +194,11 @@ async def transcribe(audio_path: str, language: str = "he") -> tuple[str, str]:
 
 # ── OPENAI API transcription ──────────────────────────────────────────────────
 
-async def transcribe_via_api(audio_path: str, language: str = "he") -> tuple[str, str]:
+async def transcribe_via_api(
+    audio_path: str,
+    language: str = "he",
+    task_id: str | None = None,
+) -> tuple[str, str]:
     """
     Transcribe an audio file via OpenAI's Whisper API (whisper-1).
 
@@ -148,9 +208,14 @@ async def transcribe_via_api(audio_path: str, language: str = "he") -> tuple[str
       3. API calls        (httpx)  — each chunk sent independently
       4. Join                      — transcripts concatenated in order
 
+    Pass task_id to enable live transcript preview: each chunk's transcript is
+    appended to partial_transcript as soon as the API responds.
+
     Requires settings.openai_api_key to be set.
     Returns (transcript_text, language).
     """
+    from app import state as _state  # local import avoids circular at module level
+
     if not settings.openai_api_key:
         raise RuntimeError(
             "OpenAI API key not configured. "
@@ -171,6 +236,9 @@ async def transcribe_via_api(audio_path: str, language: str = "he") -> tuple[str
                 text = await _call_whisper_api(client, chunk_path, language)
                 if text.strip():
                     transcripts.append(text.strip())
+                    # Stream each completed chunk to the live preview
+                    if task_id is not None:
+                        await _state.append_partial_transcript(task_id, text.strip() + " ")
 
         transcript = " ".join(transcripts)
         logger.info(f"[OpenAI Whisper] Done: {len(transcript):,} chars")
