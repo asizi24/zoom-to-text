@@ -46,11 +46,18 @@ class Chapter(BaseModel):
     key_points: list[str] = []
 
 
+class Flashcard(BaseModel):
+    front: str                  # Question or concept prompt
+    back:  str                  # 1-3 sentence answer/explanation
+    tags:  list[str] = []       # Topic/chapter tags for Anki filtering
+
+
 class LessonResult(BaseModel):
     transcript:        Optional[str] = None  # Raw transcript (only in WHISPER_LOCAL mode)
     summary:           str = ""
     chapters:          list[Chapter] = []
     quiz:              list[QuizQuestion] = []
+    flashcards:        list[Flashcard] = []   # 15-25 spaced-repetition cards
     language:          str = "he"
     # Critique pipeline debug log — populated when ENABLE_EXAM_CRITIQUE=True
     exam_critique_log: Optional[dict] = None

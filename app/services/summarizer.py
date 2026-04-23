@@ -32,7 +32,7 @@ from google import genai
 from google.genai import types
 
 from app.config import settings
-from app.models import Chapter, LessonResult, QuizQuestion
+from app.models import Chapter, Flashcard, LessonResult, QuizQuestion
 
 logger = logging.getLogger(__name__)
 
@@ -888,3 +888,111 @@ async def stream_chat_response(context: str, history: list[dict], question: str)
         if isinstance(item, Exception):
             raise item
         yield item
+
+
+# ── Flashcards generation ─────────────────────────────────────────────────────
+# One extra Gemini call per lesson. Invoked by the processor after exam+critique
+# (~95% → 98% progress). Output is stored in LessonResult.flashcards and exported
+# to .apkg/.csv on demand.
+
+_FLASHCARDS_PROMPT = """
+אתה מומחה לתכנון חומרי לימוד לשיטת חזרה מרווחת (spaced repetition) — בסגנון Anki.
+קיבלת סיכום שיעור ותמלול. המשימה: הפק 15-25 כרטיסיות תרגול איכותיות בעברית.
+
+כללי כתיבת כרטיסייה:
+  ✅ "Front" — שאלה ממוקדת, מושג לזיהוי, או הנחיה קצרה (לא יותר ממשפט אחד)
+  ✅ "Back" — הסבר קצר, 1-3 משפטים. צריך לעמוד בזכות עצמו (לא "ראה סעיף...").
+  ✅ כל כרטיסייה בודקת רעיון אחד בלבד (atomic)
+  ✅ **שמור מונחים טכניים באנגלית כפי שהם** — React, API, TCP, JWT וכו'
+     לא מתורגמים גם אם יש תרגום עברי מקובל.
+  ✅ תייג כל כרטיסייה ב-1-3 תגיות נושא קצרות (מילה אחת כל אחת, ללא רווחים
+     ולא סימנים — השתמש ב-underscore אם צריך להצמיד שתי מילים)
+
+דוגמאות טובות:
+{"front": "מה תפקיד useState ב-React?", "back": "מחזיר זוג [ערך, setState] שמאפשר לקומפוננטה לנהל state מקומי ולגרום ל-re-render בעת שינוי.", "tags": ["React", "hooks"]}
+{"front": "מהו ההבדל המרכזי בין TCP ל-UDP?", "back": "TCP מבטיח מסירה מסודרת ואמינה באמצעות handshake ו-acknowledgments. UDP שולח בלי אישור — מהיר יותר אבל יכול לאבד packets.", "tags": ["networking"]}
+
+אסור:
+  ❌ כרטיסיות "רשימה" ("מנה 5 עקרונות של X") — קשה לזכור, תפצל ל-5 כרטיסיות
+  ❌ כרטיסיות שהתשובה בהן "כן/לא"
+  ❌ שאלה שהתשובה שלה נכתבה מילה במילה ב-Front (רמז עצמי)
+  ❌ תרגום מונחים טכניים לעברית
+
+החזר JSON גולמי בלבד, ללא markdown fences, בפורמט הזה:
+{
+  "flashcards": [
+    {"front": "...", "back": "...", "tags": ["...", "..."]}
+  ]
+}
+"""
+
+
+def _parse_flashcards_response(text: str) -> list[Flashcard]:
+    """Parse Gemini flashcards JSON response into a list of Flashcard objects."""
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        lines = stripped.split("\n")
+        stripped = "\n".join(lines[1:]).rsplit("```", 1)[0].strip()
+
+    # Anchor on our known root key to skip any thinking preamble
+    m = re.search(r'\{\s*"flashcards"\s*:', stripped)
+    if m:
+        stripped = stripped[m.start():]
+    json_end = stripped.rfind("}")
+    if json_end != -1:
+        stripped = stripped[: json_end + 1]
+
+    stripped = _sanitize_json_escapes(stripped)
+    try:
+        data = json.loads(stripped)
+    except json.JSONDecodeError as exc:
+        logger.error(f"Flashcards JSON parse error: {exc}\nRaw (first 300): {text[:300]}")
+        return []
+
+    cards = []
+    for c in data.get("flashcards", []):
+        front = (c.get("front") or "").strip()
+        back  = (c.get("back") or "").strip()
+        if not front or not back:
+            continue
+        tags = [str(t).strip() for t in c.get("tags", []) if str(t).strip()]
+        cards.append(Flashcard(front=front, back=back, tags=tags))
+    return cards
+
+
+def _generate_flashcards_sync(summary: str, transcript: str | None) -> list[Flashcard]:
+    """Blocking: one Gemini call to produce 15-25 flashcards. Runs in executor."""
+    client = _get_client()
+
+    # Build context — prefer summary; include transcript head for richer detail
+    context_parts = [f"סיכום השיעור:\n{summary}"]
+    if transcript:
+        # Cap at 30k chars — flashcards don't need the full 2-hour transcript
+        context_parts.append(f"\nקטע מהתמלול:\n{transcript[:30_000]}")
+    context = "\n\n".join(context_parts)
+
+    prompt = f"{_FLASHCARDS_PROMPT}\n\n{context}"
+    response = _generate_with_retry(client, prompt)
+    text = _response_text(response)
+    return _parse_flashcards_response(text)
+
+
+_FLASHCARDS_TIMEOUT = 180.0  # 3 minutes
+
+
+async def generate_flashcards(
+    summary: str,
+    transcript: str | None = None,
+) -> list[Flashcard]:
+    """Async: generate 15-25 flashcards from a lesson summary (+ optional transcript)."""
+    if not summary.strip():
+        return []
+    loop = asyncio.get_running_loop()
+    try:
+        return await asyncio.wait_for(
+            loop.run_in_executor(None, _generate_flashcards_sync, summary, transcript),
+            timeout=_FLASHCARDS_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Flashcards generation timed out — returning empty list")
+        return []

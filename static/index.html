@@ -660,6 +660,139 @@
       cursor: pointer;
     }
     .chat-clear-btn:hover { border-color: #ef4444; color: #ef4444; }
+
+    /* ── Flashcards ── */
+    .fc-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+    }
+    .fc-counter {
+      font-size: .85rem;
+      color: #6b7280;
+      font-variant-numeric: tabular-nums;
+    }
+    .fc-export-row { display: flex; gap: 8px; flex-wrap: wrap; }
+    .fc-export-btn {
+      background: linear-gradient(135deg, #6366f1, #8b5cf6);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: 8px 14px;
+      font-size: .85rem;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: transform .1s, filter .15s;
+    }
+    .fc-export-btn:hover { filter: brightness(1.1); transform: translateY(-1px); }
+    .fc-export-btn.secondary {
+      background: transparent;
+      color: #6366f1;
+      border: 1.5px solid #6366f1;
+    }
+    .fc-stack {
+      position: relative;
+      margin: 0 auto;
+      width: 100%;
+      max-width: 480px;
+      min-height: 260px;
+      perspective: 1200px;
+    }
+    .fc-card {
+      position: relative;
+      width: 100%;
+      min-height: 240px;
+      transform-style: preserve-3d;
+      transition: transform .5s cubic-bezier(.2,.8,.2,1);
+      cursor: pointer;
+    }
+    .fc-card.flipped { transform: rotateY(180deg); }
+    .fc-face {
+      position: absolute; inset: 0;
+      backface-visibility: hidden;
+      border-radius: 16px;
+      padding: 28px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      text-align: center;
+      font-size: 1.1rem;
+      line-height: 1.55;
+      box-shadow: 0 10px 30px rgba(99,102,241,.2);
+    }
+    .fc-face.front {
+      background: linear-gradient(135deg, #eef2ff, #fdf4ff);
+      color: #1f2937;
+      border: 2px solid #c7d2fe;
+    }
+    .fc-face.back {
+      background: linear-gradient(135deg, #4f46e5, #7c3aed);
+      color: #fff;
+      transform: rotateY(180deg);
+    }
+    .fc-hint {
+      position: absolute;
+      bottom: 10px;
+      left: 0; right: 0;
+      font-size: .75rem;
+      opacity: .6;
+      text-align: center;
+    }
+    .fc-tags {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      justify-content: center;
+      margin-top: 12px;
+    }
+    .fc-tag {
+      font-size: .7rem;
+      background: rgba(255,255,255,.2);
+      padding: 2px 8px;
+      border-radius: 999px;
+    }
+    .fc-face.front .fc-tag { background: rgba(99,102,241,.12); color: #4338ca; }
+    .fc-controls {
+      display: flex;
+      gap: 10px;
+      justify-content: center;
+      margin-top: 18px;
+      flex-wrap: wrap;
+    }
+    .fc-nav-btn {
+      background: #f3f4f6;
+      border: 1.5px solid #e5e7eb;
+      border-radius: 8px;
+      padding: 8px 16px;
+      font-size: .9rem;
+      cursor: pointer;
+      min-width: 80px;
+    }
+    .fc-nav-btn:hover { background: #e5e7eb; }
+    .fc-nav-btn:disabled { opacity: .4; cursor: not-allowed; }
+    .fc-mark-btn {
+      border-radius: 8px;
+      padding: 8px 16px;
+      font-size: .9rem;
+      cursor: pointer;
+      border: none;
+      color: #fff;
+    }
+    .fc-mark-btn.knew { background: #10b981; }
+    .fc-mark-btn.missed { background: #ef4444; }
+    .fc-score {
+      margin-top: 14px;
+      text-align: center;
+      font-size: .85rem;
+      color: #374151;
+    }
   </style>
 </head>
 <body>
@@ -821,6 +954,38 @@
     <div class="section-title">🧠 מבחן — בחן את עצמך</div>
     <div class="score-badge" id="score-badge" style="display:none">ציון: 0 / 0</div>
     <div class="quiz-list" id="quiz-list"></div>
+  </div>
+
+  <!-- Flashcards -->
+  <div id="flashcards-section" style="display:none; margin-top:36px;">
+    <div class="fc-toolbar">
+      <div class="section-title" style="margin-bottom:0;">🃏 כרטיסיות תרגול</div>
+      <div class="fc-export-row">
+        <a class="fc-export-btn" id="fc-apkg-btn" href="#" download>⬇️ הורד ל-Anki</a>
+        <a class="fc-export-btn secondary" id="fc-csv-btn" href="#" download>⬇️ CSV</a>
+      </div>
+    </div>
+    <div class="fc-counter" id="fc-counter">0 מתוך 0</div>
+    <div class="fc-stack">
+      <div class="fc-card" id="fc-card" onclick="flipFlashcard()">
+        <div class="fc-face front">
+          <div id="fc-front-text"></div>
+          <div class="fc-tags" id="fc-front-tags"></div>
+          <div class="fc-hint">לחץ לחשיפת התשובה</div>
+        </div>
+        <div class="fc-face back">
+          <div id="fc-back-text"></div>
+          <div class="fc-hint">לחץ להסתרת התשובה</div>
+        </div>
+      </div>
+    </div>
+    <div class="fc-controls">
+      <button class="fc-nav-btn" id="fc-prev-btn" onclick="prevFlashcard()">◀ הקודם</button>
+      <button class="fc-mark-btn missed" onclick="markFlashcard(false)">✗ לא ידעתי</button>
+      <button class="fc-mark-btn knew" onclick="markFlashcard(true)">✓ ידעתי</button>
+      <button class="fc-nav-btn" id="fc-next-btn" onclick="nextFlashcard()">הבא ▶</button>
+    </div>
+    <div class="fc-score" id="fc-score"></div>
   </div>
 
   <button class="reset-btn" onclick="reset()">↩️ עיבוד שיעור נוסף</button>
@@ -1248,6 +1413,7 @@
     document.getElementById('results-card').style.display = 'block';
     window.scrollTo({ top: 0, behavior: 'smooth' });
 
+    renderFlashcards(result.flashcards || [], taskId);
     if (taskId) showChatPanel(taskId);
   }
 
@@ -1498,6 +1664,8 @@
     document.getElementById('score-badge').style.display = 'none';
     document.getElementById('chapters-section').style.display = 'block';
     document.getElementById('transcript-section').style.display = 'none';
+    document.getElementById('flashcards-section').style.display = 'none';
+    flashcards = []; fcIndex = 0; fcKnew = 0; fcMissed = 0; fcSeen = new Set();
     hideError();
     switchTab('url');
   }
@@ -1623,6 +1791,90 @@
     await fetch(`/api/tasks/${currentChatTaskId}/chat`, {method: 'DELETE'});
     document.getElementById('chat-messages').innerHTML = '';
     document.getElementById('chat-clear-btn').style.display = 'none';
+  }
+
+  // ── Flashcards ───────────────────────────────────────────────────────────
+  let flashcards = [];
+  let fcIndex = 0;
+  let fcKnew = 0;
+  let fcMissed = 0;
+  let fcSeen = new Set();
+
+  function renderFlashcards(cards, taskId) {
+    flashcards = cards || [];
+    fcIndex = 0;
+    fcKnew = 0;
+    fcMissed = 0;
+    fcSeen = new Set();
+    const section = document.getElementById('flashcards-section');
+    if (!flashcards.length) {
+      section.style.display = 'none';
+      return;
+    }
+    section.style.display = 'block';
+    if (taskId) {
+      document.getElementById('fc-apkg-btn').href =
+        `/api/tasks/${taskId}/flashcards/export.apkg`;
+      document.getElementById('fc-csv-btn').href =
+        `/api/tasks/${taskId}/flashcards/export.csv`;
+    }
+    showFlashcard();
+  }
+
+  function showFlashcard() {
+    if (!flashcards.length) return;
+    const card = flashcards[fcIndex];
+    document.getElementById('fc-front-text').textContent = card.front || '';
+    document.getElementById('fc-back-text').textContent = card.back || '';
+    // Tags — built with DOM APIs (no innerHTML) to prevent XSS
+    const tagBox = document.getElementById('fc-front-tags');
+    tagBox.textContent = '';
+    (card.tags || []).forEach(t => {
+      const span = document.createElement('span');
+      span.className = 'fc-tag';
+      span.textContent = t;
+      tagBox.appendChild(span);
+    });
+    document.getElementById('fc-card').classList.remove('flipped');
+    document.getElementById('fc-counter').textContent =
+      `${fcIndex + 1} מתוך ${flashcards.length}`;
+    document.getElementById('fc-prev-btn').disabled = fcIndex === 0;
+    document.getElementById('fc-next-btn').disabled = fcIndex === flashcards.length - 1;
+    updateFcScore();
+  }
+
+  function flipFlashcard() {
+    document.getElementById('fc-card').classList.toggle('flipped');
+  }
+
+  function nextFlashcard() {
+    if (fcIndex < flashcards.length - 1) { fcIndex++; showFlashcard(); }
+  }
+
+  function prevFlashcard() {
+    if (fcIndex > 0) { fcIndex--; showFlashcard(); }
+  }
+
+  function markFlashcard(correct) {
+    if (!flashcards.length) return;
+    if (!fcSeen.has(fcIndex)) {
+      fcSeen.add(fcIndex);
+      if (correct) fcKnew++; else fcMissed++;
+    }
+    updateFcScore();
+    if (fcIndex < flashcards.length - 1) {
+      fcIndex++;
+      showFlashcard();
+    } else {
+      // Final card: just re-render to update disabled state
+      document.getElementById('fc-card').classList.remove('flipped');
+    }
+  }
+
+  function updateFcScore() {
+    const el = document.getElementById('fc-score');
+    if (fcSeen.size === 0) { el.textContent = ''; return; }
+    el.textContent = `סימנת ${fcSeen.size} מתוך ${flashcards.length} · ✓ ${fcKnew} · ✗ ${fcMissed}`;
   }
 </script>
 </body>

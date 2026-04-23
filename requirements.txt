@@ -25,6 +25,10 @@ faster-whisper==1.0.3
 httpx==0.27.0
 psutil==6.0.0
 
+# ── Flashcards → Anki export ──────────────────────────────────────────────────
+# Builds .apkg files students can import into the Anki spaced-repetition app.
+genanki==0.13.1
+
 # ── Testing ─────────────────────────────────────────────────────────────────────
 pytest==8.2.2
 pytest-asyncio==0.23.8

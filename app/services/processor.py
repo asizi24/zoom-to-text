@@ -100,6 +100,7 @@ async def run_pipeline(
         )
 
         result = await _process_audio(task_id, audio_path, mode, language)
+        result = await _generate_flashcards_step(task_id, result)
         await state.complete_task(task_id, result)
         logger.info(f"Task {task_id} completed ✅")
 
@@ -128,6 +129,7 @@ async def run_pipeline_from_file(
             task_id, TaskStatus.TRANSCRIBING, 10, "📁 קובץ התקבל. מתחיל עיבוד..."
         )
         result = await _process_audio(task_id, file_path, mode, language)
+        result = await _generate_flashcards_step(task_id, result)
         await state.complete_task(task_id, result)
         logger.info(f"Task {task_id} (upload) completed ✅")
 
@@ -220,4 +222,31 @@ async def _process_audio(
         result = await summarizer.summarize_transcript(transcript, progress_cb)
         result.transcript = transcript
 
+    return result
+
+
+# ── Flashcards step ───────────────────────────────────────────────────────────────
+
+async def _generate_flashcards_step(task_id: str, result) -> "LessonResult":
+    """
+    Append a flashcards-generation pass to a completed result.
+    One extra Gemini call — adds ~30% to per-task cost, so failures are
+    non-fatal (we log and return the result without flashcards rather than
+    failing the whole task).
+    """
+    if not result or not result.summary:
+        return result
+    await state.update_task(
+        task_id,
+        TaskStatus.SUMMARIZING,
+        98,
+        "🃏 מייצר כרטיסיות לחזרה...",
+    )
+    try:
+        cards = await summarizer.generate_flashcards(result.summary, result.transcript)
+        result.flashcards = cards
+        logger.info(f"Task {task_id}: generated {len(cards)} flashcards")
+    except Exception as exc:
+        # Soft-fail: the lesson itself is already complete. Log and continue.
+        logger.warning(f"Task {task_id}: flashcards generation failed: {exc}")
     return result
