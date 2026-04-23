@@ -132,6 +132,10 @@ async def init_db():
         await db.execute("ALTER TABLE tasks ADD COLUMN partial_transcript TEXT")
         await db.commit()
         logger.info("Migrated tasks table: added partial_transcript column")
+    if "chat_history" not in cols:
+        await db.execute("ALTER TABLE tasks ADD COLUMN chat_history TEXT")
+        await db.commit()
+        logger.info("Migrated tasks table: added chat_history column")
 
     # Create index now that user_id column is guaranteed to exist
     await db.execute(CREATE_TASKS_INDEX_SQL)
@@ -441,3 +445,58 @@ async def get_partial_transcript(task_id: str, from_offset: int = 0) -> tuple[st
     total = len(full)
     delta = full[from_offset:] if from_offset < total else ""
     return delta, total
+
+
+# ── Chat history ──────────────────────────────────────────────────────────────────
+
+# Keep at most this many messages in the stored history (user + model turns combined).
+# Older messages are trimmed from the front so the most recent context is preserved.
+_MAX_CHAT_MESSAGES = 40
+
+
+async def get_chat_history(task_id: str) -> list[dict]:
+    """
+    Return the stored chat history for a task as a list of
+    {"role": "user"|"model", "content": "..."} dicts.
+    Returns an empty list if no history yet.
+    """
+    import json as _json
+    db = await _get_db()
+    async with db.execute(
+        "SELECT chat_history FROM tasks WHERE id=?", [task_id]
+    ) as cursor:
+        row = await cursor.fetchone()
+    if row is None or not row["chat_history"]:
+        return []
+    try:
+        return _json.loads(row["chat_history"])
+    except (ValueError, TypeError):
+        return []
+
+
+async def append_chat_message(task_id: str, role: str, content: str) -> None:
+    """
+    Append one message to the task's chat history and persist it.
+    Trims the history to _MAX_CHAT_MESSAGES (oldest messages dropped first).
+    """
+    import json as _json
+    history = await get_chat_history(task_id)
+    history.append({"role": role, "content": content})
+    # Trim from front to keep within the message cap
+    if len(history) > _MAX_CHAT_MESSAGES:
+        history = history[-_MAX_CHAT_MESSAGES:]
+    db = await _get_db()
+    await db.execute(
+        "UPDATE tasks SET chat_history=? WHERE id=?",
+        [_json.dumps(history, ensure_ascii=False), task_id],
+    )
+    await db.commit()
+
+
+async def clear_chat_history(task_id: str) -> None:
+    """Delete the chat history for a task (user-initiated reset)."""
+    db = await _get_db()
+    await db.execute(
+        "UPDATE tasks SET chat_history=NULL WHERE id=?", [task_id]
+    )
+    await db.commit()

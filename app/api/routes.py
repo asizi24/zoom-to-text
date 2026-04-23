@@ -7,12 +7,14 @@ GET  /api/tasks          — list recent jobs
 GET  /api/tasks/{id}     — get job status + result
 DELETE /api/tasks/{id}   — delete a job record
 """
+import json
 import uuid
 import logging
 from pathlib import Path
 
 import aiofiles
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app import state
@@ -215,3 +217,100 @@ async def ask_question(task_id: str, body: AskRequest, user_id: str = Depends(ge
     except Exception as exc:
         logger.error(f"Ask failed for task {task_id}: {exc}")
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ── Chat with recording (multi-turn, streaming) ───────────────────────────────────
+
+def _build_lesson_context(result) -> str:
+    """Build a rich context string from a completed lesson result."""
+    parts = []
+    if result.summary:
+        parts.append(f"סיכום:\n{result.summary}")
+    for ch in result.chapters:
+        parts.append(f"\nפרק: {ch.title}\n{ch.content}")
+        if ch.key_points:
+            parts.append("נקודות מרכזיות: " + ", ".join(ch.key_points))
+    if result.transcript:
+        # Include up to 30 k chars of transcript for richer answers
+        parts.append(f"\nתמלול:\n{result.transcript[:30_000]}")
+    return "\n".join(parts)
+
+
+@router.post("/tasks/{task_id}/chat")
+async def chat_with_recording(
+    task_id: str,
+    body: AskRequest,
+    user_id: str = Depends(get_current_user),
+):
+    """
+    Multi-turn streaming chat about a completed lesson.
+
+    Returns a Server-Sent Events stream where each event carries a JSON payload:
+      {"text": "<chunk>"}   — partial model response
+      {"done": true}        — stream finished (no more events)
+      {"error": "<msg>"}    — error occurred
+
+    The user message and final model response are stored in SQLite so the
+    history survives page reloads. History is capped at 40 messages (state.py).
+    """
+    task = await state.get_task_for_user(task_id, user_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.result is None:
+        raise HTTPException(
+            status_code=400, detail="Task has no result yet — wait for processing to complete"
+        )
+
+    context = _build_lesson_context(task.result)
+    history = await state.get_chat_history(task_id)
+
+    # Persist the user message before streaming starts
+    await state.append_chat_message(task_id, "user", body.question)
+
+    async def generate():
+        full_response: list[str] = []
+        try:
+            async for chunk in summarizer.stream_chat_response(context, history, body.question):
+                full_response.append(chunk)
+                yield f"data: {json.dumps({'text': chunk}, ensure_ascii=False)}\n\n"
+        except Exception as exc:
+            logger.error(f"Chat stream failed for task {task_id}: {exc}")
+            yield f"data: {json.dumps({'error': str(exc)}, ensure_ascii=False)}\n\n"
+        finally:
+            if full_response:
+                await state.append_chat_message(task_id, "model", "".join(full_response))
+            yield f"data: {json.dumps({'done': True})}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "X-Accel-Buffering": "no",   # disable nginx buffering
+            "Cache-Control": "no-cache",
+        },
+    )
+
+
+@router.get("/tasks/{task_id}/chat")
+async def get_chat_history(
+    task_id: str,
+    user_id: str = Depends(get_current_user),
+):
+    """Return the stored chat history for a completed task."""
+    task = await state.get_task_for_user(task_id, user_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    history = await state.get_chat_history(task_id)
+    return {"history": history}
+
+
+@router.delete("/tasks/{task_id}/chat", status_code=204)
+async def clear_chat_history(
+    task_id: str,
+    user_id: str = Depends(get_current_user),
+):
+    """Clear the chat history for a task."""
+    task = await state.get_task_for_user(task_id, user_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    await state.clear_chat_history(task_id)

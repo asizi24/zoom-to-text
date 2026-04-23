@@ -764,3 +764,103 @@ async def ask_about_lesson(context: str, question: str) -> str:
         )
     except asyncio.TimeoutError:
         raise TimeoutError("⏱️ Gemini לא הגיב תוך 2 דקות — נסה שוב")
+
+
+# ── Streaming multi-turn chat ─────────────────────────────────────────────────────
+
+_CHAT_SYSTEM_PROMPT = """\
+אתה עוזר לימודי חכם המסייע לתלמיד להבין שיעור.
+כללים:
+- ענה אך ורק על בסיס תוכן השיעור שניתן לך להלן.
+- אם התשובה אינה בתוכן, אמור זאת בכנות ואל תמציא.
+- כשאתה מסתמך על חלק ספציפי מהשיעור, ציטט אותו קצרות עם גרשיים ״...״.
+- ענה בעברית בסגנון ידידותי ומסביר פנים.
+- תשובות קצרות ומדויקות עדיפות על פני תשובות ארוכות ומעורפלות.\
+"""
+
+# Maximum history turns sent to Gemini per request (user+model pairs)
+_MAX_HISTORY_TURNS = 10
+
+
+def _build_chat_contents(context: str, history: list[dict], question: str) -> list:
+    """
+    Build the contents list for a multi-turn Gemini chat call.
+    The lesson context is embedded in the first user turn as a system-style prefix
+    (google-genai's generate_content_stream does not accept a system role directly).
+    """
+    contents = []
+
+    # First turn: system context as a user message (Gemini ignores "system" role)
+    context_turn = (
+        f"{_CHAT_SYSTEM_PROMPT}\n\n"
+        f"תוכן השיעור:\n{context[:40_000]}"  # cap at 40 k chars (~30 k tokens)
+    )
+    contents.append({"role": "user", "parts": [{"text": context_turn}]})
+    contents.append({"role": "model", "parts": [{"text": "הבנתי. אני מוכן לענות על שאלות על השיעור הזה."}]})
+
+    # Recent history (trim to avoid overly long context)
+    trimmed = history[-(2 * _MAX_HISTORY_TURNS):]  # 2× because user+model per turn
+    for msg in trimmed:
+        role = msg.get("role", "user")
+        contents.append({"role": role, "parts": [{"text": msg.get("content", "")}]})
+
+    # Current user question
+    contents.append({"role": "user", "parts": [{"text": question}]})
+    return contents
+
+
+def _stream_chat_sync(
+    context: str,
+    history: list[dict],
+    question: str,
+    out_queue,  # thread-safe queue.Queue
+) -> None:
+    """
+    Blocking: calls Gemini generate_content_stream, puts each text chunk into
+    out_queue, and puts None as sentinel on completion or Exception on error.
+    """
+    import queue as _q_mod
+    client = _get_client()
+    contents = _build_chat_contents(context, history, question)
+    try:
+        for chunk in client.models.generate_content_stream(
+            model=settings.gemini_model,
+            contents=contents,
+        ):
+            text = getattr(chunk, "text", None)
+            if text:
+                out_queue.put(text)
+    except Exception as exc:
+        out_queue.put(exc)
+    finally:
+        out_queue.put(None)  # sentinel — always sent
+
+
+async def stream_chat_response(context: str, history: list[dict], question: str):
+    """
+    Async generator that yields text chunks from a streaming Gemini chat call.
+
+    Architecture:
+      • _stream_chat_sync() runs in a thread executor (sync Gemini SDK).
+      • It pushes chunks into a thread-safe queue.Queue.
+      • This coroutine drains the queue using run_in_executor so it never
+        blocks the event loop.
+
+    Raises RuntimeError on Gemini errors; caller is responsible for cleanup.
+    """
+    import queue as _q_mod
+
+    loop = asyncio.get_running_loop()
+    q: _q_mod.Queue = _q_mod.Queue()
+
+    # Fire off the sync streaming in a thread — don't await, let it run concurrently
+    loop.run_in_executor(None, _stream_chat_sync, context, history, question, q)
+
+    while True:
+        # Block (in executor) until a chunk or sentinel arrives
+        item = await loop.run_in_executor(None, q.get)
+        if item is None:
+            break
+        if isinstance(item, Exception):
+            raise item
+        yield item
