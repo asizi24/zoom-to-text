@@ -182,6 +182,25 @@ async def _process_audio(
         result = await summarizer.summarize_transcript(transcript, progress_cb)
         result.transcript = transcript
 
+    elif mode == ProcessingMode.IVRIT_AI:
+        await state.update_task(
+            task_id,
+            TaskStatus.TRANSCRIBING,
+            50,
+            "🇮🇱 מתמלל עם ivrit-ai (מודל מותאם לעברית)...",
+        )
+        transcript, _ = await transcriber.transcribe_ivrit_ai(audio_path, language, task_id=task_id)
+
+        await state.update_task(
+            task_id,
+            TaskStatus.SUMMARIZING,
+            80,
+            "🤖 יוצר סיכום ומבחן עם Gemini AI...",
+        )
+        progress_cb = _make_progress_cb(task_id, TaskStatus.SUMMARIZING, loop)
+        result = await summarizer.summarize_transcript(transcript, progress_cb)
+        result.transcript = transcript
+
     else:
         await state.update_task(
             task_id,

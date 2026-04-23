@@ -25,6 +25,10 @@ class ProcessingMode(str, Enum):
     # Transcribe via OpenAI Whisper API, then send text to Gemini
     # Requires OPENAI_API_KEY. Audio is preprocessed (silence removal + chunking).
     WHISPER_API = "whisper_api"
+    # Transcribe locally with ivrit-ai's Hebrew-tuned Whisper model.
+    # Higher accuracy on spoken Hebrew than vanilla Whisper, but slower than
+    # GEMINI_DIRECT. Model is downloaded on first use and cached on disk.
+    IVRIT_AI = "ivrit_ai"
 
 
 # ── Result schemas ──────────────────────────────────────────────────────────────

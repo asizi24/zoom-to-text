@@ -36,6 +36,13 @@ class Settings(BaseSettings):
     whisper_device: str = "cpu"         # cpu | cuda
     whisper_compute_type: str = "int8"  # int8 (CPU) | float16 (GPU)
 
+    # ── ivrit-ai (Hebrew-tuned Whisper) ─────────────────────────────────────────
+    # HuggingFace repo of a CT2-converted ivrit-ai model (faster-whisper compatible).
+    # Override via env: IVRIT_AI_MODEL=ivrit-ai/whisper-v3-ct2
+    # The model is downloaded on first use into ~/.cache/faster_whisper (mounted
+    # as a Docker volume so it survives container restarts).
+    ivrit_ai_model: str = "ivrit-ai/whisper-large-v3-turbo-ct2"
+
     # ── Resource management ─────────────────────────────────────────────────────
     # Unload Whisper model from RAM after this many idle minutes
     auto_shutdown_idle_minutes: int = 30

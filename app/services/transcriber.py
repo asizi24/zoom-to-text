@@ -30,10 +30,20 @@ logger = logging.getLogger(__name__)
 
 
 # ── Local model state ─────────────────────────────────────────────────────────
+# Two independent caches — one for vanilla faster-whisper, one for ivrit-ai's
+# Hebrew-tuned model. They are loaded on demand and unloaded separately after
+# _IDLE_THRESHOLD seconds of inactivity. Keeping them separate (rather than
+# one "active model" slot) lets users switch modes per task without paying
+# a reload penalty each time.
 
 _model = None
 _last_used: float = 0.0
 _model_lock = asyncio.Lock()
+
+_ivrit_model = None
+_ivrit_last_used: float = 0.0
+_ivrit_lock = asyncio.Lock()
+
 _IDLE_THRESHOLD = settings.auto_shutdown_idle_minutes * 60
 
 
@@ -72,23 +82,35 @@ async def _get_model():
 async def unload_model_if_idle():
     """
     Called every 60s by the idle watcher in main.py.
-    Frees RAM by deleting the model if it hasn't been used recently.
+    Frees RAM by deleting models that haven't been used recently.
+    Handles both the vanilla Whisper cache and the ivrit-ai cache independently.
     """
-    global _model, _last_used
-    if _model is None:
-        return
+    global _model, _last_used, _ivrit_model, _ivrit_last_used
 
-    idle_seconds = time.time() - _last_used
-    if idle_seconds > _IDLE_THRESHOLD:
-        async with _model_lock:
-            if _model is not None:
-                logger.info(
-                    f"Whisper idle for {idle_seconds / 60:.1f} min "
-                    f"(threshold: {settings.auto_shutdown_idle_minutes} min) — unloading"
-                )
-                del _model
-                _model = None
-                gc.collect()
+    if _model is not None:
+        idle = time.time() - _last_used
+        if idle > _IDLE_THRESHOLD:
+            async with _model_lock:
+                if _model is not None:
+                    logger.info(
+                        f"Whisper idle for {idle / 60:.1f} min "
+                        f"(threshold: {settings.auto_shutdown_idle_minutes} min) — unloading"
+                    )
+                    del _model
+                    _model = None
+                    gc.collect()
+
+    if _ivrit_model is not None:
+        idle = time.time() - _ivrit_last_used
+        if idle > _IDLE_THRESHOLD:
+            async with _ivrit_lock:
+                if _ivrit_model is not None:
+                    logger.info(
+                        f"ivrit-ai idle for {idle / 60:.1f} min — unloading"
+                    )
+                    del _ivrit_model
+                    _ivrit_model = None
+                    gc.collect()
 
 
 # ── LOCAL transcription ───────────────────────────────────────────────────────
@@ -266,3 +288,88 @@ async def _call_whisper_api(client: httpx.AsyncClient, chunk_path: str, language
 
     response.raise_for_status()
     return response.text
+
+
+# ── ivrit-ai transcription ────────────────────────────────────────────────────
+# Uses ivrit-ai's Hebrew-tuned Whisper checkpoint via faster-whisper (CT2 backend).
+# Model path is settings.ivrit_ai_model (default: ivrit-ai/whisper-large-v3-turbo-ct2).
+# Shares the same cache dir as WHISPER_LOCAL — mounted as a Docker volume so the
+# ~GB download survives container restarts.
+
+def _load_ivrit_model_sync():
+    """Blocking: load the ivrit-ai CT2 model. Runs in a thread executor."""
+    from faster_whisper import WhisperModel
+
+    cache_dir = Path.home() / ".cache" / "faster_whisper"
+    model_repo = settings.ivrit_ai_model
+    logger.info(
+        f"Loading ivrit-ai model '{model_repo}' "
+        f"on {settings.whisper_device} ({settings.whisper_compute_type})..."
+    )
+    model = WhisperModel(
+        model_repo,
+        device=settings.whisper_device,
+        compute_type=settings.whisper_compute_type,
+        download_root=str(cache_dir),
+    )
+    logger.info("✅ ivrit-ai model loaded")
+    return model
+
+
+async def _get_ivrit_model():
+    """Return the loaded ivrit-ai model, loading it if necessary (async, thread-safe)."""
+    global _ivrit_model, _ivrit_last_used
+    async with _ivrit_lock:
+        if _ivrit_model is None:
+            loop = asyncio.get_running_loop()
+            _ivrit_model = await loop.run_in_executor(None, _load_ivrit_model_sync)
+        _ivrit_last_used = time.time()
+    return _ivrit_model
+
+
+async def transcribe_ivrit_ai(
+    audio_path: str,
+    language: str = "he",
+    task_id: str | None = None,
+) -> tuple[str, str]:
+    """
+    Transcribe with ivrit-ai's Hebrew-tuned Whisper model.
+
+    Output format is identical to transcribe() (plain-text concatenation of
+    segments, same segment_cb streaming contract) — this is the contract the
+    live-preview panel and Feature 7's timestamp-click flow rely on.
+    """
+    from app import state as _state  # local import avoids circular at module level
+
+    model = await _get_ivrit_model()
+    loop  = asyncio.get_running_loop()
+
+    if task_id is not None:
+        def segment_cb(text: str, _tid=task_id, _loop=loop) -> None:
+            future = asyncio.run_coroutine_threadsafe(
+                _state.append_partial_transcript(_tid, text),
+                _loop,
+            )
+            future.add_done_callback(
+                lambda f: f.exception() and logger.warning(
+                    "partial transcript write failed for %s: %s", _tid, f.exception()
+                )
+            )
+    else:
+        segment_cb = None
+
+    logger.info(f"[ivrit-ai] Transcribing: {audio_path} (language: {language})")
+    # _transcribe_sync is reused — ivrit-ai speaks the same faster-whisper API,
+    # so timestamps, VAD behavior, and segment batching are byte-identical.
+    transcript, detected_lang = await loop.run_in_executor(
+        None, _transcribe_sync, model, audio_path, language, segment_cb
+    )
+
+    global _ivrit_last_used
+    _ivrit_last_used = time.time()
+
+    logger.info(
+        f"[ivrit-ai] Done: {len(transcript):,} chars, "
+        f"detected language: {detected_lang}"
+    )
+    return transcript, detected_lang

@@ -127,6 +127,15 @@ curl http://localhost:8000/health
 | **Gemini Direct** | ~3 min for 3h lecture | Audio sent to Google | `GOOGLE_API_KEY` | Most use cases |
 | **Whisper Local** | ~15 min for 3h lecture (CPU) | Audio stays on your machine | None | Sensitive content |
 | **OpenAI Whisper** | ~5 min for 3h lecture | Audio sent to OpenAI | `OPENAI_API_KEY` | Fast + accurate transcription |
+| **ivrit-ai** ⭐ | ~25 min for 3h lecture (CPU) | Audio stays on your machine | None (auto-downloads model) | **Hebrew content** (best accuracy) |
+
+### ivrit-ai mode — Hebrew-tuned Whisper
+
+[ivrit-ai](https://github.com/ivrit-ai/ivrit.ai) is a Hebrew-focused fine-tune of OpenAI's Whisper, trained on thousands of hours of spoken Hebrew. On Hebrew lectures (especially with medical/technical jargon or fast speech) it typically outperforms vanilla Whisper Local.
+
+- First use downloads ~1.5 GB of CT2 model weights into the `whisper_model_cache` Docker volume (one-time).
+- Runs entirely on your machine — same privacy guarantees as Whisper Local.
+- Override the model via `IVRIT_AI_MODEL=ivrit-ai/whisper-v3-ct2` in `.env`.
 
 ### OpenAI Whisper mode — how it works
 
