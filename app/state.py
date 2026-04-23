@@ -121,13 +121,17 @@ async def init_db():
     # (must run after user_id column exists, so after migration below)
 
 
-    # Migrate: add user_id column to tasks if it doesn't exist yet
+    # Migrate: add missing columns to tasks table if needed
     async with db.execute("PRAGMA table_info(tasks)") as cursor:
         cols = [row[1] for row in await cursor.fetchall()]
     if "user_id" not in cols:
         await db.execute("ALTER TABLE tasks ADD COLUMN user_id TEXT")
         await db.commit()
         logger.info("Migrated tasks table: added user_id column")
+    if "partial_transcript" not in cols:
+        await db.execute("ALTER TABLE tasks ADD COLUMN partial_transcript TEXT")
+        await db.commit()
+        logger.info("Migrated tasks table: added partial_transcript column")
 
     # Create index now that user_id column is guaranteed to exist
     await db.execute(CREATE_TASKS_INDEX_SQL)
@@ -191,8 +195,11 @@ async def update_task(task_id: str, status: TaskStatus, progress: int, message: 
 
 async def complete_task(task_id: str, result: LessonResult):
     db = await _get_db()
+    # Clear the live-preview column on completion — the full transcript is
+    # stored in result_json, so partial_transcript is no longer needed and
+    # would only waste space in the DB.
     await db.execute(
-        "UPDATE tasks SET status=?, progress=100, message=?, result_json=? WHERE id=?",
+        "UPDATE tasks SET status=?, progress=100, message=?, result_json=?, partial_transcript=NULL WHERE id=?",
         [TaskStatus.COMPLETED.value, "Processing complete ✅", result.model_dump_json(), task_id],
     )
     await db.commit()
@@ -379,3 +386,58 @@ async def delete_session(session_id: str):
     db = await _get_db()
     await db.execute("DELETE FROM sessions WHERE id=?", [session_id])
     await db.commit()
+
+
+# ── Live transcript preview ───────────────────────────────────────────────────────
+
+# Maximum characters stored in partial_transcript (~500 KB of Hebrew text).
+# Prevents runaway growth on very long recordings; the final transcript in
+# result_json has no such limit — this only caps the live preview column.
+_MAX_PARTIAL_TRANSCRIPT_CHARS = 300_000
+
+
+async def append_partial_transcript(task_id: str, text: str) -> None:
+    """
+    Append a chunk of text to the task's live transcript column.
+    Called from transcriber.py as segments arrive (WHISPER modes only).
+    Uses SQLite's native || string concatenation — safe for concurrent WAL writers.
+    Silently drops writes once the column reaches _MAX_PARTIAL_TRANSCRIPT_CHARS.
+    """
+    if not text:
+        return
+    db = await _get_db()
+    # Guard: skip write if we are already at or above the size cap to prevent
+    # the column from growing unboundedly on multi-hour recordings.
+    await db.execute(
+        """
+        UPDATE tasks
+           SET partial_transcript = COALESCE(partial_transcript, '') || ?
+         WHERE id = ?
+           AND LENGTH(COALESCE(partial_transcript, '')) < ?
+        """,
+        [text, task_id, _MAX_PARTIAL_TRANSCRIPT_CHARS],
+    )
+    await db.commit()
+
+
+async def get_partial_transcript(task_id: str, from_offset: int = 0) -> tuple[str, int]:
+    """
+    Return new transcript text since from_offset, plus the current total length.
+    Used by the GET /api/tasks/{id}/transcript endpoint so the frontend only
+    fetches the delta on each poll rather than the entire growing string.
+
+    Returns (delta_text, total_length).
+    """
+    db = await _get_db()
+    async with db.execute(
+        "SELECT partial_transcript FROM tasks WHERE id=?", [task_id]
+    ) as cursor:
+        row = await cursor.fetchone()
+
+    if row is None or row["partial_transcript"] is None:
+        return "", 0
+
+    full: str = row["partial_transcript"]
+    total = len(full)
+    delta = full[from_offset:] if from_offset < total else ""
+    return delta, total
