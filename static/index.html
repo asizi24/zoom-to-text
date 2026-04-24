@@ -242,6 +242,56 @@
       padding: 32px;
       box-shadow: var(--shadow);
       margin-bottom: 16px;
+      position: relative;
+      isolation: isolate;
+    }
+    /* ── Spotlight glow (ported from shadcn spotlight-card) ────────────────
+       The glow border + inner tint follow the cursor via CSS custom props
+       set on :root by a single global pointermove listener. Per-card ::before
+       renders the border ring and ::after the soft inner wash. The hue
+       shifts with the horizontal mouse position — cold on the left, warm
+       on the right — same idea as the original glowColorMap. */
+    .card::before,
+    .card::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      border-radius: inherit;
+      pointer-events: none;
+      background-attachment: fixed;
+      opacity: 0;
+      transition: opacity .25s ease;
+      z-index: -1;
+    }
+    /* Border spotlight: bright ring at cursor, masked to just the border */
+    .card::before {
+      inset: -2px;
+      padding: 2px;
+      background:
+        radial-gradient(
+          260px 260px at calc(var(--mx, 0) * 1px) calc(var(--my, 0) * 1px),
+          hsl(calc(240 + var(--mxp, 0) * 160) 95% 68% / .85),
+          transparent 70%
+        );
+      -webkit-mask:
+        linear-gradient(#000 0 0) content-box,
+        linear-gradient(#000 0 0);
+      -webkit-mask-composite: xor;
+              mask-composite: exclude;
+      z-index: 1;
+    }
+    /* Inner wash: soft tinted glow that bleeds into the card body */
+    .card::after {
+      background: radial-gradient(
+        180px 180px at calc(var(--mx, 0) * 1px) calc(var(--my, 0) * 1px),
+        hsl(calc(240 + var(--mxp, 0) * 160) 95% 68% / .09),
+        transparent 70%
+      );
+    }
+    .card:hover::before,
+    .card:hover::after { opacity: 1; }
+    @media (prefers-reduced-motion: reduce) {
+      .card::before, .card::after { transition: none; }
     }
 
     /* ── Tabs ── */
@@ -2583,6 +2633,25 @@
     e.preventDefault();
     togglePlayback();
   });
+
+  // ── Spotlight tracking (cursor → CSS vars → card glow) ──────────────────
+  // One global listener, three CSS props on :root. Cards read them via var().
+  // rAF-throttled so pointermove at 120Hz doesn't thrash style recalculation.
+  (() => {
+    const root = document.documentElement;
+    let pending = false;
+    let px = 0, py = 0;
+    function apply() {
+      pending = false;
+      root.style.setProperty('--mx', px.toFixed(0));
+      root.style.setProperty('--my', py.toFixed(0));
+      root.style.setProperty('--mxp', (px / window.innerWidth).toFixed(3));
+    }
+    document.addEventListener('pointermove', e => {
+      px = e.clientX; py = e.clientY;
+      if (!pending) { pending = true; requestAnimationFrame(apply); }
+    }, { passive: true });
+  })();
 
   // ── About modal (profile card) ───────────────────────────────────────────
   function openAbout() {
