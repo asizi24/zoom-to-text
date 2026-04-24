@@ -43,9 +43,13 @@
       position: absolute; border-radius: 50%;
       filter: blur(100px); will-change: transform;
     }
-    .orb1 { width: 600px; height: 600px; background: #4a1d8a; top: -160px; right: -120px; opacity: .4; }
-    .orb2 { width: 450px; height: 450px; background: #9d174d; bottom: 60px; left: -100px; opacity: .22; }
-    .orb3 { width: 350px; height: 350px; background: #1e3a8a; top: 45%; left: 50%; transform: translate(-50%,-50%); opacity: .18; }
+    /* Orbs are ambient wash. We have two newer layers above them (mesh
+       gradient + floating shapes) that do the same job better, so the orbs
+       run at ~40% of their previous strength — still present for depth,
+       no longer competing for attention. */
+    .orb1 { width: 600px; height: 600px; background: #4a1d8a; top: -160px; right: -120px; opacity: .16; }
+    .orb2 { width: 450px; height: 450px; background: #9d174d; bottom: 60px; left: -100px; opacity: .09; }
+    .orb3 { width: 350px; height: 350px; background: #1e3a8a; top: 45%; left: 50%; transform: translate(-50%,-50%); opacity: .07; }
 
     /* ── Layout ── */
     .wrapper { position: relative; z-index: 1; width: 100%; max-width: 600px; padding-top: 56px; }
@@ -118,7 +122,7 @@
       z-index: 0;
       pointer-events: none;
       overflow: hidden;
-      opacity: .55;
+      opacity: .65;
     }
     .mesh-bg::before,
     .mesh-bg::after {
