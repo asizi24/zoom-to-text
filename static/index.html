@@ -950,7 +950,11 @@
         <div class="mode-name">OpenAI Whisper</div>
         <div class="mode-desc">מהיר · דורש API<br>חיתוך שקט</div>
       </div>
-      <div class="mode-opt" data-mode="ivrit_ai" onclick="selectMode(this)">
+      <!-- ivrit-ai mode is hidden in production: the model requires ~2 GB RAM
+           and the current Fly.io VM has only 512 MB. Backend support (routing,
+           transcribe_ivrit_ai, ProcessingMode.IVRIT_AI) is intact — remove the
+           `style="display:none"` below to re-enable when the VM is upgraded. -->
+      <div class="mode-opt" data-mode="ivrit_ai" onclick="selectMode(this)" style="display:none;">
         <div class="mode-icon">🇮🇱</div>
         <div class="mode-name">ivrit-ai <span style="color:#f59e0b;font-size:.8em;">⭐</span></div>
         <div class="mode-desc">מומלץ לעברית<br>מודל מקומי מותאם</div>
