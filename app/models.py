@@ -83,3 +83,5 @@ class TaskResponse(BaseModel):
     url:        Optional[str] = None
     result:     Optional[LessonResult] = None
     error:      Optional[str] = None
+    # True iff the server has a playable audio file for this task (Feature 7)
+    has_audio:  bool = False

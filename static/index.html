@@ -793,6 +793,85 @@
       font-size: .85rem;
       color: #374151;
     }
+
+    /* ── Audio player (Feature 7) ── */
+    #audio-player-bar {
+      position: sticky;
+      top: 8px;
+      z-index: 50;
+      background: linear-gradient(135deg, #1f2937, #111827);
+      color: #f9fafb;
+      border-radius: 14px;
+      padding: 14px 18px;
+      margin-bottom: 18px;
+      display: none;
+      box-shadow: 0 10px 30px rgba(0,0,0,.25);
+      border: 1px solid rgba(255,255,255,.08);
+    }
+    #audio-player-bar.visible { display: block; }
+    .ap-row {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+    .ap-play-btn {
+      flex: 0 0 auto;
+      width: 44px; height: 44px;
+      border-radius: 50%;
+      background: #4f46e5;
+      color: #fff;
+      border: none;
+      font-size: 1.1rem;
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      transition: transform .12s, background .12s;
+    }
+    .ap-play-btn:hover { background: #6366f1; transform: scale(1.05); }
+    .ap-time {
+      font-variant-numeric: tabular-nums;
+      font-size: .85rem;
+      color: #d1d5db;
+      min-width: 96px;
+      text-align: center;
+    }
+    .ap-scrubber {
+      flex: 1;
+      height: 6px;
+      background: rgba(255,255,255,.12);
+      border-radius: 999px;
+      position: relative;
+      cursor: pointer;
+      overflow: hidden;
+    }
+    .ap-scrubber-fill {
+      position: absolute;
+      inset-block: 0;
+      left: 0;
+      background: linear-gradient(90deg, #4f46e5, #8b5cf6);
+      border-radius: 999px;
+      width: 0%;
+      transition: width .1s linear;
+    }
+    .ap-hint {
+      font-size: .7rem;
+      color: rgba(255,255,255,.5);
+      margin-top: 6px;
+      text-align: center;
+    }
+    /* Clickable [MM:SS] tokens produced by linkifyTimestamps() */
+    .ts-link {
+      color: #6366f1;
+      cursor: pointer;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+      padding: 1px 4px;
+      border-radius: 4px;
+      background: rgba(99,102,241,.1);
+      text-decoration: none;
+      transition: background .1s;
+    }
+    .ts-link:hover { background: rgba(99,102,241,.22); }
+    .ts-link.active { background: #4f46e5; color: #fff; }
   </style>
 </head>
 <body>
@@ -919,6 +998,21 @@
 
 <!-- ═══════════════ RESULTS CARD ═══════════════ -->
 <div class="card" id="results-card" style="margin-top:16px;">
+
+  <!-- Audio player (sticky, only shown when task has_audio=true) -->
+  <div id="audio-player-bar">
+    <audio id="audio-el" preload="metadata"></audio>
+    <div class="ap-row">
+      <button class="ap-play-btn" id="ap-play-btn" onclick="togglePlayback()" aria-label="נגן/השהה">
+        <span id="ap-play-icon">▶</span>
+      </button>
+      <div class="ap-time" id="ap-time">00:00 / 00:00</div>
+      <div class="ap-scrubber" id="ap-scrubber" onclick="scrubAudio(event)">
+        <div class="ap-scrubber-fill" id="ap-scrubber-fill"></div>
+      </div>
+    </div>
+    <div class="ap-hint">💡 לחץ על [MM:SS] בסיכום/צ'אט לקפיצה לנקודה — Space = נגן/השהה</div>
+  </div>
 
   <!-- Action bar -->
   <div class="results-actions">
@@ -1170,7 +1264,7 @@
 
         if (task.status === 'completed') {
           clearInterval(pollTimer);
-          showResults(task.result, taskId);
+          showResults(task.result, taskId, !!task.has_audio);
         } else if (task.status === 'failed') {
           clearInterval(pollTimer);
           hideLiveTranscript();
@@ -1321,7 +1415,7 @@
   // ══════════════════════════════════════════════════════════════════════════
   // Results rendering
   // ══════════════════════════════════════════════════════════════════════════
-  function showResults(result, taskId) {
+  function showResults(result, taskId, hasAudio) {
     hideLiveTranscript();
     hideProgress();
     currentResult = result;
@@ -1329,8 +1423,14 @@
     document.querySelector('.brand').style.display = 'none';
     document.querySelector('.stats').style.display = 'none';
 
+    // Show the audio player first so linkifyTimestamps knows a player is active.
+    // linkifyTimestamps is a no-op when currentAudioTaskId is null, so calling
+    // it on text BEFORE showAudioPlayer would render inert tokens.
+    if (hasAudio && taskId) showAudioPlayer(taskId);
+
     // Summary
     document.getElementById('summary-text').textContent = result.summary || '';
+    linkifyTimestamps(document.getElementById('summary-text'));
 
     // Chapters — built with DOM APIs (no innerHTML) to prevent XSS
     const cl = document.getElementById('chapters-list');
@@ -1364,11 +1464,14 @@
     });
     if (!(result.chapters || []).length)
       document.getElementById('chapters-section').style.display = 'none';
+    else
+      linkifyTimestamps(cl);
 
     // Transcript (Whisper mode only)
     if (result.transcript) {
       document.getElementById('transcript-box').textContent = result.transcript;
       document.getElementById('transcript-section').style.display = 'block';
+      linkifyTimestamps(document.getElementById('transcript-box'));
     }
 
     // Quiz — built with DOM APIs (no innerHTML) to prevent XSS
@@ -1409,6 +1512,7 @@
 
       ql.appendChild(card);
     });
+    linkifyTimestamps(ql);
 
     document.getElementById('results-card').style.display = 'block';
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -1615,7 +1719,7 @@
       if (task.result) {
         currentSource = task.url || '';
         toggleHistory();
-        showResults(task.result, taskId);
+        showResults(task.result, taskId, !!task.has_audio);
       }
     } catch {
       alert('שגיאה בטעינת המשימה');
@@ -1650,6 +1754,7 @@
     if (creepTimer) { clearInterval(creepTimer); creepTimer = null; }
     hideLiveTranscript();
     hideChatPanel();
+    hideAudioPlayer();
     document.getElementById('results-card').style.display = 'none';
     document.getElementById('input-card').style.display   = 'block';
     document.querySelector('.brand').style.display        = 'block';
@@ -1694,6 +1799,7 @@
     if (msgs) msgs.innerHTML = '';
     const clearBtn = document.getElementById('chat-clear-btn');
     if (clearBtn) clearBtn.style.display = 'none';
+    hideAudioPlayer();
   }
 
   async function loadChatHistory() {
@@ -1721,6 +1827,9 @@
     div.textContent = text;
     msgs.appendChild(div);
     msgs.scrollTop = msgs.scrollHeight;
+    // Only linkify finalized bubbles — during streaming text mutates and we
+    // re-linkify in sendChat() when the stream ends.
+    if (!streaming) linkifyTimestamps(div);
     return div;
   }
 
@@ -1780,6 +1889,7 @@
       modelBubble.textContent = `שגיאה: ${err.message}`;
     } finally {
       modelBubble.classList.remove('streaming');
+      linkifyTimestamps(modelBubble);
       chatStreaming = false;
       document.getElementById('chat-send-btn').disabled = false;
       document.getElementById('chat-clear-btn').style.display = '';
@@ -1876,6 +1986,123 @@
     if (fcSeen.size === 0) { el.textContent = ''; return; }
     el.textContent = `סימנת ${fcSeen.size} מתוך ${flashcards.length} · ✓ ${fcKnew} · ✗ ${fcMissed}`;
   }
+
+  // ── Audio player (Feature 7) ─────────────────────────────────────────────
+  let currentAudioTaskId = null;
+
+  function showAudioPlayer(taskId) {
+    currentAudioTaskId = taskId;
+    const audio = document.getElementById('audio-el');
+    audio.src = `/api/tasks/${taskId}/audio`;
+    audio.load();
+    document.getElementById('audio-player-bar').classList.add('visible');
+    audio.onplay  = () => setPlayIcon(true);
+    audio.onpause = () => setPlayIcon(false);
+    audio.ontimeupdate = updateScrubber;
+    audio.onloadedmetadata = updateScrubber;
+    audio.onerror = () => {
+      // If the audio 404s (old task, file wiped) just hide the player silently
+      hideAudioPlayer();
+    };
+  }
+
+  function hideAudioPlayer() {
+    const audio = document.getElementById('audio-el');
+    try { audio.pause(); } catch (_) {}
+    audio.removeAttribute('src');
+    try { audio.load(); } catch (_) {}
+    document.getElementById('audio-player-bar').classList.remove('visible');
+    currentAudioTaskId = null;
+  }
+
+  function setPlayIcon(playing) {
+    document.getElementById('ap-play-icon').textContent = playing ? '⏸' : '▶';
+  }
+
+  function togglePlayback() {
+    const audio = document.getElementById('audio-el');
+    if (!audio.src) return;
+    if (audio.paused) audio.play(); else audio.pause();
+  }
+
+  function updateScrubber() {
+    const audio = document.getElementById('audio-el');
+    const cur   = audio.currentTime || 0;
+    const dur   = audio.duration || 0;
+    const pct   = dur > 0 ? (cur / dur * 100) : 0;
+    document.getElementById('ap-scrubber-fill').style.width = pct + '%';
+    document.getElementById('ap-time').textContent =
+      `${fmtSec(cur)} / ${fmtSec(dur)}`;
+  }
+
+  function scrubAudio(evt) {
+    const audio = document.getElementById('audio-el');
+    const dur = audio.duration || 0;
+    if (!dur) return;
+    const bar = evt.currentTarget.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (evt.clientX - bar.left) / bar.width));
+    audio.currentTime = ratio * dur;
+  }
+
+  function fmtSec(s) {
+    s = Math.max(0, Math.floor(s || 0));
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    return `${m.toString().padStart(2,'0')}:${r.toString().padStart(2,'0')}`;
+  }
+
+  // Seek to a [MM:SS] string (called from inline ts-link clicks).
+  function seekTo(tsStr) {
+    const audio = document.getElementById('audio-el');
+    if (!audio.src) return;
+    const m = /^(\d+):(\d{2})$/.exec(tsStr);
+    if (!m) return;
+    const seconds = parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+    audio.currentTime = seconds;
+    audio.play().catch(() => {/* autoplay may be blocked — user clicks play */});
+  }
+
+  // Replace [MM:SS] occurrences inside an element's text with clickable spans.
+  // Uses text-node walking so we don't accidentally strip HTML from children.
+  const TS_RE = /\[(\d{1,2}):(\d{2})\]/g;
+  function linkifyTimestamps(root) {
+    if (!root || !currentAudioTaskId) return;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+    const targets = [];
+    let n;
+    while ((n = walker.nextNode())) {
+      if (n.parentElement && n.parentElement.classList.contains('ts-link')) continue;
+      if (TS_RE.test(n.nodeValue)) { targets.push(n); TS_RE.lastIndex = 0; }
+    }
+    for (const node of targets) {
+      const frag = document.createDocumentFragment();
+      let last = 0;
+      const text = node.nodeValue;
+      text.replace(TS_RE, (match, mm, ss, idx) => {
+        if (idx > last) frag.appendChild(document.createTextNode(text.slice(last, idx)));
+        const span = document.createElement('span');
+        span.className = 'ts-link';
+        span.textContent = `[${mm}:${ss}]`;
+        const ts = `${mm}:${ss}`;
+        span.addEventListener('click', () => seekTo(ts));
+        frag.appendChild(span);
+        last = idx + match.length;
+        return match;
+      });
+      if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+      node.parentNode.replaceChild(frag, node);
+    }
+  }
+
+  // Spacebar = play/pause when player is visible and user isn't typing in an input
+  document.addEventListener('keydown', e => {
+    if (e.code !== 'Space') return;
+    if (!document.getElementById('audio-player-bar').classList.contains('visible')) return;
+    const tag = (document.activeElement && document.activeElement.tagName) || '';
+    if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+    e.preventDefault();
+    togglePlayback();
+  });
 </script>
 </body>
 </html>

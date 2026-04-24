@@ -136,6 +136,10 @@ async def init_db():
         await db.execute("ALTER TABLE tasks ADD COLUMN chat_history TEXT")
         await db.commit()
         logger.info("Migrated tasks table: added chat_history column")
+    if "audio_path" not in cols:
+        await db.execute("ALTER TABLE tasks ADD COLUMN audio_path TEXT")
+        await db.commit()
+        logger.info("Migrated tasks table: added audio_path column")
 
     # Create index now that user_id column is guaranteed to exist
     await db.execute(CREATE_TASKS_INDEX_SQL)
@@ -232,6 +236,9 @@ async def get_task(task_id: str) -> Optional[TaskResponse]:
     if row["result_json"]:
         result = LessonResult.model_validate_json(row["result_json"])
 
+    audio_path = row["audio_path"] if "audio_path" in row.keys() else None
+    has_audio = bool(audio_path) and Path(audio_path).exists()
+
     return TaskResponse(
         task_id=row["id"],
         status=TaskStatus(row["status"]),
@@ -241,6 +248,7 @@ async def get_task(task_id: str) -> Optional[TaskResponse]:
         url=row["url"],
         result=result,
         error=row["error"],
+        has_audio=has_audio,
     )
 
 
@@ -264,6 +272,9 @@ async def get_task_for_user(task_id: str, user_id: str) -> Optional[TaskResponse
     if row["result_json"]:
         result = LessonResult.model_validate_json(row["result_json"])
 
+    audio_path = row["audio_path"] if "audio_path" in row.keys() else None
+    has_audio = bool(audio_path) and Path(audio_path).exists()
+
     return TaskResponse(
         task_id=row["id"],
         status=TaskStatus(row["status"]),
@@ -273,6 +284,7 @@ async def get_task_for_user(task_id: str, user_id: str) -> Optional[TaskResponse
         url=row["url"],
         result=result,
         error=row["error"],
+        has_audio=has_audio,
     )
 
 
@@ -500,3 +512,26 @@ async def clear_chat_history(task_id: str) -> None:
         "UPDATE tasks SET chat_history=NULL WHERE id=?", [task_id]
     )
     await db.commit()
+
+
+# ── Audio path tracking (Feature 7) ───────────────────────────────────────────────
+
+async def set_audio_path(task_id: str, audio_path: str) -> None:
+    """Store the persistent audio file path so the UI can stream it back."""
+    db = await _get_db()
+    await db.execute(
+        "UPDATE tasks SET audio_path=? WHERE id=?", [audio_path, task_id]
+    )
+    await db.commit()
+
+
+async def get_audio_path(task_id: str) -> Optional[str]:
+    """Return the stored audio file path for a task, or None if not set."""
+    db = await _get_db()
+    async with db.execute(
+        "SELECT audio_path FROM tasks WHERE id=?", [task_id]
+    ) as cursor:
+        row = await cursor.fetchone()
+    if row is None:
+        return None
+    return row["audio_path"]

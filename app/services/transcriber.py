@@ -147,10 +147,15 @@ def _transcribe_sync(
         text = seg.text.strip()
         if not text:
             continue
-        full_texts.append(text)
+        # Feature 7: prepend [MM:SS] from seg.start so downstream prompts can
+        # reference timestamps and the UI can linkify them into seek anchors.
+        start = int(getattr(seg, "start", 0) or 0)
+        mm, ss = divmod(start, 60)
+        tagged = f"[{mm:02d}:{ss:02d}] {text}"
+        full_texts.append(tagged)
 
         if segment_cb is not None:
-            buffer.append(text)
+            buffer.append(tagged)
             now = time.time()
             # Flush every 10 segments or every 5 seconds to avoid DB overload
             if len(buffer) >= 10 or now - last_flush >= 5.0:

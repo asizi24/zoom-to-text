@@ -29,8 +29,11 @@ Progress milestones (WHISPER paths):
 """
 import asyncio
 import logging
+import shutil
+from pathlib import Path
 
 from app import state
+from app.config import settings
 from app.models import LessonResult, ProcessingMode, TaskStatus
 from app.services import summarizer, transcriber, zoom_downloader
 
@@ -101,18 +104,21 @@ async def run_pipeline(
 
         result = await _process_audio(task_id, audio_path, mode, language)
         result = await _generate_flashcards_step(task_id, result)
+        # Move the audio into a persistent per-task location so the UI player
+        # can stream it back. Replaces the old "cleanup in finally" pattern.
+        audio_path = await _persist_audio_for_task(task_id, audio_path)
         await state.complete_task(task_id, result)
         logger.info(f"Task {task_id} completed ✅")
 
     except zoom_downloader.ZoomDownloadError as exc:
         logger.error(f"Task {task_id} — download error: {exc}")
         await state.fail_task(task_id, _user_friendly_error(exc))
+        if audio_path:
+            await zoom_downloader.cleanup_audio(audio_path)
 
     except Exception as exc:
         logger.exception(f"Task {task_id} — unexpected error")
         await state.fail_task(task_id, _user_friendly_error(exc))
-
-    finally:
         if audio_path:
             await zoom_downloader.cleanup_audio(audio_path)
 
@@ -130,14 +136,13 @@ async def run_pipeline_from_file(
         )
         result = await _process_audio(task_id, file_path, mode, language)
         result = await _generate_flashcards_step(task_id, result)
+        file_path = await _persist_audio_for_task(task_id, file_path)
         await state.complete_task(task_id, result)
         logger.info(f"Task {task_id} (upload) completed ✅")
 
     except Exception as exc:
         logger.exception(f"Task {task_id} (upload) — unexpected error")
         await state.fail_task(task_id, _user_friendly_error(exc))
-
-    finally:
         await zoom_downloader.cleanup_audio(file_path)
 
 
@@ -223,6 +228,47 @@ async def _process_audio(
         result.transcript = transcript
 
     return result
+
+
+# ── Audio persistence (Feature 7) ─────────────────────────────────────────────────
+
+def _audio_root() -> Path:
+    """
+    Persistent root for per-task audio files. Mounted as a Docker volume so the
+    files survive container restarts. Kept separate from downloads/ so we can
+    wipe downloads/ without touching stored playback audio.
+    """
+    root = settings.data_dir / "audio"
+    root.mkdir(parents=True, exist_ok=True)
+    return root.resolve()
+
+
+async def _persist_audio_for_task(task_id: str, src_path: str | None) -> str | None:
+    """
+    Move the temp audio to {data_dir}/audio/{task_id}{ext} and update the DB.
+    Returns the new path (or the original if the move failed).
+    """
+    if not src_path:
+        return None
+    src = Path(src_path)
+    if not src.exists():
+        return None
+    dest = _audio_root() / f"{task_id}{src.suffix or '.mp3'}"
+    try:
+        # Move is a rename when on same volume — cheap and atomic
+        shutil.move(str(src), str(dest))
+    except Exception as exc:
+        # Cross-device or permission issue: fall back to copy + remove-source
+        logger.warning(f"audio move failed ({exc}); falling back to copy")
+        try:
+            shutil.copy2(str(src), str(dest))
+            src.unlink(missing_ok=True)
+        except Exception as copy_exc:
+            logger.error(f"audio persist failed for {task_id}: {copy_exc}")
+            return str(src)
+    await state.set_audio_path(task_id, str(dest))
+    logger.info(f"Task {task_id}: audio persisted at {dest}")
+    return str(dest)
 
 
 # ── Flashcards step ───────────────────────────────────────────────────────────────
