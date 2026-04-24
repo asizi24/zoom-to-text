@@ -236,6 +236,46 @@
       .shape { animation: shape-enter 2.4s cubic-bezier(.23,.86,.39,.96) forwards; }
     }
 
+    /* ── Click pulse (site-wide click feedback) ──────────────────────────
+       One fixed-positioned span spawned per click, expanding + fading at
+       the click point. Mix-blend-mode: screen keeps the pulse luminous
+       over any background. No need to mutate the target element. */
+    .click-pulse {
+      position: fixed;
+      width: 14px; height: 14px;
+      margin-left: -7px; margin-top: -7px;
+      border-radius: 50%;
+      pointer-events: none;
+      z-index: 9999;
+      background: radial-gradient(circle, rgba(165,180,252,.8) 0%, rgba(139,92,246,.4) 50%, transparent 70%);
+      transform: scale(0);
+      animation: click-pulse-expand .55s cubic-bezier(.22,.61,.36,1) forwards;
+      mix-blend-mode: screen;
+    }
+    @keyframes click-pulse-expand {
+      0%   { transform: scale(0);    opacity: 1; }
+      100% { transform: scale(14);   opacity: 0; }
+    }
+    /* Universal :active micro-press — any interactive element feels
+       tactile. The liquid-glass already has its own :active scale, so
+       we skip it here via :not(). */
+    button:not(.btn-glass):not(:disabled):active,
+    a[href]:active,
+    .tab:active,
+    .mode-opt:active,
+    .opt-btn:not(:disabled):active,
+    .fc-card:active,
+    .fc-nav-btn:not(:disabled):active,
+    .fc-mark-btn:active,
+    .profile-social-btn:active,
+    .history-item:active {
+      transform: scale(.97);
+      transition: transform .08s ease-out;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .click-pulse { animation: none; display: none; }
+    }
+
     /* ── Glass card ── */
     .card {
       background: var(--card-bg);
@@ -2637,6 +2677,30 @@
     e.preventDefault();
     togglePlayback();
   });
+
+  // ── Click pulse (universal click feedback) ──────────────────────────────
+  // Single delegated listener: any click on an interactive element spawns a
+  // pulse at the cursor. Cheap (one DOM node created per click, auto-removed
+  // when the animation ends). Respects prefers-reduced-motion via CSS.
+  (() => {
+    const INTERACTIVE_SELECTOR = [
+      'button', 'a[href]', '[role="button"]', 'input[type="submit"]',
+      'input[type="button"]', '.tab', '.mode-opt', '.fc-card',
+      '.history-item', '.opt-btn', '.profile-social-btn', '.ts-link',
+      '.ap-play-btn', '.ap-scrubber', '.about-toggle', '.about-close',
+    ].join(',');
+
+    document.addEventListener('click', (e) => {
+      const hit = e.target.closest(INTERACTIVE_SELECTOR);
+      if (!hit || hit.disabled) return;
+      const pulse = document.createElement('span');
+      pulse.className = 'click-pulse';
+      pulse.style.left = `${e.clientX}px`;
+      pulse.style.top  = `${e.clientY}px`;
+      document.body.appendChild(pulse);
+      pulse.addEventListener('animationend', () => pulse.remove(), { once: true });
+    }, true); // capture phase — fires even if the target stops propagation
+  })();
 
   // ── Spotlight tracking (cursor → CSS vars → card glow) ──────────────────
   // One global listener, three CSS props on :root. Cards read them via var().
