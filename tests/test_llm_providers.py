@@ -156,3 +156,47 @@ def test_settings_ollama_does_not_require_api_key():
     s = Settings(llm_provider="ollama")
     assert s.llm_provider == "ollama"
     assert s.ollama_base_url == "http://localhost:11434"
+
+
+# ── factory ───────────────────────────────────────────────────────────────────
+
+def test_get_provider_returns_gemini_by_default(monkeypatch):
+    from app.config import settings
+    from app.services.llm_providers import get_provider, _reset_provider_cache
+
+    monkeypatch.setattr(settings, "llm_provider", "gemini", raising=False)
+    _reset_provider_cache()
+    p = get_provider()
+    assert p.name == "gemini"
+
+
+def test_get_provider_returns_openrouter_when_configured(monkeypatch):
+    from app.config import settings
+    from app.services.llm_providers import get_provider, _reset_provider_cache
+
+    monkeypatch.setattr(settings, "llm_provider", "openrouter", raising=False)
+    monkeypatch.setattr(settings, "openrouter_api_key", "sk-or-test-1", raising=False)
+    _reset_provider_cache()
+    p = get_provider()
+    assert p.name == "openrouter"
+
+
+def test_get_provider_returns_ollama_when_configured(monkeypatch):
+    from app.config import settings
+    from app.services.llm_providers import get_provider, _reset_provider_cache
+
+    monkeypatch.setattr(settings, "llm_provider", "ollama", raising=False)
+    _reset_provider_cache()
+    p = get_provider()
+    assert p.name == "ollama"
+
+
+def test_get_provider_caches_instance(monkeypatch):
+    from app.config import settings
+    from app.services.llm_providers import get_provider, _reset_provider_cache
+
+    monkeypatch.setattr(settings, "llm_provider", "gemini", raising=False)
+    _reset_provider_cache()
+    a = get_provider()
+    b = get_provider()
+    assert a is b
