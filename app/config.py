@@ -3,7 +3,7 @@ Application configuration using Pydantic BaseSettings.
 All values can be overridden via environment variables or the .env file.
 """
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -82,6 +82,33 @@ class Settings(BaseSettings):
     resend_api_key: str = ""
     # Allowed CORS origin — set to your Fly.io domain in production
     cors_origin: str = "http://localhost:8000"
+
+    # ── LLM provider selection ─────────────────────────────────────────────────
+    # Which backend handles summarization, critique, chat, and flashcards.
+    # All three providers share a common interface; switching is a single
+    # env-var change with no code edits required.
+    llm_provider: Literal["gemini", "openrouter", "ollama"] = "gemini"
+
+    # OpenRouter (https://openrouter.ai) — single API key, dozens of models
+    openrouter_api_key:  str = ""
+    openrouter_model:    str = "anthropic/claude-3.5-sonnet"
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+
+    # Ollama (https://ollama.com) — local model runner. Not deployed on Fly.io;
+    # used by self-hosted setups that want privacy / offline operation.
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_model:    str = "llama3.1:70b"
+
+    @model_validator(mode="after")
+    def validate_llm_provider_credentials(self) -> "Settings":
+        """Fail fast at boot if the chosen provider is missing credentials."""
+        if self.llm_provider == "openrouter" and not self.openrouter_api_key:
+            raise ValueError(
+                "llm_provider=openrouter requires openrouter_api_key to be set"
+            )
+        # gemini and ollama either don't need a key (ollama) or already
+        # validate at first use (gemini's _get_client raises a clear error).
+        return self
 
 
 settings = Settings()

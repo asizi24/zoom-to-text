@@ -120,3 +120,39 @@ async def test_with_retry_does_not_retry_auth_errors():
         await _with_retry(fn, max_retries=4, base_delay=0.0)
     # Auth errors are terminal — never retried
     assert calls["n"] == 1
+
+
+# ── config validation ─────────────────────────────────────────────────────────
+
+def test_settings_default_provider_is_gemini():
+    from app.config import settings
+    # Default value when nothing is set in env
+    assert settings.llm_provider == "gemini"
+
+
+def test_settings_openrouter_requires_api_key(monkeypatch):
+    """When llm_provider=openrouter, the api key must be set or startup fails."""
+    from app.config import Settings
+    with pytest.raises(ValueError, match="openrouter_api_key"):
+        Settings(
+            llm_provider="openrouter",
+            openrouter_api_key="",
+            google_api_key="x",  # ensure gemini check would pass
+        )
+
+
+def test_settings_accepts_valid_openrouter_config():
+    from app.config import Settings
+    s = Settings(
+        llm_provider="openrouter",
+        openrouter_api_key="sk-or-test-1",
+    )
+    assert s.llm_provider == "openrouter"
+    assert s.openrouter_api_key == "sk-or-test-1"
+
+
+def test_settings_ollama_does_not_require_api_key():
+    from app.config import Settings
+    s = Settings(llm_provider="ollama")
+    assert s.llm_provider == "ollama"
+    assert s.ollama_base_url == "http://localhost:11434"
