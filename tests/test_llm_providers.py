@@ -200,3 +200,42 @@ def test_get_provider_caches_instance(monkeypatch):
     a = get_provider()
     b = get_provider()
     assert a is b
+
+
+# ── GeminiProvider ────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_gemini_provider_generate_text_uses_existing_helper(monkeypatch):
+    """GeminiProvider.generate_text reuses summarizer._generate_with_retry."""
+    from app.services.llm_providers.gemini import GeminiProvider
+    from app.services import summarizer
+    from unittest.mock import MagicMock
+
+    captured = {"contents": None}
+
+    def fake_retry(client, contents, max_retries=3):
+        captured["contents"] = contents
+        m = MagicMock()
+        m.text = "raw model output"
+        part = MagicMock()
+        part.thought = False
+        part.text = "raw model output"
+        m.candidates = [MagicMock()]
+        m.candidates[0].content.parts = [part]
+        return m
+
+    monkeypatch.setattr(summarizer, "_generate_with_retry", fake_retry)
+    monkeypatch.setattr(summarizer, "_get_client", lambda: object())
+    p = GeminiProvider()
+    out = await p.generate_text("hello prompt")
+    assert out == "raw model output"
+    assert captured["contents"] == "hello prompt"
+
+
+@pytest.mark.asyncio
+async def test_gemini_provider_supports_audio_upload():
+    from app.services.llm_providers.gemini import GeminiProvider
+    p = GeminiProvider()
+    assert p.supports_audio_upload is True
+    assert p.supports_streaming is True
+    assert p.name == "gemini"
