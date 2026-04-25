@@ -239,3 +239,82 @@ async def test_gemini_provider_supports_audio_upload():
     assert p.supports_audio_upload is True
     assert p.supports_streaming is True
     assert p.name == "gemini"
+
+
+# ── OpenRouterProvider ────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_openrouter_generate_text_builds_correct_request(monkeypatch):
+    """OpenRouter sends a chat-completions POST with the right shape."""
+    import httpx
+    from app.services.llm_providers.openrouter import OpenRouterProvider
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "openrouter_api_key", "sk-or-test", raising=False)
+    monkeypatch.setattr(settings, "openrouter_model", "test-model", raising=False)
+
+    captured = {}
+
+    class FakeResp:
+        status_code = 200
+        def json(self):
+            return {"choices": [{"message": {"content": "model output"}}]}
+        def raise_for_status(self):
+            pass
+
+    class FakeClient:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, url, json, headers):
+            captured["url"] = url
+            captured["json"] = json
+            captured["headers"] = headers
+            return FakeResp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    p = OpenRouterProvider()
+    out = await p.generate_text("hello")
+    assert out == "model output"
+    assert captured["url"].endswith("/chat/completions")
+    assert captured["headers"]["Authorization"] == "Bearer sk-or-test"
+    assert captured["json"]["model"] == "test-model"
+    assert captured["json"]["messages"] == [{"role": "user", "content": "hello"}]
+
+
+@pytest.mark.asyncio
+async def test_openrouter_audio_upload_raises_unsupported():
+    from app.services.llm_providers.openrouter import OpenRouterProvider
+    p = OpenRouterProvider()
+    with pytest.raises(ProviderUnsupportedError):
+        await p.upload_audio("/tmp/x.mp3")
+
+
+@pytest.mark.asyncio
+async def test_openrouter_classifies_401_as_auth_error(monkeypatch):
+    import httpx
+    from app.services.llm_providers.openrouter import OpenRouterProvider
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "openrouter_api_key", "bad", raising=False)
+
+    class FakeResp:
+        status_code = 401
+        text = "invalid api key"
+        def raise_for_status(self):
+            raise httpx.HTTPStatusError("401", request=None, response=self)
+        def json(self):
+            return {"error": {"message": "invalid api key"}}
+
+    class FakeClient:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, *a, **kw): return FakeResp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    p = OpenRouterProvider()
+    with pytest.raises(ProviderAuthError):
+        await p.generate_text("x")
