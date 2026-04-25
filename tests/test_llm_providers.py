@@ -37,3 +37,86 @@ def test_provider_error_subclasses():
         ProviderAuthError,
     ):
         assert issubclass(sub, ProviderError)
+
+
+# ── base.py ─────────────────────────────────────────────────────────────────
+
+import asyncio
+from app.services.llm_providers.errors import (
+    ProviderRateLimitError,
+    ProviderAuthError,
+    ProviderUnsupportedError,
+)
+
+
+def test_audio_ref_is_dataclass():
+    from app.services.llm_providers.base import AudioRef
+    ref = AudioRef(provider_name="gemini", provider_specific_id="files/abc", raw=None)
+    assert ref.provider_name == "gemini"
+    assert ref.provider_specific_id == "files/abc"
+    assert ref.raw is None
+
+
+def test_default_provider_methods_raise_unsupported():
+    """Subclasses inherit a sensible default that raises ProviderUnsupportedError."""
+    from app.services.llm_providers.base import LLMProvider, AudioRef
+
+    class Stub(LLMProvider):
+        name = "stub"
+        supports_audio_upload = False
+        supports_streaming = True
+        default_model = "stub-1"
+
+        async def generate_text(self, prompt, **kw): return "ok"
+        async def stream_text(self, contents, **kw):
+            if False:
+                yield ""
+
+    s = Stub()
+    with pytest.raises(ProviderUnsupportedError):
+        asyncio.run(s.upload_audio("/tmp/x"))
+    with pytest.raises(ProviderUnsupportedError):
+        asyncio.run(s.generate_text_with_audio(
+            AudioRef("stub", "x"), "prompt"
+        ))
+    # cleanup_audio is a no-op (does not raise)
+    asyncio.run(s.cleanup_audio(AudioRef("stub", "x")))
+
+
+@pytest.mark.asyncio
+async def test_with_retry_succeeds_after_transient_error():
+    from app.services.llm_providers.base import _with_retry
+
+    calls = {"n": 0}
+
+    async def fn():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise ProviderRateLimitError(
+                provider="x", stage="t", code="429",
+                user_message="rate limit", technical_details=""
+            )
+        return "result"
+
+    out = await _with_retry(fn, max_retries=4, base_delay=0.0)
+    assert out == "result"
+    assert calls["n"] == 3
+
+
+@pytest.mark.asyncio
+async def test_with_retry_does_not_retry_auth_errors():
+    from app.services.llm_providers.base import _with_retry
+
+    calls = {"n": 0}
+
+    async def fn():
+        calls["n"] += 1
+        raise ProviderAuthError(
+            provider="x", stage="t", code="401",
+            user_message="bad key", technical_details=""
+        )
+
+    with pytest.raises(ProviderAuthError):
+        await _with_retry(fn, max_retries=4, base_delay=0.0)
+    # Auth errors are terminal — never retried
+    assert calls["n"] == 1
