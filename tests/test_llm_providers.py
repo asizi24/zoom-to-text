@@ -318,3 +318,51 @@ async def test_openrouter_classifies_401_as_auth_error(monkeypatch):
     p = OpenRouterProvider()
     with pytest.raises(ProviderAuthError):
         await p.generate_text("x")
+
+
+# ── OllamaProvider ────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_ollama_generate_text_builds_correct_request(monkeypatch):
+    import httpx
+    from app.services.llm_providers.ollama import OllamaProvider
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "ollama_base_url", "http://test-ollama:11434", raising=False)
+    monkeypatch.setattr(settings, "ollama_model", "test-llama", raising=False)
+
+    captured = {}
+
+    class FakeResp:
+        status_code = 200
+        def json(self):
+            return {"response": "ollama output", "done": True}
+        def raise_for_status(self):
+            pass
+
+    class FakeClient:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, url, json, headers=None):
+            captured["url"] = url
+            captured["json"] = json
+            return FakeResp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    p = OllamaProvider()
+    out = await p.generate_text("hi")
+    assert out == "ollama output"
+    assert captured["url"] == "http://test-ollama:11434/api/generate"
+    assert captured["json"]["model"] == "test-llama"
+    assert captured["json"]["prompt"] == "hi"
+    assert captured["json"]["stream"] is False
+
+
+@pytest.mark.asyncio
+async def test_ollama_audio_upload_raises_unsupported():
+    from app.services.llm_providers.ollama import OllamaProvider
+    p = OllamaProvider()
+    with pytest.raises(ProviderUnsupportedError):
+        await p.upload_audio("/tmp/x.mp3")
