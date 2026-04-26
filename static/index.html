@@ -497,6 +497,8 @@
     }
     .action-btn:hover { border-color: rgba(124,58,237,.5); color: #c4b5fd; background: rgba(124,58,237,.1); }
     .action-btn.success-flash { border-color: var(--success); color: #6ee7b7; }
+    .action-btn.back-btn { margin-inline-end: auto; color: rgba(255,255,255,.85); }
+    .action-btn.back-btn:hover { border-color: rgba(255,255,255,.35); color: #fff; background: rgba(255,255,255,.08); }
 
     /* ── Copyable ── */
     .copyable-wrap { position: relative; }
@@ -1610,6 +1612,7 @@
 
   <!-- Action bar -->
   <div class="results-actions">
+    <button class="action-btn back-btn" onclick="reset()" title="חזרה למסך הראשי">← חזרה</button>
     <button class="action-btn" onclick="exportMarkdown()">⬇️ ייצוא Markdown</button>
     <button class="action-btn" id="copy-all-btn" onclick="copyAll()">📋 העתק הכל</button>
     <button class="action-btn" onclick="window.print()">🖨️ הדפסה</button>
