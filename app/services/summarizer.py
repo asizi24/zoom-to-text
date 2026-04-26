@@ -976,6 +976,124 @@ def _extract_audio_capture(audio_file) -> tuple[dict, str]:
     return _parse_extraction_response(raw), raw
 
 
+# ── Diarization (Task 1.2 — Gemini-based text speaker labeling) ──────────────────
+
+_DIARIZATION_TEMPERATURE = 0.1
+
+_DIARIZATION_PROMPT = """
+You are labeling speakers in a transcript. Your job is purely mechanical:
+identify turn boundaries, tag each utterance with a speaker label, and
+propose human names ONLY when the transcript itself contains explicit
+self-introduction or addressed names.
+
+Return STRICT JSON with these keys (NO markdown fences):
+{
+  "speaker_count": <int>,
+  "speaker_map": {"Speaker A": "<name>", ...},   // {} when no names detected
+  "diarized_transcript": "Speaker A: ...\\nSpeaker B: ...\\n..."
+}
+
+Hard rules:
+  • Output language MUST match the source language. Hebrew → Hebrew. English → English.
+  • DO NOT invent names. Only populate speaker_map from explicit cues
+    ("שלום, אני אסף...", "Hi, this is Dan", "אסף, מה דעתך?").
+  • Preserve the EXACT WORDS of the original transcript — do not paraphrase,
+    summarize, or skip. Just split into turns and add the tag prefix.
+  • Use sequential labels: Speaker A, Speaker B, Speaker C, …
+  • When unsure whether a single utterance changes speaker, keep it under
+    the previous tag.
+
+══════════════════════════════════════════════════
+Few-shot example 1 — Hebrew product meeting (3 speakers, 2 named):
+══════════════════════════════════════════════════
+INPUT:
+"שלום לכולם, אני אסף מהצוות. רציתי להציג היום את ההתקדמות. דן, אתה רוצה
+להוסיף משהו? כן, אני דן, ואני אדבר על ה-API. גם אני רוצה להגיב — ההצעה
+נשמעת טוב אבל הסיכון כספי גבוה."
+
+OUTPUT:
+{
+  "speaker_count": 3,
+  "speaker_map": {"Speaker A": "אסף", "Speaker B": "דן"},
+  "diarized_transcript": "Speaker A: שלום לכולם, אני אסף מהצוות. רציתי להציג היום את ההתקדמות. דן, אתה רוצה להוסיף משהו?\\nSpeaker B: כן, אני דן, ואני אדבר על ה-API.\\nSpeaker C: גם אני רוצה להגיב — ההצעה נשמעת טוב אבל הסיכון כספי גבוה."
+}
+
+══════════════════════════════════════════════════
+Few-shot example 2 — English physics lecture (mainly 1 lecturer):
+══════════════════════════════════════════════════
+INPUT:
+"So when we apply Bell's theorem here, we get an inequality that any
+local hidden-variable theory must satisfy. Question — does the experiment
+prove non-locality? That's still debated."
+
+OUTPUT:
+{
+  "speaker_count": 2,
+  "speaker_map": {},
+  "diarized_transcript": "Speaker A: So when we apply Bell's theorem here, we get an inequality that any local hidden-variable theory must satisfy.\\nSpeaker B: Question — does the experiment prove non-locality?\\nSpeaker A: That's still debated."
+}
+
+══════════════════════════════════════════════════
+
+Now diarize the transcript above. Return ONLY the JSON object.
+"""
+
+
+def _diarization_config() -> "types.GenerateContentConfig":
+    """Lower-temperature config for the mechanical diarization call."""
+    return types.GenerateContentConfig(
+        temperature=_DIARIZATION_TEMPERATURE,
+        max_output_tokens=65536,
+        **({} if _thinking_cfg is None else {"thinking_config": _thinking_cfg}),
+    )
+
+
+def _parse_diarization_response(text: str) -> tuple[str, dict[str, str]]:
+    """
+    Parse the diarization call's JSON. Returns (diarized_transcript, speaker_map).
+
+    Missing `speaker_map` defaults to {} (single-speaker recordings).
+    Raises ValueError on unparseable JSON — caller falls back to raw transcript.
+    """
+    stripped = text.strip()
+
+    if stripped.startswith("```"):
+        lines = stripped.split("\n")
+        stripped = "\n".join(lines[1:]).rsplit("```", 1)[0].strip()
+
+    json_start = stripped.find("{")
+    json_end = stripped.rfind("}")
+    if json_start != -1 and json_end > json_start:
+        stripped = stripped[json_start : json_end + 1]
+
+    stripped = _sanitize_json_escapes(stripped)
+
+    try:
+        data = json.loads(stripped)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"diarization call returned invalid JSON: {exc}") from exc
+
+    diarized = data.get("diarized_transcript", "")
+    speaker_map = data.get("speaker_map") or {}
+    if not isinstance(speaker_map, dict):
+        speaker_map = {}
+    return diarized, speaker_map
+
+
+def _diarize_transcript_sync(transcript: str) -> tuple[str, dict[str, str]]:
+    """
+    Sync: send transcript to Gemini for speaker labeling.
+
+    Returns (diarized_transcript, speaker_map). Raises ValueError on bad JSON
+    or any underlying provider error — callers handle via best-effort skip.
+    """
+    client = _get_client()
+    prompt = f"{_DIARIZATION_PROMPT}\n\nTranscript to diarize:\n{transcript[:_MAX_CHUNK_CHARS]}"
+    response = _generate_with_retry(client, prompt, config=_diarization_config())
+    raw = _response_text(response)
+    return _parse_diarization_response(raw)
+
+
 # ── Synthesis call wrappers that capture raw text (for raw_llm_response) ─────────
 
 def _synthesize_text_capture(transcript: str) -> tuple[LessonResult, str]:
