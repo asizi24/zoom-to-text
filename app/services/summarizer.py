@@ -1316,19 +1316,44 @@ async def summarize_transcript(
     """
     Async: summarize a text transcript (WHISPER_LOCAL / WHISPER_API mode).
 
-    Same two-call pipeline as summarize_audio (synthesis + extraction in
-    parallel via asyncio.gather; extraction failure is best-effort).
+    Pipeline:
+      1. (Optional) Diarize the transcript with Gemini — Task 1.2.
+         Skipped when ENABLE_DIARIZATION=False or for non-Gemini providers.
+         On failure, fall back to the raw transcript (graceful skip).
+      2. Run synthesis + extraction in parallel via asyncio.gather (Task 1.1).
+         Synthesis failure propagates; extraction failure is best-effort.
+      3. Merge results, then run the exam critique pipeline.
     """
     if not _is_gemini_provider():
         return await _summarize_transcript_via_provider(transcript, progress_cb)
 
     loop = asyncio.get_running_loop()
 
+    # Step 1: Diarization (best-effort).
+    diarized_transcript: str | None = None
+    speaker_map: dict[str, str] | None = None
+    text_for_downstream = transcript
+
+    if settings.enable_diarization:
+        try:
+            diarized_transcript, speaker_map = await loop.run_in_executor(
+                None, _diarize_transcript_sync, transcript
+            )
+            if diarized_transcript:
+                text_for_downstream = diarized_transcript
+        except Exception as exc:
+            logger.warning(
+                f"Diarization call failed (graceful skip): {exc}"
+            )
+            diarized_transcript = None
+            speaker_map = None
+
+    # Step 2: Synthesis + Extraction in parallel on the (possibly diarized) text.
     synthesis_future = loop.run_in_executor(
-        None, _synthesize_text_capture, transcript
+        None, _synthesize_text_capture, text_for_downstream
     )
     extraction_future = loop.run_in_executor(
-        None, _extract_text_capture, transcript
+        None, _extract_text_capture, text_for_downstream
     )
 
     try:
@@ -1356,6 +1381,9 @@ async def summarize_transcript(
     merged = _merge_results(
         synthesis_result, extraction_dict, raw_summary, raw_extraction
     )
+    # Persist diarization output (Task 1.2)
+    merged.diarized_transcript = diarized_transcript
+    merged.speaker_map = speaker_map
     return _apply_critique_pipeline(merged, progress_cb)
 
 
