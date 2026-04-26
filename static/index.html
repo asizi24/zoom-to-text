@@ -1377,6 +1377,21 @@
       display: flex; align-items: center; justify-content: center;
     }
     .about-close:hover { background: rgba(255,255,255,.16); color: #fff; }
+
+    .provider-badge {
+      display: inline-block;
+      padding: 2px 10px;
+      margin-right: 10px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 500;
+      background: rgba(255,255,255,.06);
+      color: rgba(255,255,255,.7);
+      border: 1px solid rgba(255,255,255,.08);
+      letter-spacing: .4px;
+      text-transform: uppercase;
+      vertical-align: middle;
+    }
   </style>
 </head>
 <body>
@@ -1503,7 +1518,12 @@
 
   <!-- Mode selector -->
   <div style="margin-top:22px;">
-    <div class="mode-label">בחר מצב עיבוד</div>
+    <div class="mode-label">
+      בחר מצב עיבוד
+      <span id="provider-badge" class="provider-badge" style="display:none;">
+        LLM: <span id="provider-name"></span>
+      </span>
+    </div>
     <div class="mode-row" id="mode-row">
       <div class="mode-opt selected" data-mode="gemini_direct" onclick="selectMode(this)">
         <div class="mode-icon">⚡</div>
@@ -2734,6 +2754,37 @@
       closeAbout();
     }
   });
+
+  // ── Provider capabilities (filters the mode selector) ─────────────────────
+  async function loadCapabilities() {
+    try {
+      const r = await fetch('/api/capabilities');
+      if (!r.ok) return;
+      const cap = await r.json();
+      const badge  = document.getElementById('provider-badge');
+      const nameEl = document.getElementById('provider-name');
+      if (badge && nameEl) {
+        nameEl.textContent = cap.llm_provider;
+        badge.style.display = 'inline-block';
+      }
+      if (Array.isArray(cap.available_modes)) {
+        const allowed = new Set(cap.available_modes);
+        document.querySelectorAll('.mode-opt').forEach(opt => {
+          const m = opt.dataset.mode;
+          if (m && !allowed.has(m)) opt.style.display = 'none';
+        });
+        // If the currently selected tile got hidden, fall back to the first visible one
+        if (typeof selectedMode !== 'undefined' && !allowed.has(selectedMode)) {
+          const firstVisible = document.querySelector('.mode-opt:not([style*="display:none"]):not([style*="display: none"])');
+          if (firstVisible) selectMode(firstVisible);
+        }
+      }
+    } catch (e) {
+      // Non-critical — UI just keeps showing all options
+      console.warn('capabilities fetch failed', e);
+    }
+  }
+  document.addEventListener('DOMContentLoaded', loadCapabilities);
 </script>
 </body>
 </html>
