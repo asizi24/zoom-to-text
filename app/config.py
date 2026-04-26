@@ -105,6 +105,13 @@ class Settings(BaseSettings):
     # — raw responses can be 50KB+ per recording.
     llm_debug_raw_responses: bool = False
 
+    # ── Task 1.2 — Gemini text diarization ────────────────────────────────────
+    # When True, summarize_transcript runs an extra Gemini call before the
+    # synthesis+extraction pair to label speakers in the transcript. Skipped
+    # for GEMINI_DIRECT mode (audio model already perceives speakers) and for
+    # non-Gemini providers.
+    enable_diarization: bool = True
+
     @model_validator(mode="after")
     def validate_llm_provider_credentials(self) -> "Settings":
         """Fail fast at boot if the chosen provider is missing credentials."""

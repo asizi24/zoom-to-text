@@ -128,6 +128,9 @@ class LessonResult(BaseModel):
     sentiment_analysis: Optional[SentimentAnalysis] = None
     objections_tracked: list[Objection] = []
     raw_llm_response:   Optional[RawLLMResponse] = None
+    # ── Task 1.2 Gemini-based diarization (WHISPER paths only) ──
+    diarized_transcript: Optional[str]            = None  # transcript with "Speaker A:" anchors
+    speaker_map:         Optional[dict[str, str]] = None  # {"Speaker A": "Asaf", ...} when names detected
 
 
 # ── API request/response schemas ────────────────────────────────────────────────
