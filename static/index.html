@@ -1866,7 +1866,7 @@
           clearInterval(pollTimer);
           hideLiveTranscript();
           hideProgress();
-          showError(task.error || 'העיבוד נכשל');
+          showError(task.error || 'העיבוד נכשל', task.error_details);
         }
       } catch { /* retry next tick */ }
     }, 2000);
@@ -2336,9 +2336,23 @@
     if (creepTimer) { clearInterval(creepTimer); creepTimer = null; }
     document.getElementById('progress-card').style.display = 'none';
   }
-  function showError(msg) {
+  // Hebrew labels for ProcessingStage values returned in task.error_details.stage
+  const STAGE_LABELS_HE = {
+    download:   'הורדה',
+    preprocess: 'עיבוד אודיו',
+    transcribe: 'תמלול',
+    diarize:    'זיהוי דוברים',
+    summarize:  'סיכום',
+    flashcards: 'כרטיסיות',
+    unknown:    '',
+  };
+  function showError(msg, details) {
     const b = document.getElementById('error-box');
-    b.textContent = '❌ ' + msg;
+    let prefix = '❌';
+    if (details && details.stage && STAGE_LABELS_HE[details.stage]) {
+      prefix = `❌ [${STAGE_LABELS_HE[details.stage]}]`;
+    }
+    b.textContent = `${prefix} ${msg}`;
     b.style.display = 'block';
     document.getElementById('input-card').style.display = 'block';
   }
