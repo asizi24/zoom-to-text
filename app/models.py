@@ -52,6 +52,65 @@ class Flashcard(BaseModel):
     tags:  list[str] = []       # Topic/chapter tags for Anki filtering
 
 
+# ── Extraction artifacts (Task 1.1 schema upgrade) ──────────────────────────────
+
+class ActionItem(BaseModel):
+    owner:        str
+    task:         str
+    deadline:     Optional[str] = None  # free-form: "EOW", "2026-05-01"
+    priority:     Optional[str] = None  # "high" | "medium" | "low"
+    source_quote: Optional[str] = None
+
+
+class Decision(BaseModel):
+    decision:     str
+    context:      Optional[str] = None
+    stakeholders: list[str] = []
+    source_quote: Optional[str] = None
+
+
+class OpenQuestion(BaseModel):
+    question:  str
+    raised_by: Optional[str] = None
+    context:   Optional[str] = None
+
+
+class PerSpeakerSentiment(BaseModel):
+    speaker:   str                       # "Speaker A" or named when known
+    sentiment: str                       # "positive" | "neutral" | "negative" | "mixed"
+    rationale: Optional[str] = None
+
+
+class ToneShift(BaseModel):
+    # 'from'/'to' are Python keywords / builtins, so the JSON keys are aliased
+    # while the Python attributes use _tone suffix.
+    model_config = {"populate_by_name": True}
+
+    at:        str                       # rough timestamp or paragraph anchor
+    from_tone: str = Field(..., alias="from")
+    to_tone:   str = Field(..., alias="to")
+    trigger:   Optional[str] = None
+
+
+class SentimentAnalysis(BaseModel):
+    overall_tone:          str
+    per_speaker_sentiment: list[PerSpeakerSentiment] = []
+    shifts_in_tone:        list[ToneShift] = []
+
+
+class Objection(BaseModel):
+    objection:      str
+    raised_by:      Optional[str] = None
+    response_given: Optional[str] = None
+    resolved:       Optional[bool] = None
+
+
+class RawLLMResponse(BaseModel):
+    """Raw LLM output captured for offline debugging when LLM_DEBUG_RAW_RESPONSES=true."""
+    summary_call:    Optional[str] = None
+    extraction_call: Optional[str] = None
+
+
 class LessonResult(BaseModel):
     transcript:        Optional[str] = None  # Raw transcript (only in WHISPER_LOCAL mode)
     summary:           str = ""
@@ -61,6 +120,14 @@ class LessonResult(BaseModel):
     language:          str = "he"
     # Critique pipeline debug log — populated when ENABLE_EXAM_CRITIQUE=True
     exam_critique_log: Optional[dict] = None
+    # ── Task 1.1 schema upgrade — all optional, default-empty ──
+    content_type:       Optional[str] = None  # "lecture" | "meeting" | "discussion"
+    action_items:       list[ActionItem] = []
+    decisions:          list[Decision] = []
+    open_questions:     list[OpenQuestion] = []
+    sentiment_analysis: Optional[SentimentAnalysis] = None
+    objections_tracked: list[Objection] = []
+    raw_llm_response:   Optional[RawLLMResponse] = None
 
 
 # ── API request/response schemas ────────────────────────────────────────────────
