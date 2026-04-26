@@ -33,10 +33,16 @@ from google.genai import types
 
 from app.config import settings
 from app.models import Chapter, Flashcard, LessonResult, QuizQuestion
+from app.services.llm_providers import get_provider
 
 logger = logging.getLogger(__name__)
 
 _ProgressCallback = Callable[[int, str], None]
+
+
+def _is_gemini_provider() -> bool:
+    """True if the current provider is Gemini (use existing code path)."""
+    return settings.llm_provider == "gemini"
 
 # ── Prompt ────────────────────────────────────────────────────────────────────────
 
@@ -744,7 +750,14 @@ async def summarize_audio(
     audio_path: str,
     progress_cb: _ProgressCallback | None = None,
 ) -> LessonResult:
-    """Async: upload audio directly to Gemini (GEMINI_DIRECT mode)."""
+    """Async: upload audio directly to LLM (GEMINI_DIRECT mode)."""
+    if not _is_gemini_provider():
+        # Non-Gemini providers do not support audio upload — fail fast with
+        # the provider's Hebrew user_message so the UX is clear.
+        provider = get_provider()
+        await provider.upload_audio(audio_path)
+        raise RuntimeError("unreachable")
+
     loop = asyncio.get_running_loop()
     try:
         return await asyncio.wait_for(
@@ -760,6 +773,9 @@ async def summarize_transcript(
     progress_cb: _ProgressCallback | None = None,
 ) -> LessonResult:
     """Async: summarize a text transcript (WHISPER_LOCAL / WHISPER_API mode)."""
+    if not _is_gemini_provider():
+        return await _summarize_transcript_via_provider(transcript, progress_cb)
+
     loop = asyncio.get_running_loop()
     try:
         return await asyncio.wait_for(
@@ -768,6 +784,21 @@ async def summarize_transcript(
         )
     except asyncio.TimeoutError:
         raise TimeoutError("⏱️ Gemini לא הגיב תוך 10 דקות — נסה שוב")
+
+
+async def _summarize_transcript_via_provider(
+    transcript: str,
+    progress_cb: _ProgressCallback | None = None,
+) -> LessonResult:
+    """Run the full transcript→summary pipeline through a non-Gemini provider."""
+    provider = get_provider()
+
+    if progress_cb:
+        progress_cb(82, f"🤖 שולח ל-{provider.name} — מייצר סיכום ומבחן...")
+
+    prompt = f"{_SYSTEM_PROMPT}\n\nתמלול השיעור:\n{transcript[:_MAX_CHUNK_CHARS]}"
+    text = await provider.generate_text(prompt)
+    return _parse_response(text)
 
 
 # ── Ask about lesson (chat) ───────────────────────────────────────────────────
@@ -793,6 +824,11 @@ _ASK_TIMEOUT = 120.0  # 2 minutes — chat answers should be fast
 
 async def ask_about_lesson(context: str, question: str) -> str:
     """Async: answer a student question based on the lesson content."""
+    if not _is_gemini_provider():
+        provider = get_provider()
+        prompt = f"{_ASK_SYSTEM_PROMPT}\n\nתוכן השיעור:\n{context}\n\nשאלת התלמיד: {question}"
+        return await provider.generate_text(prompt, timeout=_ASK_TIMEOUT)
+
     loop = asyncio.get_running_loop()
     try:
         return await asyncio.wait_for(
@@ -879,16 +915,19 @@ def _stream_chat_sync(
 
 async def stream_chat_response(context: str, history: list[dict], question: str):
     """
-    Async generator that yields text chunks from a streaming Gemini chat call.
+    Async generator that yields text chunks from a streaming LLM chat call.
 
-    Architecture:
-      • _stream_chat_sync() runs in a thread executor (sync Gemini SDK).
-      • It pushes chunks into a thread-safe queue.Queue.
-      • This coroutine drains the queue using run_in_executor so it never
-        blocks the event loop.
-
-    Raises RuntimeError on Gemini errors; caller is responsible for cleanup.
+    For Gemini: uses the original sync-SDK + thread-queue bridge.
+    For OpenRouter / Ollama: uses the provider's native streaming.
     """
+    if not _is_gemini_provider():
+        provider = get_provider()
+        contents = _build_chat_contents(context, history, question)
+        async for chunk in provider.stream_text(contents):
+            yield chunk
+        return
+
+    # Original Gemini path — UNCHANGED (matches existing tests)
     import queue as _q_mod
 
     loop = asyncio.get_running_loop()
@@ -1004,6 +1043,24 @@ async def generate_flashcards(
     """Async: generate 15-25 flashcards from a lesson summary (+ optional transcript)."""
     if not summary.strip():
         return []
+
+    if not _is_gemini_provider():
+        provider = get_provider()
+        context_parts = [f"סיכום השיעור:\n{summary}"]
+        if transcript:
+            context_parts.append(f"\nקטע מהתמלול:\n{transcript[:30_000]}")
+        joined_context = "\n\n".join(context_parts)
+        prompt = f"{_FLASHCARDS_PROMPT}\n\n{joined_context}"
+        try:
+            text = await asyncio.wait_for(
+                provider.generate_text(prompt),
+                timeout=_FLASHCARDS_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Flashcards generation timed out — returning empty list")
+            return []
+        return _parse_flashcards_response(text)
+
     loop = asyncio.get_running_loop()
     try:
         return await asyncio.wait_for(

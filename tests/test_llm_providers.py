@@ -1,4 +1,6 @@
 """Unit tests for the LLM provider abstraction."""
+import json
+
 import pytest
 
 
@@ -366,3 +368,56 @@ async def test_ollama_audio_upload_raises_unsupported():
     p = OllamaProvider()
     with pytest.raises(ProviderUnsupportedError):
         await p.upload_audio("/tmp/x.mp3")
+
+
+# ── summarizer.py provider dispatch ──────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_summarize_transcript_uses_openrouter_when_configured(monkeypatch):
+    """When LLM_PROVIDER=openrouter, summarize_transcript goes via the provider."""
+    from app.config import settings
+    from app.services import summarizer
+    from app.services.llm_providers import _reset_provider_cache
+
+    monkeypatch.setattr(settings, "llm_provider", "openrouter", raising=False)
+    monkeypatch.setattr(settings, "openrouter_api_key", "sk-or-test", raising=False)
+    _reset_provider_cache()
+
+    # Ensure the Gemini path is NOT taken
+    def fail_gemini_path(*a, **kw):
+        raise AssertionError("Gemini path should not run when llm_provider=openrouter")
+    monkeypatch.setattr(summarizer, "_get_client", fail_gemini_path)
+
+    # Stub the provider's generate_text
+    canned_json = json.dumps({
+        "summary": "סיכום בדיקה",
+        "chapters": [],
+        "quiz": [],
+        "language": "he",
+    }, ensure_ascii=False)
+
+    from app.services.llm_providers.openrouter import OpenRouterProvider
+    async def fake_gen(self, prompt, **kw):
+        return canned_json
+    monkeypatch.setattr(OpenRouterProvider, "generate_text", fake_gen)
+
+    # Disable critique to keep this test simple — full pipeline tested elsewhere
+    monkeypatch.setattr(settings, "enable_exam_critique", False, raising=False)
+
+    result = await summarizer.summarize_transcript("תמלול לדוגמה")
+    assert result.summary == "סיכום בדיקה"
+
+
+@pytest.mark.asyncio
+async def test_summarize_audio_with_openrouter_raises_unsupported(monkeypatch):
+    from app.config import settings
+    from app.services import summarizer
+    from app.services.llm_providers import _reset_provider_cache, ProviderUnsupportedError
+
+    monkeypatch.setattr(settings, "llm_provider", "openrouter", raising=False)
+    monkeypatch.setattr(settings, "openrouter_api_key", "sk-or-test", raising=False)
+    _reset_provider_cache()
+
+    # No need to mock anything — the call should raise before any network I/O
+    with pytest.raises(ProviderUnsupportedError):
+        await summarizer.summarize_audio("/tmp/fake.mp3")
