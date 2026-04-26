@@ -153,5 +153,9 @@ class TaskResponse(BaseModel):
     url:        Optional[str] = None
     result:     Optional[LessonResult] = None
     error:      Optional[str] = None
+    # Structured error info (Task 1.5). Keys: stage, code, user_message,
+    # technical_details. None for tasks that succeeded or failed before
+    # the schema migration.
+    error_details: Optional[dict] = None
     # True iff the server has a playable audio file for this task (Feature 7)
     has_audio:  bool = False

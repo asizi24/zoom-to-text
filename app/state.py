@@ -140,6 +140,10 @@ async def init_db():
         await db.execute("ALTER TABLE tasks ADD COLUMN audio_path TEXT")
         await db.commit()
         logger.info("Migrated tasks table: added audio_path column")
+    if "error_details" not in cols:
+        await db.execute("ALTER TABLE tasks ADD COLUMN error_details TEXT")
+        await db.commit()
+        logger.info("Migrated tasks table: added error_details column (Task 1.5)")
 
     # Create index now that user_id column is guaranteed to exist
     await db.execute(CREATE_TASKS_INDEX_SQL)
@@ -213,13 +217,32 @@ async def complete_task(task_id: str, result: LessonResult):
     await db.commit()
 
 
-async def fail_task(task_id: str, error: str):
-    # Truncate long error messages so they fit cleanly in the DB
+async def fail_task(
+    task_id: str,
+    error: str,
+    error_details: Optional[dict] = None,
+):
+    """
+    Mark a task failed.
+
+    `error_details` is the structured ProcessingError.to_dict() blob
+    (stage, code, user_message, technical_details). Persisted as JSON
+    in the error_details column (Task 1.5). Pass None for callers that
+    don't yet emit structured errors — backward compat.
+    """
+    import json as _json
     short_error = error[:500] if len(error) > 500 else error
+    details_json: Optional[str] = None
+    if error_details is not None:
+        try:
+            details_json = _json.dumps(error_details, ensure_ascii=False)
+        except (TypeError, ValueError) as exc:
+            logger.warning(f"fail_task: error_details not JSON-serializable: {exc}")
+            details_json = None
     db = await _get_db()
     await db.execute(
-        "UPDATE tasks SET status=?, message=?, error=? WHERE id=?",
-        [TaskStatus.FAILED.value, f"Failed: {short_error}", short_error, task_id],
+        "UPDATE tasks SET status=?, message=?, error=?, error_details=? WHERE id=?",
+        [TaskStatus.FAILED.value, f"Failed: {short_error}", short_error, details_json, task_id],
     )
     await db.commit()
 
@@ -248,6 +271,7 @@ async def get_task(task_id: str) -> Optional[TaskResponse]:
         url=row["url"],
         result=result,
         error=row["error"],
+        error_details=_decode_error_details(row),
         has_audio=has_audio,
     )
 
@@ -284,8 +308,26 @@ async def get_task_for_user(task_id: str, user_id: str) -> Optional[TaskResponse
         url=row["url"],
         result=result,
         error=row["error"],
+        error_details=_decode_error_details(row),
         has_audio=has_audio,
     )
+
+
+def _decode_error_details(row) -> Optional[dict]:
+    """Read row['error_details'] (TEXT column) and parse as JSON. Defensive — old
+    rows pre-migration return None; bad JSON also returns None with a log warning."""
+    import json as _json
+    if "error_details" not in row.keys():
+        return None
+    raw = row["error_details"]
+    if not raw:
+        return None
+    try:
+        out = _json.loads(raw)
+        return out if isinstance(out, dict) else None
+    except (TypeError, ValueError) as exc:
+        logger.warning(f"failed to parse error_details JSON for task: {exc}")
+        return None
 
 
 async def list_tasks(limit: int = 50, user_id: Optional[str] = None) -> list[dict]:

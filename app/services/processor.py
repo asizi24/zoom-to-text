@@ -120,7 +120,7 @@ async def run_pipeline(
         logger.exception(
             f"Task {task_id} — failed at stage={pe.stage.value} code={pe.code}"
         )
-        await state.fail_task(task_id, pe.user_message)
+        await state.fail_task(task_id, pe.user_message, pe.to_dict())
         if audio_path:
             await zoom_downloader.cleanup_audio(audio_path)
 
@@ -147,7 +147,7 @@ async def run_pipeline_from_file(
         logger.exception(
             f"Task {task_id} (upload) — failed at stage={pe.stage.value} code={pe.code}"
         )
-        await state.fail_task(task_id, pe.user_message)
+        await state.fail_task(task_id, pe.user_message, pe.to_dict())
         await zoom_downloader.cleanup_audio(file_path)
 
 
