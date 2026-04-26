@@ -99,6 +99,12 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434"
     ollama_model:    str = "llama3.1:70b"
 
+    # ── LLM debugging ──────────────────────────────────────────────────────────
+    # When True, persist raw LLM responses (synthesis + extraction) into
+    # result_json.raw_llm_response for offline debugging. Disable in production
+    # — raw responses can be 50KB+ per recording.
+    llm_debug_raw_responses: bool = False
+
     @model_validator(mode="after")
     def validate_llm_provider_credentials(self) -> "Settings":
         """Fail fast at boot if the chosen provider is missing credentials."""
