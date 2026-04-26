@@ -16,6 +16,25 @@ A FastAPI service that receives a Zoom recording (URL or file upload) and return
 - **Infrastructure**: Docker + docker-compose
 - **Auth**: Chrome extension sends Netscape-format cookies directly to the server
 
+### LLM Provider Abstraction
+The summarizer + chat + flashcards subsystem is provider-agnostic. Set
+`LLM_PROVIDER` in `.env` to switch backends:
+- `gemini` (default) — Google Gemini 2.5 Flash via google-genai SDK.
+  Supports audio upload (`GEMINI_DIRECT` mode).
+- `openrouter` — OpenAI-compatible REST API. No audio upload — use
+  WHISPER modes for transcription, then summarize.
+- `ollama` — Local model runner. Code-only on Fly.io (deps too heavy);
+  ready for a home-server deploy.
+
+Code lives in `app/services/llm_providers/`. The factory `get_provider()`
+returns the active backend; `summarizer.py` dispatches to it when
+`LLM_PROVIDER != "gemini"` and otherwise runs the original Gemini code
+path (so existing tests keep passing).
+
+The frontend calls `GET /api/capabilities` on page load to learn what
+the active provider supports, and hides processing modes that wouldn't
+work (e.g. `gemini_direct` is hidden when `LLM_PROVIDER=ollama`).
+
 ## Key Files
 ```
 app/main.py                    # FastAPI app, lifespan, idle watcher
