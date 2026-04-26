@@ -32,7 +32,19 @@ from google import genai
 from google.genai import types
 
 from app.config import settings
-from app.models import Chapter, Flashcard, LessonResult, QuizQuestion
+from app.models import (
+    ActionItem,
+    Chapter,
+    Decision,
+    Flashcard,
+    LessonResult,
+    Objection,
+    OpenQuestion,
+    PerSpeakerSentiment,
+    QuizQuestion,
+    SentimentAnalysis,
+    ToneShift,
+)
 from app.services.llm_providers import get_provider
 
 logger = logging.getLogger(__name__)
@@ -261,19 +273,23 @@ _GEMINI_TIMEOUT = 600.0
 
 # ── Retry helper ──────────────────────────────────────────────────────────────────
 
-def _generate_with_retry(client: genai.Client, contents, max_retries: int = 3):
+def _generate_with_retry(client: genai.Client, contents, max_retries: int = 3, config=None):
     """
     Exponential backoff with error classification.
     Rate-limit (429/quota) → longer backoff + user-friendly raise.
     Server errors (5xx) → standard backoff + retry.
     Other errors → fail immediately.
+
+    `config` overrides the default GenerateContentConfig (used by the extraction
+    call to lower temperature to 0.2). Pass None to use the standard config.
     """
+    cfg = config if config is not None else _GEN_CONFIG
     for attempt in range(max_retries):
         try:
             return client.models.generate_content(
                 model=settings.gemini_model,
                 contents=contents,
-                config=_GEN_CONFIG,
+                config=cfg,
             )
         except Exception as exc:
             exc_str = str(exc)
@@ -742,6 +758,208 @@ def _apply_critique_pipeline(
             progress_cb(95, "✅ כל שאלות המבחן עברו את בדיקת האיכות")
 
     return result
+
+
+# ── Extraction (Call 2 of the two-call schema upgrade pipeline) ───────────────────
+
+_EXTRACTION_TEMPERATURE = 0.2
+
+_EXTRACTION_PROMPT = """
+You are extracting structured business artifacts from a recording. The
+recording may be a lecture, a meeting, or an open discussion.
+
+Return STRICT JSON with these top-level keys (ALL OPTIONAL — return [] or
+null when a category is irrelevant):
+
+  - action_items:        [{owner, task, deadline?, priority?, source_quote?}]
+  - decisions:           [{decision, context?, stakeholders?, source_quote?}]
+  - open_questions:      [{question, raised_by?, context?}]
+  - sentiment_analysis:  {overall_tone, per_speaker_sentiment[], shifts_in_tone[]}
+                         OR null if not applicable (e.g. solo lecture)
+  - objections_tracked:  [{objection, raised_by?, response_given?, resolved?}]
+
+Hard rules:
+  • DO NOT wrap your output in markdown code fences. Bare JSON only.
+  • Every string MUST be in the SOURCE LANGUAGE of the recording.
+    Hebrew recording → Hebrew strings. English recording → English.
+  • source_quote must be ≤140 chars and verbatim from the audio/transcript.
+  • DO NOT invent owners, deadlines, or stakeholders. If unclear, omit
+    the optional field for that item.
+  • For pure lectures, action_items and objections_tracked are usually [].
+  • For meetings, sentiment_analysis is usually populated.
+
+══════════════════════════════════════════════════
+Few-shot example 1 — Hebrew product meeting (excerpt):
+══════════════════════════════════════════════════
+"דן: צריך להחליט עד יום חמישי על המודל החדש. אסף, אתה לוקח את המחקר?
+ אסף: כן, אני מסיים עד רביעי. אבל המחיר עוד פתוח — צריך לוודא עם הכספים.
+ דן: סבבה. גלית, את בודקת את חוות הדעת המשפטית?"
+
+→ {
+  "action_items": [
+    {"owner": "אסף", "task": "לסיים את המחקר על המודל החדש",
+     "deadline": "יום רביעי", "priority": "high",
+     "source_quote": "אסף, אתה לוקח את המחקר? כן, אני מסיים עד רביעי"},
+    {"owner": "גלית", "task": "לבדוק חוות דעת משפטית",
+     "source_quote": "גלית, את בודקת את חוות הדעת המשפטית?"}
+  ],
+  "decisions": [],
+  "open_questions": [
+    {"question": "מה המחיר של המודל החדש?", "raised_by": "אסף",
+     "context": "צריך לוודא עם הכספים"}
+  ],
+  "sentiment_analysis": {
+    "overall_tone": "constructive",
+    "per_speaker_sentiment": [
+      {"speaker": "דן", "sentiment": "positive"},
+      {"speaker": "אסף", "sentiment": "neutral"}
+    ],
+    "shifts_in_tone": []
+  },
+  "objections_tracked": []
+}
+
+══════════════════════════════════════════════════
+Few-shot example 2 — English physics lecture (excerpt):
+══════════════════════════════════════════════════
+"So when we apply Bell's theorem here, we get an inequality that any
+ local hidden-variable theory must satisfy. The experiments by Aspect
+ in 1982 violated this inequality decisively. Some of you might be
+ wondering — does this prove non-locality? That's still debated."
+
+→ {
+  "action_items": [],
+  "decisions": [],
+  "open_questions": [
+    {"question": "Does Bell inequality violation actually prove non-locality?",
+     "context": "Mentioned by the lecturer as still debated"}
+  ],
+  "sentiment_analysis": null,
+  "objections_tracked": []
+}
+
+══════════════════════════════════════════════════
+
+Now extract from the recording above. Return ONLY the JSON object.
+"""
+
+
+def _parse_extraction_response(text: str) -> dict:
+    """
+    Parse the extraction call's JSON response into a dict of Pydantic objects.
+
+    Returns keys: action_items, decisions, open_questions, sentiment_analysis,
+    objections_tracked. Missing keys default to [] / None.
+
+    Raises ValueError on unparseable JSON — callers handle this via best-effort
+    skip (the task still completes with synthesis-only fields).
+    """
+    stripped = text.strip()
+
+    if stripped.startswith("```"):
+        lines = stripped.split("\n")
+        stripped = "\n".join(lines[1:]).rsplit("```", 1)[0].strip()
+
+    json_start = stripped.find("{")
+    json_end = stripped.rfind("}")
+    if json_start != -1 and json_end > json_start:
+        stripped = stripped[json_start : json_end + 1]
+
+    stripped = _sanitize_json_escapes(stripped)
+
+    try:
+        data = json.loads(stripped)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"extraction call returned invalid JSON: {exc}") from exc
+
+    sentiment = None
+    s_raw = data.get("sentiment_analysis")
+    if s_raw:
+        sentiment = SentimentAnalysis(
+            overall_tone=s_raw.get("overall_tone", ""),
+            per_speaker_sentiment=[
+                PerSpeakerSentiment(
+                    speaker=p.get("speaker", ""),
+                    sentiment=p.get("sentiment", ""),
+                    rationale=p.get("rationale"),
+                )
+                for p in s_raw.get("per_speaker_sentiment", [])
+            ],
+            shifts_in_tone=[
+                ToneShift(
+                    at=t.get("at", ""),
+                    **{"from": t.get("from", ""), "to": t.get("to", "")},
+                    trigger=t.get("trigger"),
+                )
+                for t in s_raw.get("shifts_in_tone", [])
+            ],
+        )
+
+    return {
+        "action_items": [
+            ActionItem(
+                owner=a.get("owner", ""),
+                task=a.get("task", ""),
+                deadline=a.get("deadline"),
+                priority=a.get("priority"),
+                source_quote=a.get("source_quote"),
+            )
+            for a in data.get("action_items", [])
+        ],
+        "decisions": [
+            Decision(
+                decision=d.get("decision", ""),
+                context=d.get("context"),
+                stakeholders=d.get("stakeholders", []),
+                source_quote=d.get("source_quote"),
+            )
+            for d in data.get("decisions", [])
+        ],
+        "open_questions": [
+            OpenQuestion(
+                question=q.get("question", ""),
+                raised_by=q.get("raised_by"),
+                context=q.get("context"),
+            )
+            for q in data.get("open_questions", [])
+        ],
+        "sentiment_analysis": sentiment,
+        "objections_tracked": [
+            Objection(
+                objection=o.get("objection", ""),
+                raised_by=o.get("raised_by"),
+                response_given=o.get("response_given"),
+                resolved=o.get("resolved"),
+            )
+            for o in data.get("objections_tracked", [])
+        ],
+    }
+
+
+def _extraction_config() -> "types.GenerateContentConfig":
+    """Lower-temperature config for the factual extraction call."""
+    return types.GenerateContentConfig(
+        temperature=_EXTRACTION_TEMPERATURE,
+        max_output_tokens=32768,
+        **({} if _thinking_cfg is None else {"thinking_config": _thinking_cfg}),
+    )
+
+
+def _extract_artifacts_text_sync(transcript: str) -> dict:
+    """Sync: send transcript to Gemini for extraction-only call (Call 2)."""
+    client = _get_client()
+    prompt = f"{_EXTRACTION_PROMPT}\n\nRecording transcript:\n{transcript[:_MAX_CHUNK_CHARS]}"
+    response = _generate_with_retry(client, prompt, config=_extraction_config())
+    return _parse_extraction_response(_response_text(response))
+
+
+def _extract_artifacts_audio_sync(audio_file) -> dict:
+    """Sync: send pre-uploaded Gemini audio file handle for extraction (Call 2)."""
+    client = _get_client()
+    response = _generate_with_retry(
+        client, [_EXTRACTION_PROMPT, audio_file], config=_extraction_config()
+    )
+    return _parse_extraction_response(_response_text(response))
 
 
 # ── Async wrappers ────────────────────────────────────────────────────────────────
