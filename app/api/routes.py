@@ -23,6 +23,7 @@ from app.api.deps import get_current_user
 from app.config import settings
 from app.models import ProcessingMode, TaskCreate, TaskResponse
 from app.services import anki_export, processor, summarizer
+from app.services.llm_providers import get_provider
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -517,3 +518,30 @@ async def export_flashcards_csv(
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+# ── Provider capabilities (UI uses this to filter the mode dropdown) ──────────
+
+_ALL_MODES = ["gemini_direct", "whisper_local", "whisper_api", "ivrit_ai"]
+
+
+def _available_modes_for(provider) -> list[str]:
+    """Filter the four processing modes by what the provider can actually do."""
+    if provider.supports_audio_upload:
+        return list(_ALL_MODES)
+    return [m for m in _ALL_MODES if m != "gemini_direct"]
+
+
+@router.get("/capabilities")
+async def get_capabilities() -> dict:
+    """
+    Public read-only endpoint describing the active LLM provider's capabilities.
+    Frontend calls this on page load to know which processing modes to offer.
+    """
+    p = get_provider()
+    return {
+        "llm_provider": p.name,
+        "supports_audio_upload": p.supports_audio_upload,
+        "supports_streaming": p.supports_streaming,
+        "available_modes": _available_modes_for(p),
+    }
