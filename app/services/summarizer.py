@@ -946,20 +946,183 @@ def _extraction_config() -> "types.GenerateContentConfig":
 
 
 def _extract_artifacts_text_sync(transcript: str) -> dict:
-    """Sync: send transcript to Gemini for extraction-only call (Call 2)."""
-    client = _get_client()
-    prompt = f"{_EXTRACTION_PROMPT}\n\nRecording transcript:\n{transcript[:_MAX_CHUNK_CHARS]}"
-    response = _generate_with_retry(client, prompt, config=_extraction_config())
-    return _parse_extraction_response(_response_text(response))
+    """Sync: send transcript to Gemini for extraction-only call (Call 2). Dict only."""
+    parsed, _raw = _extract_text_capture(transcript)
+    return parsed
 
 
 def _extract_artifacts_audio_sync(audio_file) -> dict:
-    """Sync: send pre-uploaded Gemini audio file handle for extraction (Call 2)."""
+    """Sync: send pre-uploaded Gemini audio for extraction. Dict only."""
+    parsed, _raw = _extract_audio_capture(audio_file)
+    return parsed
+
+
+def _extract_text_capture(transcript: str) -> tuple[dict, str]:
+    """Sync extraction call on text. Returns (parsed dict, raw response text)."""
+    client = _get_client()
+    prompt = f"{_EXTRACTION_PROMPT}\n\nRecording transcript:\n{transcript[:_MAX_CHUNK_CHARS]}"
+    response = _generate_with_retry(client, prompt, config=_extraction_config())
+    raw = _response_text(response)
+    return _parse_extraction_response(raw), raw
+
+
+def _extract_audio_capture(audio_file) -> tuple[dict, str]:
+    """Sync extraction call on uploaded audio. Returns (parsed dict, raw response text)."""
     client = _get_client()
     response = _generate_with_retry(
         client, [_EXTRACTION_PROMPT, audio_file], config=_extraction_config()
     )
-    return _parse_extraction_response(_response_text(response))
+    raw = _response_text(response)
+    return _parse_extraction_response(raw), raw
+
+
+# ── Synthesis call wrappers that capture raw text (for raw_llm_response) ─────────
+
+def _synthesize_text_capture(transcript: str) -> tuple[LessonResult, str]:
+    """
+    Single Gemini synthesis call on a transcript. Returns (parsed result, raw text).
+
+    For very long transcripts (> _MAX_CHUNK_CHARS), the chunked path runs and
+    raw text reflects the final-merge response only (chunk responses are not
+    captured to keep raw_llm_response a manageable size).
+    """
+    client = _get_client()
+
+    if len(transcript) <= _MAX_CHUNK_CHARS:
+        prompt = f"{_SYSTEM_PROMPT}\n\nתמלול השיעור:\n{transcript}"
+        last_raw = ""
+        last_error: Exception | None = None
+        for attempt in range(2):
+            response = _generate_with_retry(client, prompt)
+            last_raw = _response_text(response)
+            try:
+                return _parse_response(last_raw), last_raw
+            except RuntimeError as e:
+                last_error = e
+                if attempt == 0:
+                    logger.warning("JSON parse failed on first attempt, retrying...")
+        raise last_error  # type: ignore[misc]
+
+    # Chunked path — produce partials, merge, then capture raw of final merge
+    chunks = [
+        transcript[i: i + _MAX_CHUNK_CHARS]
+        for i in range(0, len(transcript), _MAX_CHUNK_CHARS)
+    ]
+    n = len(chunks)
+    logger.info(f"Transcript is {len(transcript):,} chars — chunking into {n} parts")
+
+    partial_prompt = """
+    להלן חלק מתמלול שיעור. סכם את הנקודות המרכזיות בחלק זה בלבד.
+    החזר JSON עם שדות: "summary" ו-"key_points" (רשימה).
+    """
+    partial_summaries: list[str] = []
+    for i, chunk in enumerate(chunks, 1):
+        logger.info(f"Summarizing chunk {i}/{n}")
+        resp = _generate_with_retry(client, f"{partial_prompt}\n\nחלק {i}:\n{chunk}")
+        partial_summaries.append(resp.text)
+
+    merge_prompt = (
+        f"{_SYSTEM_PROMPT}\n\n"
+        "להלן סיכומי ביניים של חלקי השיעור. "
+        "בנה מהם סיכום מלא, פרקים ומבחן אמריקאי כפי שנדרש:\n\n"
+        + "\n\n---\n\n".join(partial_summaries)
+    )
+    final_response = _generate_with_retry(client, merge_prompt)
+    raw = _response_text(final_response)
+    return _parse_response(raw), raw
+
+
+def _synthesize_audio_capture(audio_file, progress_cb: _ProgressCallback | None = None) -> tuple[LessonResult, str]:
+    """Synthesis call on a pre-uploaded audio file. Returns (parsed, raw text)."""
+    client = _get_client()
+    if progress_cb:
+        progress_cb(72, "✍️ Gemini כותב את הסיכום והמבחן — עוד רגע...")
+
+    last_raw = ""
+    last_error: Exception | None = None
+    for attempt in range(2):
+        response = _generate_with_retry(client, [_SYSTEM_PROMPT, audio_file])
+        last_raw = _response_text(response)
+        try:
+            return _parse_response(last_raw), last_raw
+        except RuntimeError as e:
+            last_error = e
+            if attempt == 0:
+                logger.warning("JSON parse failed on first attempt, retrying...")
+    raise last_error  # type: ignore[misc]
+
+
+# ── Audio upload + cleanup helpers (split out of _summarize_audio_sync) ──────────
+
+def _upload_audio_to_gemini(audio_path: str, progress_cb: _ProgressCallback | None = None):
+    """Upload audio to Gemini Files API and wait for processing. Returns the file handle."""
+    client = _get_client()
+    logger.info(f"Uploading audio to Gemini Files API: {audio_path}")
+    audio_file = client.files.upload(file=audio_path)
+
+    if progress_cb:
+        progress_cb(55, "✅ האודיו הועלה ל-Gemini. ממתין לעיבוד הקובץ...")
+
+    max_wait = 300
+    waited = 0
+    while audio_file.state.name == "PROCESSING":
+        if waited >= max_wait:
+            raise RuntimeError("⏱️ Gemini לא סיים לעבד את קובץ האודיו תוך 5 דקות")
+        time.sleep(5)
+        waited += 5
+        audio_file = client.files.get(name=audio_file.name)
+
+    if audio_file.state.name == "FAILED":
+        raise RuntimeError("❌ Gemini נכשל בעיבוד קובץ האודיו")
+
+    if progress_cb:
+        progress_cb(65, "🔄 Gemini עיבד את הקובץ. מייצר סיכום, פרקים ומבחן...")
+
+    return audio_file
+
+
+def _delete_gemini_file(audio_file) -> None:
+    """Best-effort cleanup of an uploaded Gemini audio file."""
+    try:
+        client = _get_client()
+        client.files.delete(name=audio_file.name)
+        logger.info("Cleaned up Gemini file upload")
+    except Exception:
+        pass
+
+
+# ── Result merging (synthesis Call 1 + extraction Call 2) ────────────────────────
+
+def _merge_results(
+    synthesis: LessonResult,
+    extraction: dict | None,
+    raw_summary: str | None,
+    raw_extraction: str | None,
+) -> LessonResult:
+    """
+    Layer extraction-call fields onto the synthesis LessonResult.
+
+    `extraction=None` means the extraction call failed entirely (graceful skip)
+    — synthesis fields are preserved as-is and extraction fields stay default.
+
+    `raw_llm_response` is populated only when settings.llm_debug_raw_responses
+    is True (per spec §7).
+    """
+    if extraction:
+        synthesis.action_items       = extraction.get("action_items", [])
+        synthesis.decisions          = extraction.get("decisions", [])
+        synthesis.open_questions     = extraction.get("open_questions", [])
+        synthesis.sentiment_analysis = extraction.get("sentiment_analysis")
+        synthesis.objections_tracked = extraction.get("objections_tracked", [])
+
+    if settings.llm_debug_raw_responses:
+        from app.models import RawLLMResponse
+        synthesis.raw_llm_response = RawLLMResponse(
+            summary_call=raw_summary,
+            extraction_call=raw_extraction,
+        )
+
+    return synthesis
 
 
 # ── Async wrappers ────────────────────────────────────────────────────────────────
@@ -968,40 +1131,114 @@ async def summarize_audio(
     audio_path: str,
     progress_cb: _ProgressCallback | None = None,
 ) -> LessonResult:
-    """Async: upload audio directly to LLM (GEMINI_DIRECT mode)."""
+    """
+    Async: upload audio directly to LLM (GEMINI_DIRECT mode).
+
+    Two-call pipeline (Task 1.1):
+      Call 1 (synthesis)   — summary + chapters + quiz + content_type
+      Call 2 (extraction)  — action_items, decisions, sentiment, etc.
+    The two calls run in parallel via asyncio.gather. Synthesis failure is
+    fatal; extraction failure is best-effort (graceful skip with [] / None).
+    """
     if not _is_gemini_provider():
-        # Non-Gemini providers do not support audio upload — fail fast with
-        # the provider's Hebrew user_message so the UX is clear.
         provider = get_provider()
         await provider.upload_audio(audio_path)
         raise RuntimeError("unreachable")
 
     loop = asyncio.get_running_loop()
+
+    # Step 1: Upload + wait (sync, in executor) — both calls share this handle.
+    audio_file = await loop.run_in_executor(
+        None, _upload_audio_to_gemini, audio_path, progress_cb
+    )
+
     try:
-        return await asyncio.wait_for(
-            loop.run_in_executor(None, _summarize_audio_sync, audio_path, progress_cb),
+        # Step 2: Synthesis + Extraction in parallel.
+        synthesis_future = loop.run_in_executor(
+            None, _synthesize_audio_capture, audio_file, progress_cb
+        )
+        extraction_future = loop.run_in_executor(
+            None, _extract_audio_capture, audio_file
+        )
+
+        synthesis_outcome, extraction_outcome = await asyncio.wait_for(
+            asyncio.gather(
+                synthesis_future, extraction_future, return_exceptions=True
+            ),
             timeout=_GEMINI_TIMEOUT,
         )
     except asyncio.TimeoutError:
+        await loop.run_in_executor(None, _delete_gemini_file, audio_file)
         raise TimeoutError("⏱️ Gemini לא הגיב תוך 10 דקות — נסה שוב")
+
+    # Step 3: Cleanup — always.
+    await loop.run_in_executor(None, _delete_gemini_file, audio_file)
+
+    # Step 4: Synthesis is required.
+    if isinstance(synthesis_outcome, BaseException):
+        raise synthesis_outcome
+    synthesis_result, raw_summary = synthesis_outcome  # type: ignore[misc]
+
+    # Step 5: Extraction is best-effort.
+    extraction_dict, raw_extraction = None, None
+    if isinstance(extraction_outcome, BaseException):
+        logger.warning(
+            f"Extraction call failed (graceful skip): {extraction_outcome}"
+        )
+    else:
+        extraction_dict, raw_extraction = extraction_outcome  # type: ignore[misc]
+
+    return _merge_results(synthesis_result, extraction_dict, raw_summary, raw_extraction)
 
 
 async def summarize_transcript(
     transcript: str,
     progress_cb: _ProgressCallback | None = None,
 ) -> LessonResult:
-    """Async: summarize a text transcript (WHISPER_LOCAL / WHISPER_API mode)."""
+    """
+    Async: summarize a text transcript (WHISPER_LOCAL / WHISPER_API mode).
+
+    Same two-call pipeline as summarize_audio (synthesis + extraction in
+    parallel via asyncio.gather; extraction failure is best-effort).
+    """
     if not _is_gemini_provider():
         return await _summarize_transcript_via_provider(transcript, progress_cb)
 
     loop = asyncio.get_running_loop()
+
+    synthesis_future = loop.run_in_executor(
+        None, _synthesize_text_capture, transcript
+    )
+    extraction_future = loop.run_in_executor(
+        None, _extract_text_capture, transcript
+    )
+
     try:
-        return await asyncio.wait_for(
-            loop.run_in_executor(None, _summarize_text_sync, transcript, progress_cb),
+        synthesis_outcome, extraction_outcome = await asyncio.wait_for(
+            asyncio.gather(
+                synthesis_future, extraction_future, return_exceptions=True
+            ),
             timeout=_GEMINI_TIMEOUT,
         )
     except asyncio.TimeoutError:
         raise TimeoutError("⏱️ Gemini לא הגיב תוך 10 דקות — נסה שוב")
+
+    if isinstance(synthesis_outcome, BaseException):
+        raise synthesis_outcome
+    synthesis_result, raw_summary = synthesis_outcome  # type: ignore[misc]
+
+    extraction_dict, raw_extraction = None, None
+    if isinstance(extraction_outcome, BaseException):
+        logger.warning(
+            f"Extraction call failed (graceful skip): {extraction_outcome}"
+        )
+    else:
+        extraction_dict, raw_extraction = extraction_outcome  # type: ignore[misc]
+
+    merged = _merge_results(
+        synthesis_result, extraction_dict, raw_summary, raw_extraction
+    )
+    return _apply_critique_pipeline(merged, progress_cb)
 
 
 async def _summarize_transcript_via_provider(
