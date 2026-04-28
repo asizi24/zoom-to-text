@@ -84,6 +84,41 @@ soundfile, httpx) and are **never installed on Fly.io** — the server
 stays small. Tests in `tests/desktop/` use mocked sounddevice +
 `httpx.MockTransport`; the hardware-gated test is `skipif`'d off CI.
 
+## Why These Choices
+
+Quick rationale for the load-bearing decisions — read before proposing
+migrations, especially "let's switch to X for scale."
+
+- **Fly.io over Cloud Run.** Cloud Run is ephemeral; SQLite files and
+  in-flight `BackgroundTasks` would die on every cold start. Fly.io
+  has a persistent machine + 10 GB volume — both audio files and the
+  task DB survive restarts.
+- **SQLite over Postgres.** ~5 concurrent users max. A second daemon
+  with its own connection pool would buy nothing at this scale.
+- **`BackgroundTasks` over Celery / ARQ.** Background work runs on the
+  same uvicorn process. No Redis, no worker fleet, no ops surface.
+  At 5 users this is the cheapest correct answer; revisit only if
+  task starvation appears.
+- **Two-call synthesis ‖ extraction.** Synthesis wants temperature 0.3
+  (creative summary); extraction wants 0.2 (factual lists). Merging
+  into one prompt loses precision; running serially doubles latency.
+  `asyncio.gather` keeps wall-clock at `max(call_1, call_2)` while
+  paying ~30 % more tokens.
+- **Graceful skip vs fatal failure.** Synthesis is the user's primary
+  product — its failure fails the task. Extraction and diarization
+  are enrichments — their failure logs a warning and leaves fields
+  empty.
+- **Text-based diarization, not Pyannote.** Current Fly.io machine is
+  512 MB shared-cpu-1x. Pyannote needs GPU and ~2 GB RAM for the
+  pretrained pipeline. Text diarization (Gemini-driven) loses some
+  acoustic cues but runs free on the existing infra. Pyannote stays
+  ready as code (Task 2.2) for a future home-server deploy.
+- **Magic-link + session cookie over JWT / OAuth.** Closed group
+  (~6 emails). Magic link via Resend.com costs nothing on the free
+  tier. No password to manage; no third-party identity provider to
+  configure. Session is an opaque random key in SQLite — easy to
+  revoke (`DELETE FROM sessions WHERE id = ?`).
+
 ## Key Files
 ```
 app/main.py                    # FastAPI app, lifespan, idle watcher
@@ -130,6 +165,66 @@ WHISPER_API:    download → preprocess (13min chunks + silence removal) → Ope
 4. **audio_preprocessor**: Uses ffmpeg only (no pydub), runs only in WHISPER_API mode
 5. **Chrome extension**: Sends cookies in Netscape format + URL directly to the server
 6. **Run locally**: `docker compose up -d` → http://localhost:8000
+
+## Operations
+
+Concrete commands a fresh session needs.
+
+### Tests
+```bash
+pytest tests/ -q                     # full server suite (178 tests)
+pytest tests/desktop/ -v             # desktop POC (9 tests; needs desktop reqs)
+pytest tests/test_obsidian_export.py # single file, verbose
+```
+**Do not run `pytest .` from the repo root** — it picks up
+`_legacy_archive/` and errors out on `from app import app`. Always
+restrict to `tests/`.
+
+To run desktop tests:
+```bash
+pip install -r desktop/requirements.txt
+```
+Tests skip cleanly when desktop deps are missing
+(`pytest.importorskip` guards them).
+
+### Local dev
+```bash
+docker compose up -d                 # http://localhost:8000
+# or, for hot reload:
+uvicorn app.main:app --reload
+```
+
+### Deploy
+```bash
+fly deploy --remote-only             # build on Fly's depot builder
+fly logs                             # tail server logs
+fly ssh console                      # shell into the machine
+fly status                           # machine state
+```
+- The depot builder occasionally returns a TLS handshake error
+  (`x509: certificate is not valid for any names`). Re-run; it's
+  a transient infra issue.
+- After deploy, smoke-check via:
+  `curl --ssl-no-revoke -s https://zoom-to-text.fly.dev/health`
+  (Windows curl needs `--ssl-no-revoke`; the site itself is fine.)
+
+### Secrets
+```bash
+fly secrets set GOOGLE_API_KEY=...
+fly secrets set RESEND_API_KEY=... ALLOWED_EMAILS="a@x.com,b@y.com"
+fly secrets list
+```
+**Windows gotcha**: paths starting with `/` get rewritten by Git Bash:
+```bash
+MSYS_NO_PATHCONV=1 fly secrets set DATA_DIR="/data" DOWNLOADS_DIR="/data/downloads"
+```
+
+### Rollback
+```bash
+git revert <bad_sha>..<head_sha>     # create revert commits
+git push origin main
+fly deploy --remote-only             # rolling deploy of the revert
+```
 
 ## GitHub
 - Repo: https://github.com/asizi24/zoom-to-text
@@ -226,14 +321,17 @@ Use gstack roles for different types of work:
    pass, and a CLAUDE.md refresh.
 
 ### 🟡 Medium Priority
-4. **Whisper local memory leak** — verify the 30-min idle unload actually frees GPU memory
-5. **Audio preprocessor robustness** — what happens with very short recordings (<5 min)?
-6. **History tab UX** — add search/filter by date or topic
+5. **Whisper local memory leak** — `auto_shutdown_idle_minutes=30` exists in
+   `config.py`; the model unload path is wired, but actual GPU/RAM release
+   has not been measured under sustained load. Profile before claiming done.
+6. **Audio preprocessor robustness** — what happens on recordings <5 min,
+   silent recordings, single-chunk paths? No regression tests yet.
+7. **History tab UX** — add search/filter by date or topic.
 
 ### 🟢 Nice to Have
-7. **Export to PDF** — alongside current Markdown export
-8. **Multi-language support** — Gemini prompt currently assumes Hebrew content
-9. **Rate limiting** — protect the API from abuse
+8. **Export to PDF** — alongside current Markdown export.
+9. **Multi-language support** — Gemini prompt currently assumes Hebrew content.
+10. **Rate limiting** — protect the API from abuse.
 
 ---
 
@@ -259,6 +357,76 @@ Use gstack roles for different types of work:
   `LessonResult` as a JSON blob. Every new field must be `Optional`
   with a default of `[]` / `None`, and accompanied by a
   `test_lesson_result_loads_old_json_*`-style test.
+- **`pytest.importorskip` for Optional Deps.** Tests that exercise
+  optional/desktop-only dependencies (e.g. `sounddevice`,
+  `soundfile`) must call `pytest.importorskip("name")` before any
+  module import that pulls them. This way the suite stays green on
+  machines without the optional install (`tests/desktop/test_capture.py`
+  is the reference pattern).
+
+---
+
+## Footguns / Don'ts
+
+Land mines that have bitten this project before. A fresh Claude
+session should know about these before the first edit.
+
+- **Don't upgrade `httpx` past 0.27.0.** `httpx==0.28+` breaks
+  starlette's `TestClient` (`Client.__init__() got unexpected 'app'`).
+  Both `requirements.txt` and `desktop/requirements.txt` pin
+  `httpx==0.27.0`. Same pin keeps a single test run exercising both.
+- **Don't run `pytest .` from the repo root.** It picks up
+  `_legacy_archive/` and errors on `from app import app`. Always
+  use `pytest tests/` or a specific file path.
+- **Don't add deps to top-level `requirements.txt` casually.** The
+  Fly.io image is 512 MB shared-cpu-1x. Any heavy dep (torch,
+  pyannote, transformers...) must go in a separate
+  `requirements-heavy.txt` and never be imported at server boot.
+- **Don't bypass `get_provider()`.** Direct `import google.genai`
+  outside `app/services/llm_providers/gemini.py` defeats the
+  abstraction and will break OpenRouter / Ollama paths. Same for
+  flashcards, chat, critique — all routed through the provider.
+- **Don't break `/api/*` backward compatibility.** The Chrome
+  extension and the History tab read JSON blobs from old tasks; new
+  fields must be optional with safe defaults. See the
+  `test_lesson_result_loads_old_json_*` family.
+- **Don't put secrets in code.** Use `fly secrets set` for prod and
+  `.env` (gitignored) for local. `.env.example` is the source of
+  truth for what variables exist.
+- **Don't deploy without green tests.** `pytest tests/` must be
+  178+ passing before `fly deploy`. The deploy is rolling but the
+  machine is single — a bad image takes the site down.
+- **Don't change Pydantic field names with Python keywords without
+  alias.** `from`, `to`, `class`, etc. need `Field(..., alias="from")`
+  + `model_config = {"populate_by_name": True}`. See `ToneShift` in
+  `app/models.py`.
+- **Don't catch `BaseException` to swallow errors.** Wrap in
+  `processor._run_stage(stage, coro)` so `ProcessingError` is
+  raised with stage context. Bare `except: pass` loses the
+  `error_details` payload the UI depends on.
+- **Don't render user content via `innerHTML` in `static/index.html`.**
+  XSS surface. Use DOM APIs (`textContent`, `appendChild`). Existing
+  patterns in `chapters-list` rendering are the reference.
+
+## Where to Find More
+
+External-to-this-file context Claude should reach for when relevant:
+
+- `UPGRADE_PROMPT.md` — the strategic upgrade roadmap. Source of
+  Tasks 1.1, 1.2, 1.3, 1.4, 1.5, 2.1, 2.2, 2.3, 3.x. Read this
+  before scoping a "next big thing."
+- `docs/superpowers/specs/` — design specs written before
+  implementation (e.g. `2026-04-26-schema-upgrade-design.md`,
+  `2026-04-26-diarization-design.md`). Useful for understanding
+  the *why* behind a Cycle B feature.
+- `docs/superpowers/plans/` — implementation plans
+  (e.g. `2026-04-25-llm-provider-abstraction.md`).
+- `.claude/plans/` (gitignored, user-local) — short-lived plan
+  files from prior sessions.
+- `~/.claude/projects/.../memory/` (gitignored, user-local) —
+  persistent cross-session memory: project-state, technical
+  decisions, deployment details, user profile. Loaded only via
+  `/mem load`; not visible to fresh CI runs.
 
 ---
 
