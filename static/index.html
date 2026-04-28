@@ -1614,6 +1614,7 @@
   <div class="results-actions">
     <button class="action-btn back-btn" onclick="reset()" title="חזרה למסך הראשי">← חזרה</button>
     <button class="action-btn" onclick="exportMarkdown()">⬇️ ייצוא Markdown</button>
+    <button class="action-btn" onclick="exportObsidian()" title="פורמט Obsidian: frontmatter, action items כ-checkboxes, תגיות לפי owner">🟣 ייצוא Obsidian</button>
     <button class="action-btn" id="copy-all-btn" onclick="copyAll()">📋 העתק הכל</button>
     <button class="action-btn" onclick="window.print()">🖨️ הדפסה</button>
   </div>
@@ -1722,6 +1723,7 @@
   let pollTimer     = null;
   let quizScore     = { correct: 0, total: 0 };
   let currentResult = null;
+  let currentTaskId = null;
   let currentSource = '';
   let historyVisible = false;
   let processingStartTime = null;
@@ -2016,6 +2018,7 @@
     hideLiveTranscript();
     hideProgress();
     currentResult = result;
+    currentTaskId = taskId;
     document.getElementById('input-card').style.display = 'none';
     document.querySelector('.brand').style.display = 'none';
     document.querySelector('.stats').style.display = 'none';
@@ -2241,6 +2244,29 @@
     URL.revokeObjectURL(a.href);
   }
 
+  // Obsidian-flavored markdown — server-rendered (Task 1.4)
+  async function exportObsidian() {
+    if (!currentTaskId) return;
+    try {
+      const resp = await fetch(`/api/tasks/${currentTaskId}/export/obsidian`, {
+        credentials: 'include',
+      });
+      if (!resp.ok) {
+        alert('ייצוא Obsidian נכשל: ' + resp.status);
+        return;
+      }
+      const md = await resp.text();
+      const blob = new Blob([md], { type: 'text/markdown; charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `obsidian-${currentTaskId.slice(0, 8)}.md`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch (err) {
+      alert('שגיאה בייצוא Obsidian: ' + err.message);
+    }
+  }
+
   // ══════════════════════════════════════════════════════════════════════════
   // History
   // ══════════════════════════════════════════════════════════════════════════
@@ -2373,6 +2399,7 @@
     document.getElementById('url-input').value = '';
     selectedFile = null;
     currentResult = null;
+    currentTaskId = null;
     currentSource = '';
     processingStartTime = null;
     document.getElementById('file-badge').style.display = 'none';
