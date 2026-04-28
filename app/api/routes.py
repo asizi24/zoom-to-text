@@ -23,6 +23,7 @@ from app.api.deps import get_current_user
 from app.config import settings
 from app.models import ProcessingMode, TaskCreate, TaskResponse
 from app.services import anki_export, processor, summarizer
+from app.services.exporters.markdown import build_obsidian_markdown
 from app.services.llm_providers import get_provider
 
 logger = logging.getLogger(__name__)
@@ -516,6 +517,36 @@ async def export_flashcards_csv(
     return Response(
         content=data,
         media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ── Obsidian-flavored markdown export (Task 1.4) ─────────────────────────────
+
+@router.get("/tasks/{task_id}/export/obsidian")
+async def export_obsidian_markdown(
+    task_id: str,
+    user_id: str = Depends(get_current_user),
+):
+    """
+    Download the task's lesson as Obsidian-flavored Markdown.
+
+    Includes YAML frontmatter, action items as `- [ ]` checkboxes with
+    `#action/<owner>` tags, decisions / open questions / sentiment /
+    objections sections, chapters, and the exam in a `<details>` block.
+    The original client-side Markdown export remains unchanged.
+    """
+    task = await state.get_task_for_user(task_id, user_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.result is None:
+        raise HTTPException(status_code=400, detail="Task has no result yet")
+
+    md = build_obsidian_markdown(task)
+    filename = f"obsidian-{task_id[:8]}.md"
+    return Response(
+        content=md,
+        media_type="text/markdown; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
