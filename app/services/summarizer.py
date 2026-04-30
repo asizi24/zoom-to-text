@@ -6,7 +6,11 @@ Two modes:
   │  Audio file → uploaded to Gemini Files API → model processes natively       │
   │  • ~2-3 min for a 2-hour class                                              │
   │  • Best accuracy (hears tone, emphasis, speaker pauses)                     │
-  │  • Supports up to 9.5 hours of audio per request                            │
+  │  • Direct path is used when audio fits in one 1M-token Gemini request.      │
+  │    Recordings longer than ``_GEMINI_DIRECT_MAX_SECONDS`` are routed through │
+  │    a chunked path: split → transcribe each chunk via Gemini → run the      │
+  │    resulting text through ``summarize_transcript`` (same pipeline used by   │
+  │    WHISPER modes).                                                          │
   └─────────────────────────────────────────────────────────────────────────────┘
   ┌─ WHISPER_LOCAL / WHISPER_API ───────────────────────────────────────────────┐
   │  Transcript text → sent to Gemini as text                                   │
@@ -24,6 +28,8 @@ import json
 import logging
 import os
 import re
+import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Callable
@@ -1209,6 +1215,253 @@ def _delete_gemini_file(audio_file) -> None:
         pass
 
 
+# ── Long-audio chunked path (used when direct mode would exceed 1M tokens) ───
+
+# Recording duration above which `summarize_audio` routes through the chunked
+# path. Without this guard, generate_content fails with
+# "input token count exceeds the maximum number of tokens allowed 1048576"
+# when the audio + system prompt together overflow the request budget. 45 min
+# is conservative — Gemini's documented audio rate is ~32 tokens/sec, but the
+# actual rate at full fidelity is meaningfully higher, so we leave generous
+# headroom under the 1M limit.
+_GEMINI_DIRECT_MAX_SECONDS = 45 * 60
+
+# Per-chunk duration for the long-audio chunked path. 10 minutes keeps each
+# Gemini transcribe request well under the 1M-token budget even at the worst
+# observed audio token-rate, while bounding the number of round-trips for a
+# 2-hour recording to ~12 — each round-trip is ~60-90 s wall-clock.
+_GEMINI_CHUNK_SECONDS = 10 * 60
+
+# Maximum concurrent chunk-transcribe calls. 3 is conservative against Gemini's
+# free-tier rate limits while cutting wall-clock for a 2-hour recording from
+# ~13 min serial to ~5 min. Bumping this past 5 risks 429s on the Files API.
+_GEMINI_CHUNK_PARALLELISM = 3
+
+
+def _is_token_exceeded_error(exc: BaseException) -> bool:
+    """True iff `exc` is Gemini's "input token count exceeds the maximum" error.
+
+    Used by `summarize_audio` to fall back to the chunked path when the direct
+    request fails despite a sub-threshold duration probe — happens when the
+    audio's token-rate is higher than expected (talk-heavy lectures with little
+    silence).
+    """
+    s = str(exc)
+    return (
+        "exceeds the maximum number of tokens" in s
+        or "1048576" in s
+        or "input token count" in s.lower()
+    )
+
+
+_TRANSCRIBE_CHUNK_PROMPT = (
+    "תמלל את ההקלטה בעברית מילה במילה. "
+    "שמור על מונחים באנגלית (שמות טכנולוגיות, מחלות, ראשי תיבות, מושגים "
+    "מקצועיים) בדיוק כפי שנאמרו — אל תתרגם או תתעתק לעברית. "
+    "אל תוסיף סיכום או הקדמה — החזר אך ורק את הטקסט המתומלל."
+)
+
+
+def _hard_split_audio_for_gemini(audio_path: str) -> list[str]:
+    """Split `audio_path` into ≤``_GEMINI_CHUNK_SECONDS`` time slices via ffmpeg.
+
+    Pure time-based slicing, no silence removal — silence-removal failed silently
+    on `.mp4`/`.m4a` audio containers and the upstream
+    ``audio_preprocessor.preprocess`` fallback returned the *full* file as a
+    single chunk, which then re-tripped the 1M-token Gemini limit. This helper
+    intentionally has no fallback: each entry in the returned list is a real
+    sub-range of the input.
+
+    Each chunk is created with ``-c copy`` so no re-encoding happens; the
+    chunks are written to ``tempfile`` paths the caller is responsible for
+    deleting via ``_cleanup_chunk_files``.
+    """
+    duration = _audio_duration_seconds(audio_path)
+    if duration is None or duration <= 0:
+        raise RuntimeError(
+            "❌ ffprobe לא הצליח למדוד את אורך ההקלטה — לא ניתן לחתוך"
+        )
+
+    suffix = Path(audio_path).suffix or ".mp3"
+    chunk_s = _GEMINI_CHUNK_SECONDS
+    n_chunks = int(duration // chunk_s) + (1 if duration % chunk_s else 0)
+    chunks: list[str] = []
+    for i in range(n_chunks):
+        start = i * chunk_s
+        fd, out = tempfile.mkstemp(suffix=suffix, prefix=f"zt_chunk{i:02d}_")
+        os.close(fd)
+        try:
+            subprocess.run(
+                [
+                    "ffmpeg", "-y",
+                    "-ss", str(start),
+                    "-t", str(chunk_s),
+                    "-i", audio_path,
+                    "-c", "copy",
+                    "-loglevel", "error",
+                    out,
+                ],
+                check=True,
+                timeout=600,
+            )
+        except (subprocess.SubprocessError, FileNotFoundError):
+            # Clean up any chunks already produced before re-raising
+            _cleanup_chunk_files(chunks + [out])
+            raise
+        chunks.append(out)
+    return chunks
+
+
+def _cleanup_chunk_files(paths: list[str]) -> None:
+    """Best-effort delete of chunk temp files. Mirrors `cleanup_audio` style."""
+    for p in paths:
+        try:
+            Path(p).unlink(missing_ok=True)
+        except Exception as exc:
+            logger.warning(f"chunk cleanup: failed to delete {p}: {exc}")
+
+
+def _audio_duration_seconds(path: str) -> float | None:
+    """Return audio duration in seconds via ffprobe, or None on any failure.
+
+    Used by `summarize_audio` to decide whether the recording fits in a single
+    Gemini request or needs to be chunked. Returning None means "unknown" — the
+    caller falls back to the direct path (preserving prior behavior on hosts
+    where ffprobe is missing).
+    """
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                path,
+            ],
+            capture_output=True, text=True, check=True, timeout=30,
+        )
+        return float(result.stdout.strip())
+    except (subprocess.SubprocessError, ValueError, FileNotFoundError) as exc:
+        logger.warning(f"ffprobe duration failed for {path}: {exc}")
+        return None
+
+
+def _transcribe_audio_chunk_via_gemini(chunk_path: str) -> str:
+    """Upload one audio chunk and ask Gemini for a verbatim Hebrew transcript.
+
+    Each chunk is ≤13 minutes (per `audio_preprocessor.CHUNK_SECONDS`) so it
+    comfortably fits inside the 1M-token request budget alongside the
+    transcribe prompt.
+    """
+    client = _get_client()
+    logger.info(f"Transcribing chunk via Gemini: {chunk_path}")
+    audio_file = client.files.upload(file=chunk_path)
+
+    # Match the direct-path budget (`_upload_audio_to_gemini`) — Gemini's
+    # Files API can take several minutes to finish PROCESSING a 10-minute
+    # chunk on busy days, and 3 minutes is not enough headroom.
+    waited, max_wait = 0, 300
+    while audio_file.state.name == "PROCESSING":
+        if waited >= max_wait:
+            try:
+                client.files.delete(name=audio_file.name)
+            except Exception:
+                pass
+            raise RuntimeError("⏱️ Gemini לא סיים לעבד חלק מהאודיו תוך 5 דקות")
+        time.sleep(5)
+        waited += 5
+        audio_file = client.files.get(name=audio_file.name)
+
+    if audio_file.state.name == "FAILED":
+        try:
+            client.files.delete(name=audio_file.name)
+        except Exception:
+            pass
+        raise RuntimeError("❌ Gemini נכשל בעיבוד חלק מהאודיו")
+
+    transcribe_cfg = types.GenerateContentConfig(
+        temperature=0.0,
+        max_output_tokens=65536,
+        **({} if _thinking_cfg is None else {"thinking_config": _thinking_cfg}),
+    )
+    try:
+        response = _generate_with_retry(
+            client, [audio_file, _TRANSCRIBE_CHUNK_PROMPT], config=transcribe_cfg
+        )
+        return _response_text(response).strip()
+    finally:
+        try:
+            client.files.delete(name=audio_file.name)
+        except Exception:
+            pass
+
+
+async def _summarize_audio_chunked(
+    audio_path: str,
+    progress_cb: _ProgressCallback | None,
+) -> LessonResult:
+    """Long-audio path: chunk → Gemini-transcribe each piece → summarize text.
+
+    Triggered by `summarize_audio` when the recording exceeds
+    `_GEMINI_DIRECT_MAX_SECONDS`. Uses pure time-based ffmpeg slicing
+    (`_hard_split_audio_for_gemini`) — silence-removal pre-processing has
+    been observed to fail silently on `.mp4`/`.m4a` audio containers, leaving
+    the original full file as a single "chunk" that then re-trips the
+    1M-token limit. The merged transcript is then funneled through
+    `summarize_transcript`, so the user-facing result includes diarization,
+    synthesis, extraction, and the exam-critique pass — same as WHISPER modes.
+    """
+    if progress_cb:
+        progress_cb(52, "📦 ההקלטה ארוכה — מחלק לחלקים לתמלול...")
+
+    loop = asyncio.get_running_loop()
+    chunks = await loop.run_in_executor(
+        None, _hard_split_audio_for_gemini, audio_path
+    )
+    total = max(len(chunks), 1)
+
+    # Parallelism: up to `_GEMINI_CHUNK_PARALLELISM` chunks in flight at once.
+    # Order is preserved by indexing into a results list rather than appending.
+    sem = asyncio.Semaphore(_GEMINI_CHUNK_PARALLELISM)
+    completed = {"count": 0}
+
+    async def _transcribe_one(idx: int, chunk_path: str) -> str:
+        async with sem:
+            text = await loop.run_in_executor(
+                None, _transcribe_audio_chunk_via_gemini, chunk_path
+            )
+        completed["count"] += 1
+        if progress_cb:
+            pct = 55 + int(20 * completed["count"] / total)
+            progress_cb(
+                pct,
+                f"🎙️ תמלול {completed['count']}/{total} עם Gemini...",
+            )
+        return text
+
+    try:
+        transcripts = await asyncio.gather(
+            *(_transcribe_one(i, c) for i, c in enumerate(chunks))
+        )
+    finally:
+        _cleanup_chunk_files(chunks)
+
+    full_transcript = "\n\n".join(t for t in transcripts if t)
+    if not full_transcript.strip():
+        raise RuntimeError(
+            "❌ תמלול Gemini החזיר טקסט ריק לכל חלקי ההקלטה — נסה שוב"
+        )
+
+    if progress_cb:
+        progress_cb(78, "🤖 מסכם את התמלול המאוחד...")
+
+    result = await summarize_transcript(full_transcript, progress_cb)
+    # Preserve the merged transcript so the History tab shows it like the
+    # WHISPER paths do — without this, callers would see an empty transcript
+    # field on a result that was built from a real transcript.
+    result.transcript = full_transcript
+    return result
+
+
 # ── Result merging (synthesis Call 1 + extraction Call 2) ────────────────────────
 
 def _merge_results(
@@ -1257,11 +1510,26 @@ async def summarize_audio(
       Call 2 (extraction)  — action_items, decisions, sentiment, etc.
     The two calls run in parallel via asyncio.gather. Synthesis failure is
     fatal; extraction failure is best-effort (graceful skip with [] / None).
+
+    Long-audio guard: when the recording exceeds
+    ``_GEMINI_DIRECT_MAX_SECONDS``, the request would overflow Gemini's 1M
+    input-token budget. We route through the chunked path
+    (`_summarize_audio_chunked`) which transcribes each piece via Gemini and
+    runs the resulting text through ``summarize_transcript``.
     """
     if not _is_gemini_provider():
         provider = get_provider()
         await provider.upload_audio(audio_path)
         raise RuntimeError("unreachable")
+
+    duration = _audio_duration_seconds(audio_path)
+    if duration is not None and duration > _GEMINI_DIRECT_MAX_SECONDS:
+        logger.info(
+            f"summarize_audio: audio is {duration / 60:.1f} min — exceeds "
+            f"{_GEMINI_DIRECT_MAX_SECONDS / 60:.0f}-min direct threshold; "
+            f"routing through chunked path"
+        )
+        return await _summarize_audio_chunked(audio_path, progress_cb)
 
     loop = asyncio.get_running_loop()
 
@@ -1294,6 +1562,18 @@ async def summarize_audio(
 
     # Step 4: Synthesis is required.
     if isinstance(synthesis_outcome, BaseException):
+        # Resilience: if the direct path tripped the 1M-token limit despite a
+        # sub-threshold ffprobe reading, fall back to the chunked path rather
+        # than failing the task. Without this, audio with an unexpectedly
+        # high token-rate (talk-heavy lectures, dense narration) would still
+        # fail at progress=72%.
+        if _is_token_exceeded_error(synthesis_outcome):
+            logger.warning(
+                f"summarize_audio: direct path hit token limit "
+                f"({duration / 60 if duration else '?'} min audio); "
+                "falling back to chunked path"
+            )
+            return await _summarize_audio_chunked(audio_path, progress_cb)
         raise synthesis_outcome
     synthesis_result, raw_summary = synthesis_outcome  # type: ignore[misc]
 
