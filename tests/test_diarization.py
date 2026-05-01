@@ -101,6 +101,18 @@ def test_diarization_temperature_is_01():
     assert _DIARIZATION_TEMPERATURE == 0.1
 
 
+def test_diarization_config_forces_json_response_mime_type():
+    """
+    Force Gemini into strict-JSON mode so the parser doesn't see malformed
+    payloads like the 2026-05-01 prod failure
+    ("Expecting ',' delimiter: line 12 column 4").
+    """
+    from app.services.summarizer import _diarization_config
+
+    cfg = _diarization_config()
+    assert cfg.response_mime_type == "application/json"
+
+
 # ── Sync helper ───────────────────────────────────────────────────────────────
 
 def test_diarize_transcript_sync_uses_temperature_01(monkeypatch):

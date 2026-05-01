@@ -1046,10 +1046,16 @@ Now diarize the transcript above. Return ONLY the JSON object.
 
 
 def _diarization_config() -> "types.GenerateContentConfig":
-    """Lower-temperature config for the mechanical diarization call."""
+    """Lower-temperature config for the mechanical diarization call.
+
+    `response_mime_type="application/json"` forces Gemini into strict-JSON
+    mode, eliminating the missing-comma / unescaped-newline failure modes
+    we saw graceful-skipping in prod (2026-05-01).
+    """
     return types.GenerateContentConfig(
         temperature=_DIARIZATION_TEMPERATURE,
         max_output_tokens=65536,
+        response_mime_type="application/json",
         **({} if _thinking_cfg is None else {"thinking_config": _thinking_cfg}),
     )
 
