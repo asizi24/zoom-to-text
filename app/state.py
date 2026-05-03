@@ -77,6 +77,16 @@ CREATE TABLE IF NOT EXISTS sessions (
 )
 """
 
+CREATE_LTI_OIDC_STATE_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS lti_oidc_state (
+    state      TEXT PRIMARY KEY,
+    nonce      TEXT NOT NULL,
+    issuer     TEXT NOT NULL,
+    client_id  TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+)
+"""
+
 
 # ── Lifecycle ─────────────────────────────────────────────────────────────────────
 
@@ -115,6 +125,7 @@ async def init_db():
     await db.execute(CREATE_USERS_TABLE_SQL)
     await db.execute(CREATE_MAGIC_TOKENS_TABLE_SQL)
     await db.execute(CREATE_SESSIONS_TABLE_SQL)
+    await db.execute(CREATE_LTI_OIDC_STATE_TABLE_SQL)
     await db.commit()
 
     # Add index on user_id for fast per-user task listings
@@ -444,6 +455,54 @@ async def delete_session(session_id: str):
     db = await _get_db()
     await db.execute("DELETE FROM sessions WHERE id=?", [session_id])
     await db.commit()
+
+
+# ── LTI 1.3 OIDC state (anti-replay; one-time use, ~5 min TTL) ───────────────
+
+async def store_lti_oidc_state(
+    state: str,
+    nonce: str,
+    issuer: str,
+    client_id: str,
+    ttl_seconds: int = 300,
+) -> None:
+    """Persist a fresh OIDC state row issued at /lti/login."""
+    from datetime import timedelta
+    expires_at = (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).isoformat()
+    db = await _get_db()
+    await db.execute(
+        "INSERT INTO lti_oidc_state (state, nonce, issuer, client_id, expires_at) "
+        "VALUES (?,?,?,?,?)",
+        [state, nonce, issuer, client_id, expires_at],
+    )
+    await db.commit()
+
+
+async def consume_lti_oidc_state(state: str) -> Optional[dict]:
+    """
+    One-time-use lookup. Returns {'nonce', 'issuer', 'client_id'} on success,
+    None if state is unknown / already consumed / expired. Always deletes the
+    row on hit (whether or not it was expired) so a leaked state can't be
+    re-tried.
+    """
+    db = await _get_db()
+    async with db.execute(
+        "SELECT nonce, issuer, client_id, expires_at FROM lti_oidc_state WHERE state=?",
+        [state],
+    ) as cursor:
+        row = await cursor.fetchone()
+    if row is None:
+        return None
+    await db.execute("DELETE FROM lti_oidc_state WHERE state=?", [state])
+    await db.commit()
+    expires_at = datetime.fromisoformat(row["expires_at"])
+    if datetime.now(timezone.utc) > expires_at:
+        return None
+    return {
+        "nonce": row["nonce"],
+        "issuer": row["issuer"],
+        "client_id": row["client_id"],
+    }
 
 
 # ── Live transcript preview ───────────────────────────────────────────────────────

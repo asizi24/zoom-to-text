@@ -25,6 +25,12 @@ faster-whisper==1.0.3
 httpx==0.27.0
 psutil==6.0.0
 
+# ── LTI 1.3 (institutional SSO via Canvas / Moodle) ────────────────────────────
+# PyJWT[crypto] pulls in `cryptography`, which we use both for JWT RS256 verify
+# and for generating + serving our RSA-2048 tool key. No pylti1.3 dep — its
+# only added value is a Flask/Django request adapter that doesn't fit FastAPI.
+PyJWT[crypto]==2.9.0
+
 # ── Flashcards → Anki export ──────────────────────────────────────────────────
 # Builds .apkg files students can import into the Anki spaced-repetition app.
 genanki==0.13.1

@@ -42,3 +42,51 @@ def mock_email(monkeypatch):
     import app.api.auth as auth_module
     monkeypatch.setattr(auth_module, "_send_magic_link_email", fake_send)
     return sent
+
+
+@pytest.fixture
+def lti_env(client, tmp_path, monkeypatch):
+    """
+    LTI test isolation. Layered on top of `client` so the test DB is already
+    initialised (the lti_oidc_state table is created in app.state.init_db()).
+
+    Redirects:
+      * keys module → tmp_path/lti_keys/{private,public}.pem
+      * config module → tmp_path/lti_platforms.json
+      * oidc module → fresh JWKS cache
+
+    Clears each module's singleton caches so prior tests don't leak state.
+
+    Returns a small env object with .write_platforms(records) so the test
+    can drop platform records into the JSON file and force a config reload.
+    """
+    import json as _json
+    from app.services.lti import config as lti_config
+    from app.services.lti import keys as lti_keys
+    from app.services.lti import oidc as lti_oidc
+
+    keys_dir = tmp_path / "lti_keys"
+    monkeypatch.setattr(lti_keys, "KEYS_DIR", keys_dir)
+    monkeypatch.setattr(lti_keys, "PRIVATE_PATH", keys_dir / "private.pem")
+    monkeypatch.setattr(lti_keys, "PUBLIC_PATH", keys_dir / "public.pem")
+    monkeypatch.setattr(lti_keys, "_private_key", None)
+    monkeypatch.setattr(lti_keys, "_public_key", None)
+
+    platforms_file = tmp_path / "lti_platforms.json"
+    monkeypatch.setattr(lti_config, "PLATFORMS_FILE", platforms_file)
+    monkeypatch.setattr(lti_config, "_platforms", None)
+
+    monkeypatch.setattr(lti_oidc, "_jwks_cache", {})
+
+    class _LtiEnv:
+        def __init__(self):
+            self.platforms_file = platforms_file
+            self.keys_dir = keys_dir
+
+        def write_platforms(self, records: list[dict]) -> None:
+            self.platforms_file.write_text(
+                _json.dumps(records), encoding="utf-8"
+            )
+            lti_config.reset_cache()
+
+    return _LtiEnv()

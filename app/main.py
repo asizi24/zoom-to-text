@@ -21,6 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from app import state
 from app.api.routes import router
 from app.api.auth import router as auth_router
+from app.api.lti import router as lti_router
 from app.config import settings
 from app.services import transcriber
 
@@ -111,6 +112,7 @@ app.add_middleware(
 
 app.include_router(router, prefix="/api", tags=["tasks"])
 app.include_router(auth_router, prefix="/api", tags=["auth"])
+app.include_router(lti_router, prefix="/api", tags=["lti"])
 
 
 @app.exception_handler(Exception)

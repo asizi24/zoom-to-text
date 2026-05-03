@@ -1,0 +1,25 @@
+[
+  {
+    "issuer": "https://canvas.instructure.com",
+    "client_id": "10000000000001",
+    "deployment_ids": ["1:abcdef1234567890"],
+    "auth_login_url": "https://sso.canvaslms.com/api/lti/authorize_redirect",
+    "auth_token_url": "https://sso.canvaslms.com/login/oauth2/token",
+    "jwks_url": "https://sso.canvaslms.com/api/lti/security/jwks",
+    "allowed_emails": [
+      "alice@tau.ac.il",
+      "bob@tau.ac.il"
+    ]
+  },
+  {
+    "issuer": "https://moodle.example.edu",
+    "client_id": "QwErTy1234",
+    "deployment_ids": ["42"],
+    "auth_login_url": "https://moodle.example.edu/mod/lti/auth.php",
+    "auth_token_url": "https://moodle.example.edu/mod/lti/token.php",
+    "jwks_url": "https://moodle.example.edu/mod/lti/certs.php",
+    "allowed_emails": [
+      "carol@example.edu"
+    ]
+  }
+]

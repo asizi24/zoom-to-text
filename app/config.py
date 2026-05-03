@@ -112,6 +112,11 @@ class Settings(BaseSettings):
     # non-Gemini providers.
     enable_diarization: bool = True
 
+    # ── LTI 1.3 (institutional SSO) ────────────────────────────────────────────
+    # OIDC state TTL — must comfortably exceed the worst-case round-trip from
+    # /lti/login → user authenticates at the LMS → POST /lti/launch.
+    lti_state_ttl_seconds: int = 300
+
     @model_validator(mode="after")
     def validate_llm_provider_credentials(self) -> "Settings":
         """Fail fast at boot if the chosen provider is missing credentials."""
