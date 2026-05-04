@@ -136,6 +136,11 @@ class Settings(BaseSettings):
     # Set to 0 to disable rate limiting entirely (e.g. during local dev).
     rate_limit_per_minute: int = 10
 
+    # ── Content language ────────────────────────────────────────────────────────
+    # "auto" — Gemini detects the lecture language and responds in kind (default).
+    # ISO 639-1 code ("he", "en", "ar", "fr" …) — force a specific output language.
+    lecture_language: str = "auto"
+
     # ── LTI 1.3 (institutional SSO) ────────────────────────────────────────────
     # OIDC state TTL — must comfortably exceed the worst-case round-trip from
     # /lti/login → user authenticates at the LMS → POST /lti/launch.

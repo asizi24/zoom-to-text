@@ -64,33 +64,30 @@ def _is_gemini_provider() -> bool:
 
 # ── Prompt ────────────────────────────────────────────────────────────────────────
 
-_SYSTEM_PROMPT = """
-אתה מומחה לחינוך וניתוח שיעורים אקדמיים.
-המשימה שלך: לנתח את הקלטת השיעור ולהפיק פלט מובנה ומקיף **בעברית**.
-
+_PROMPT_BODY = """
 החזר אך ורק JSON תקין. אל תוסיף שום טקסט לפני או אחרי ה-JSON.
 אל תשתמש בגושי קוד markdown. רק JSON גולמי.
 
 הפורמט הנדרש:
 {
-  "summary": "סיכום מקיף של השיעור כולו (3-5 פסקאות, תסביר גם למה הנושאים חשובים)",
+  "summary": "comprehensive lecture summary (3-5 paragraphs explaining why topics matter)",
   "chapters": [
     {
-      "title": "כותרת נושא",
-      "content": "הסבר מפורט של הנושא (לפחות 3-4 משפטים)",
-      "key_points": ["נקודה מרכזית 1", "נקודה מרכזית 2", "נקודה מרכזית 3"]
+      "title": "topic title",
+      "content": "detailed explanation of the topic (at least 3-4 sentences)",
+      "key_points": ["key point 1", "key point 2", "key point 3"]
     }
   ],
   "quiz": [
     {
-      "question": "שאלה שבודקת הבנה אמיתית ולא רק שינון",
+      "question": "question testing genuine understanding, not mere recall",
       "bloom_level": 4,
-      "options": ["א. תשובה ראשונה", "ב. תשובה שנייה", "ג. תשובה שלישית", "ד. תשובה רביעית"],
-      "correct_answer": "א. תשובה ראשונה",
-      "explanation": "הסבר מדוע זו התשובה הנכונה ולמה כל אחת מהאחרות שגויה"
+      "options": ["A. first option", "B. second option", "C. third option", "D. fourth option"],
+      "correct_answer": "A. first option",
+      "explanation": "explanation of why this is correct and why each wrong option is incorrect"
     }
   ],
-  "language": "he"
+  "language": "<detected ISO 639-1 code, e.g. he or en>"
 }
 
 הנחיות לסיכום ופרקים:
@@ -98,25 +95,20 @@ _SYSTEM_PROMPT = """
 2. פרקים: חלק לפי נושאים לוגיים כפי שהוצגו בשיעור
 
 ══════════════════════════════════════════════════
-הנחיה קריטית — שמירה על מונחים באנגלית (Code-Switching):
+Critical rule — preserve technical terms verbatim:
 ══════════════════════════════════════════════════
-בשיעורי הנדסה, מדעי המחשב, רפואה, משפטים וכד' המרצה מערבב עברית עם
-מונחים מקצועיים באנגלית. **חובה לשמור על המונחים האנגליים בדיוק כפי
-שנאמרו — לא לתרגם, לא לתעתק לעברית, לא להחליף במילה עברית.**
+Keep technical terms (frameworks, protocols, APIs, medical/legal terms, proper nouns,
+abbreviations) exactly as spoken — do NOT translate or transliterate them.
 
-דוגמאות חובה:
-  ✅ "הגדרנו useState בקומפוננטת React"        (לא: "הגדרנו שימוש-במצב ברכיב תגובה")
-  ✅ "ה-API מחזיר JSON עם status code 200"     (לא: "הממשק מחזיר ג'ייסון עם קוד מצב 200")
-  ✅ "הריצו pip install fastapi בטרמינל"       (לא: "התקינו את החבילה המהירה")
-  ✅ "TCP מבטיח delivery, UDP לא"               (לא: "פרוטוקול הבקרה מבטיח משלוח")
-  ✅ "בתרופות מסוג ACE-inhibitors"              (לא: "בתרופות מעכבות-אנזים-הממיר")
+Examples:
+  ✅ "הגדרנו useState בקומפוננטת React"        (not: "הגדרנו שימוש-במצב ברכיב תגובה")
+  ✅ "The API returns JSON with status code 200" (not: "The interface returns jason …")
+  ✅ "הריצו pip install fastapi בטרמינל"       (not: "התקינו את החבילה המהירה")
+  ✅ "TCP guarantees delivery, UDP does not"     (not: "Transmission Control Protocol…")
+  ✅ "בתרופות מסוג ACE-inhibitors"              (not: "בתרופות מעכבות-אנזים-הממיר")
 
-חל על כל חלקי הפלט: summary, chapters.content, key_points, quiz.question,
+Applies to all output fields: summary, chapters.content, key_points, quiz.question,
 quiz.options, quiz.correct_answer, quiz.explanation.
-
-השתמש בעברית לחיבור (מילות קישור, פעלים, מבנה משפט), אך שמור שמות של
-טכנולוגיות, שפות, פרוטוקולים, מחלות, תרופות, חוקים, ראשי תיבות
-ושמות לועזיים — כפי שהם.
 
 ══════════════════════════════════════════════════
 הנחיה קריטית — ציטוט timestamps:
@@ -174,6 +166,25 @@ quiz.options, quiz.correct_answer, quiz.explanation.
   ✅ תשובה נכונה אחת ברורה — שלושת האחרות שגויות גם אם נשמעות הגיוניות
   ✅ ההסבר יציין במפורש מדוע כל אחת מ-3 האפשרויות השגויות אינה נכונה
 """
+
+
+def _system_prompt() -> str:
+    """Return the synthesis system prompt with the configured language instruction."""
+    lang = settings.lecture_language
+    if lang == "auto":
+        lang_line = (
+            "זהה את שפת ההרצאה והפק את כל הפלט (summary, chapters, quiz) "
+            "**באותה שפה בדיוק**. עברית → ענה בעברית. English → respond in English. וכן הלאה."
+        )
+    elif lang == "he":
+        lang_line = "הפק פלט מובנה ומקיף **בעברית**."
+    else:
+        lang_line = f"Produce all output in the lecture's language (forced: {lang})."
+    return (
+        "אתה מומחה לחינוך וניתוח שיעורים אקדמיים.\n"
+        f"המשימה שלך: לנתח את הקלטת השיעור ולהפיק פלט מובנה ומקיף. {lang_line}\n"
+        + _PROMPT_BODY
+    )
 
 # ── Critique prompt ───────────────────────────────────────────────────────────────
 
@@ -639,7 +650,7 @@ def _summarize_audio_sync(
     result = None
     last_error = None
     for attempt in range(2):
-        response = _generate_with_retry(client, [_SYSTEM_PROMPT, audio_file])
+        response = _generate_with_retry(client, [_system_prompt(), audio_file])
         try:
             result = _parse_response(_response_text(response))
             break
@@ -684,7 +695,7 @@ def _summarize_text_sync(
     client = _get_client()
 
     if len(transcript) <= _MAX_CHUNK_CHARS:
-        prompt = f"{_SYSTEM_PROMPT}\n\nתמלול השיעור:\n{transcript}"
+        prompt = _system_prompt() + "\n\nתמלול השיעור:\n" + transcript
         result = None
         last_error = None
         for attempt in range(2):
@@ -729,7 +740,7 @@ def _summarize_text_sync(
         progress_cb(86, "🔗 מאחד את כל החלקים לסיכום מלא ומבחן...")
 
     merge_prompt = (
-        f"{_SYSTEM_PROMPT}\n\n"
+        _system_prompt() + "\n\n"
         "להלן סיכומי ביניים של חלקי השיעור. "
         "בנה מהם סיכום מלא, פרקים ומבחן אמריקאי כפי שנדרש:\n\n"
         + "\n\n---\n\n".join(partial_summaries)
@@ -1149,7 +1160,7 @@ def _synthesize_text_capture(transcript: str) -> tuple[LessonResult, str]:
     client = _get_client()
 
     if len(transcript) <= _MAX_CHUNK_CHARS:
-        prompt = f"{_SYSTEM_PROMPT}\n\nתמלול השיעור:\n{transcript}"
+        prompt = _system_prompt() + "\n\nתמלול השיעור:\n" + transcript
         last_raw = ""
         last_error: Exception | None = None
         for attempt in range(2):
@@ -1182,7 +1193,7 @@ def _synthesize_text_capture(transcript: str) -> tuple[LessonResult, str]:
         partial_summaries.append(resp.text)
 
     merge_prompt = (
-        f"{_SYSTEM_PROMPT}\n\n"
+        _system_prompt() + "\n\n"
         "להלן סיכומי ביניים של חלקי השיעור. "
         "בנה מהם סיכום מלא, פרקים ומבחן אמריקאי כפי שנדרש:\n\n"
         + "\n\n---\n\n".join(partial_summaries)
@@ -1201,7 +1212,7 @@ def _synthesize_audio_capture(audio_file, progress_cb: _ProgressCallback | None 
     last_raw = ""
     last_error: Exception | None = None
     for attempt in range(2):
-        response = _generate_with_retry(client, [_SYSTEM_PROMPT, audio_file])
+        response = _generate_with_retry(client, [_system_prompt(), audio_file])
         last_raw = _response_text(response)
         try:
             return _parse_response(last_raw), last_raw
@@ -1727,7 +1738,7 @@ async def _summarize_transcript_via_provider(
     if progress_cb:
         progress_cb(82, f"🤖 שולח ל-{provider.name} — מייצר סיכום ומבחן...")
 
-    prompt = f"{_SYSTEM_PROMPT}\n\nתמלול השיעור:\n{transcript[:_MAX_CHUNK_CHARS]}"
+    prompt = _system_prompt() + "\n\nתמלול השיעור:\n" + transcript[:_MAX_CHUNK_CHARS]
     text = await provider.generate_text(prompt)
     return _parse_response(text)
 
