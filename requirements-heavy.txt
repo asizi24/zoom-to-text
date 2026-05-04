@@ -1,0 +1,8 @@
+# Heavy dependencies for optional components.
+# NEVER install on Fly.io — the production machine is 512MB shared-cpu-1x.
+# Install on a home server / GPU machine only.
+#
+# Pyannote speaker diarization (Task 2.2)
+pyannote.audio>=3.1.0
+torch>=2.0.0
+torchaudio>=2.0.0

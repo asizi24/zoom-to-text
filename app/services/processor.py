@@ -199,7 +199,7 @@ async def _process_audio(
         progress_cb = _make_progress_cb(task_id, TaskStatus.SUMMARIZING, loop)
         result = await _run_stage(
             ProcessingStage.SUMMARIZE,
-            summarizer.summarize_transcript(transcript, progress_cb),
+            summarizer.summarize_transcript(transcript, progress_cb, audio_path=audio_path),
         )
         result.transcript = transcript
 
@@ -224,7 +224,7 @@ async def _process_audio(
         progress_cb = _make_progress_cb(task_id, TaskStatus.SUMMARIZING, loop)
         result = await _run_stage(
             ProcessingStage.SUMMARIZE,
-            summarizer.summarize_transcript(transcript, progress_cb),
+            summarizer.summarize_transcript(transcript, progress_cb, audio_path=audio_path),
         )
         result.transcript = transcript
 
@@ -249,7 +249,7 @@ async def _process_audio(
         progress_cb = _make_progress_cb(task_id, TaskStatus.SUMMARIZING, loop)
         result = await _run_stage(
             ProcessingStage.SUMMARIZE,
-            summarizer.summarize_transcript(transcript, progress_cb),
+            summarizer.summarize_transcript(transcript, progress_cb, audio_path=audio_path),
         )
         result.transcript = transcript
 

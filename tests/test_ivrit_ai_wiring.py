@@ -69,7 +69,7 @@ async def test_processor_routes_ivrit_mode_to_ivrit_transcriber(monkeypatch, tmp
         called["which"] = "whisper_api"
         return "api", "he"
 
-    async def fake_summarize_transcript(transcript, progress_cb=None):
+    async def fake_summarize_transcript(transcript, progress_cb=None, audio_path=None):
         from app.models import LessonResult
         return LessonResult(summary="ok")
 

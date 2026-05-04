@@ -112,6 +112,24 @@ class Settings(BaseSettings):
     # non-Gemini providers.
     enable_diarization: bool = True
 
+    # ── Task 2.2 — Diarization provider (gemini | pyannote) ──────────────────
+    # "gemini"   — text-based diarization via the existing Gemini call (default,
+    #              works on Fly.io; no extra deps).
+    # "pyannote" — acoustic diarization via pyannote.audio (code-only; requires
+    #              pyannote.audio + torch from requirements-heavy.txt; home server
+    #              with GPU only; never deployed on Fly.io).
+    diarization_provider: str = "gemini"
+    # Pyannote pretrained model ID (HuggingFace Hub).
+    pyannote_model: str = "pyannote/speaker-diarization-3.1"
+    # HuggingFace token for gated models (pyannote requires accepting the license).
+    hf_token: str = ""
+
+    # ── Task 2.3 — WebSocket streaming (home-server only) ────────────────────
+    # Never enable on Fly.io — the shared-cpu-1x machine cannot sustain
+    # concurrent WebSocket connections + a loaded Whisper model.
+    # Enable on a home server: ENABLE_STREAMING=true in .env
+    enable_streaming: bool = False
+
     # ── LTI 1.3 (institutional SSO) ────────────────────────────────────────────
     # OIDC state TTL — must comfortably exceed the worst-case round-trip from
     # /lti/login → user authenticates at the LMS → POST /lti/launch.

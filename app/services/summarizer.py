@@ -1598,14 +1598,17 @@ async def summarize_audio(
 async def summarize_transcript(
     transcript: str,
     progress_cb: _ProgressCallback | None = None,
+    audio_path: str | None = None,
 ) -> LessonResult:
     """
     Async: summarize a text transcript (WHISPER_LOCAL / WHISPER_API mode).
 
     Pipeline:
-      1. (Optional) Diarize the transcript with Gemini — Task 1.2.
-         Skipped when ENABLE_DIARIZATION=False or for non-Gemini providers.
-         On failure, fall back to the raw transcript (graceful skip).
+      1. (Optional) Diarize the transcript — Task 1.2 (Gemini) / Task 2.2 (Pyannote).
+         Provider selected by DIARIZATION_PROVIDER env var (default: gemini).
+         Pyannote requires audio_path; falls back to raw transcript if missing.
+         Skipped when ENABLE_DIARIZATION=False or for non-Gemini LLM providers.
+         On failure, falls back to the raw transcript (graceful skip).
       2. Run synthesis + extraction in parallel via asyncio.gather (Task 1.1).
          Synthesis failure propagates; extraction failure is best-effort.
       3. Merge results, then run the exam critique pipeline.
@@ -1622,9 +1625,20 @@ async def summarize_transcript(
 
     if settings.enable_diarization:
         try:
-            diarized_transcript, speaker_map = await loop.run_in_executor(
-                None, _diarize_transcript_sync, transcript
-            )
+            if settings.diarization_provider == "pyannote":
+                if audio_path is None:
+                    logger.warning(
+                        "DIARIZATION_PROVIDER=pyannote but audio_path not provided — skipping diarization"
+                    )
+                else:
+                    from app.services.diarization import pyannote_provider
+                    diarized_transcript, speaker_map = await loop.run_in_executor(
+                        None, pyannote_provider.diarize_audio, audio_path, transcript
+                    )
+            else:
+                diarized_transcript, speaker_map = await loop.run_in_executor(
+                    None, _diarize_transcript_sync, transcript
+                )
             if diarized_transcript:
                 text_for_downstream = diarized_transcript
         except Exception as exc:

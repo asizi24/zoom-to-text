@@ -42,6 +42,7 @@ zoom to text/
 # Text files (except specific ones)
 *.txt
 !requirements.txt
+!requirements-heavy.txt
 !LICENSE.txt
 
 # OS files
