@@ -17,13 +17,13 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-
 from app import state
 from app.api.routes import router
 from app.api.auth import router as auth_router
 from app.api.lti import router as lti_router
 from app.api.streaming import router as streaming_router
 from app.config import settings
+from app.rate_limit import limiter
 from app.services import transcriber
 
 logging.basicConfig(
@@ -100,6 +100,8 @@ app = FastAPI(
     description="Transcribe and summarize Zoom class recordings with AI",
     lifespan=lifespan,
 )
+
+app.state.limiter = limiter
 
 app.add_middleware(
     CORSMiddleware,

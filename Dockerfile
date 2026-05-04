@@ -28,6 +28,16 @@ FROM python:3.11-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     curl \
+    # WeasyPrint system dependencies (Pango, Cairo, GLib)
+    # fonts-dejavu: ~7 MB installed, covers Hebrew + Latin adequately.
+    # Deliberately NOT fonts-noto (500 MB+) or fonts-noto-cjk (1 GB+).
+    libpango-1.0-0 \
+    libharfbuzz0b \
+    libpangoft2-1.0-0 \
+    libcairo2 \
+    libgdk-pixbuf-2.0-0 \
+    shared-mime-info \
+    fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy system-wide packages from builder (accessible by all users)

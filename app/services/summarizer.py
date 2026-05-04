@@ -84,6 +84,7 @@ _SYSTEM_PROMPT = """
   "quiz": [
     {
       "question": "שאלה שבודקת הבנה אמיתית ולא רק שינון",
+      "bloom_level": 4,
       "options": ["א. תשובה ראשונה", "ב. תשובה שנייה", "ג. תשובה שלישית", "ד. תשובה רביעית"],
       "correct_answer": "א. תשובה ראשונה",
       "explanation": "הסבר מדוע זו התשובה הנכונה ולמה כל אחת מהאחרות שגויה"
@@ -139,6 +140,28 @@ quiz.options, quiz.correct_answer, quiz.explanation.
   • 4 שאלות ניתוח/יישום (רמה 3-4): למה X גורם ל-Y, מה יקרה אם, השוואת גישות, יישום עיקרון במצב חדש
   • 2+ שאלות הערכה/סינתזה (רמה 5-6): ביקורת על גישה, הסקת מסקנה שלא נאמרה במפורש, פתרון בעיה חדשה
 
+══════════════════════════════════════════════════
+דוגמאות לשאלות ברמות בלום גבוהות — כך נראית שאלה טובה:
+══════════════════════════════════════════════════
+
+דוגמה 1 — bloom_level 3 (יישום):
+  שאלה: "מפתח פותח חיבור חדש ל-DB בכל קריאת API. האפליקציה מקבלת 200 req/s. מה יקרה?"
+  תשובה נכונה: "זמן התגובה יגדל — TCP handshake + TLS + auth חוזרים 200 פעמים בשנייה"
+  ✅ יישום עיקרון (connection cost) על מצב חדש — לא זכירת הגדרה
+
+דוגמה 2 — bloom_level 4 (ניתוח):
+  שאלה: "שירות A מחכה ל-B שמחכה ל-C (עונה תוך 10ms או 500ms לסירוגין).
+          מדוע timeout ב-B בלבד אינו פותר את בעיית ה-latency של A?"
+  תשובה נכונה: "B חוסם thread תוך המתנה ל-C גם כשה-timeout קצר מ-50ms"
+  ✅ ניתוח שרשרת תלויות — לא עובדה שנאמרה במפורש
+
+דוגמה 3 — bloom_level 5 (הערכה):
+  שאלה: "ארכיטקט מציע להחליף REST ב-gRPC בין microservices. אילו גורמים מצדיקים זאת?"
+  תשובה נכונה: "gRPC מתאים כש-throughput גבוה ו-type-safety קריטיים, אך מסרבך debugging
+                 ומחייב client-library לכל שפה — trade-off, לא תשובה חד-ערכית"
+  ✅ הערכת trade-offs — לא מידע ישיר מהמצגת
+══════════════════════════════════════════════════
+
 אסור בהחלט — שאלות מהסוגים הבאים פסולות:
   ❌ "מה אמר המרצה על X" — שאלת שינון ישיר מהטקסט
   ❌ "כיצד הגדיר המרצה את..." — ציטוט מחומר ההרצאה
@@ -163,8 +186,10 @@ _CRITIQUE_PROMPT = """
 - difficulty (1-5): האם השאלה דורשת הבנה אמיתית (לא שינון)? 1=שינון טהור, 5=ניתוח/סינתזה
 - distractors(1-5): האם כל שלוש האפשרויות השגויות מייצגות טעות חשיבה שכיחה?
 - accuracy   (1-5): האם התשובה הנכונה אכן נכונה ומוצדקת?
+- bloom_alignment (1-5): האם השאלה אכן דורשת את התהליך הקוגניטיבי שהוצהר ב-bloom_level?
+                          1=שאלת שינון שמוצגת כניתוח, 5=ההתאמה מושלמת
 
-avg = ממוצע ארבעת הציונים.
+avg = ממוצע חמשת הציונים (clarity + difficulty + distractors + accuracy + bloom_alignment).
 
 ══════════════════════════════════════════════════
 דוגמאות few-shot:
@@ -172,17 +197,17 @@ avg = ממוצע ארבעת הציונים.
 
 שאלה גרועה (avg נמוך):
   ❌ "מה השנה בה פורסמה תיאוריית היחסות המיוחדת?"
-  → clarity:5, difficulty:1, distractors:2, accuracy:5 → avg:3.25
+  → clarity:5, difficulty:1, distractors:2, accuracy:5, bloom_alignment:1 → avg:2.8
   feedback: "שאלת שינון ישיר. תלמיד עם זיכרון טוב יענה נכון ללא הבנה"
 
 שאלה טובה (avg גבוה):
   ✅ "מדוע זמן מקומי יאט עבור משקיף הנע במהירות גבוהה יחסית למשקיף אחר?"
-  → clarity:5, difficulty:5, distractors:4, accuracy:5 → avg:4.75
+  → clarity:5, difficulty:5, distractors:4, accuracy:5, bloom_alignment:5 → avg:4.8
   feedback: "דורשת הבנת dilat time. האפשרויות השגויות מייצגות בלבולים קלאסיים"
 
 שאלה בינונית (avg גבולי):
   🟡 "איזה מהבאים הוא יתרון של TCP על UDP?"
-  → clarity:4, difficulty:3, distractors:3, accuracy:5 → avg:3.75
+  → clarity:4, difficulty:3, distractors:3, accuracy:5, bloom_alignment:3 → avg:3.6
   feedback: "ניתן לשפר את האפשרויות השגויות"
 
 ══════════════════════════════════════════════════
@@ -197,6 +222,7 @@ avg = ממוצע ארבעת הציונים.
       "difficulty": 1-5,
       "distractors": 1-5,
       "accuracy": 1-5,
+      "bloom_alignment": 1-5,
       "avg": 1.0-5.0,
       "feedback": "הערה קצרה (עברית)"
     }
@@ -423,6 +449,7 @@ def _parse_response(text: str) -> LessonResult:
             options=q.get("options", []),
             correct_answer=q.get("correct_answer", ""),
             explanation=q.get("explanation", ""),
+            bloom_level=q.get("bloom_level"),
         )
         for q in data.get("quiz", [])
     ]
@@ -458,6 +485,7 @@ def critique_exam(exam: list, summary: str) -> dict:
                 "options": q.options,
                 "correct_answer": q.correct_answer,
                 "explanation": q.explanation,
+                "bloom_level": q.bloom_level,
             }
             for i, q in enumerate(exam)
         ],
@@ -511,6 +539,7 @@ def revise_exam(exam: list, critique: dict, summary: str) -> list:
             "options": q.options,
             "correct_answer": q.correct_answer,
             "explanation": q.explanation,
+            "bloom_level": q.bloom_level,
             "avg_score": avg,
             "status": "NEEDS_REVISION" if avg < threshold else "OK",
         }
@@ -553,6 +582,7 @@ def revise_exam(exam: list, critique: dict, summary: str) -> list:
                 options=q_data.get("options", []),
                 correct_answer=q_data.get("correct_answer", ""),
                 explanation=q_data.get("explanation", ""),
+                bloom_level=q_data.get("bloom_level"),
             )
         )
 

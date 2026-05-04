@@ -354,22 +354,42 @@ def _decode_error_details(row) -> Optional[dict]:
         return None
 
 
-async def list_tasks(limit: int = 50, user_id: Optional[str] = None) -> list[dict]:
+async def list_tasks(
+    limit: int = 20,
+    user_id: Optional[str] = None,
+    search: Optional[str] = None,
+    offset: int = 0,
+) -> list[dict]:
+    """
+    Return tasks ordered by created_at DESC with optional search and pagination.
+
+    search   — case-insensitive LIKE match against the url and result_json columns
+    offset   — number of rows to skip (for cursor-based pagination)
+    """
     db = await _get_db()
+    conditions: list[str] = []
+    params: list = []
+
     if user_id:
-        async with db.execute(
-            "SELECT id, status, progress, message, created_at, url FROM tasks "
-            "WHERE user_id=? ORDER BY created_at DESC LIMIT ?",
-            [user_id, limit],
-        ) as cursor:
-            rows = await cursor.fetchall()
-    else:
-        async with db.execute(
-            "SELECT id, status, progress, message, created_at, url FROM tasks "
-            "ORDER BY created_at DESC LIMIT ?",
-            [limit],
-        ) as cursor:
-            rows = await cursor.fetchall()
+        conditions.append("user_id=?")
+        params.append(user_id)
+
+    if search:
+        pattern = f"%{search}%"
+        # url holds the recording source; result_json embeds the full transcript
+        conditions.append("(url LIKE ? OR result_json LIKE ?)")
+        params.extend([pattern, pattern])
+
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    params.extend([limit, offset])
+
+    async with db.execute(
+        f"SELECT id, status, progress, message, created_at, url FROM tasks "
+        f"{where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        params,
+    ) as cursor:
+        rows = await cursor.fetchall()
+
     return [dict(row) for row in rows]
 
 

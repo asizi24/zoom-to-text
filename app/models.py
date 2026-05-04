@@ -38,6 +38,7 @@ class QuizQuestion(BaseModel):
     options:        list[str]        # ["א. ...", "ב. ...", "ג. ...", "ד. ..."]
     correct_answer: str              # Must match one of the options exactly
     explanation:    str = ""
+    bloom_level:    Optional[int] = None   # Bloom level 1-6; None = not labeled
 
 
 class Chapter(BaseModel):

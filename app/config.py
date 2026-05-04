@@ -68,7 +68,7 @@ class Settings(BaseSettings):
     # only when at least one question scores below the threshold.
     enable_exam_critique: bool = True
     # Average score threshold below which a question is sent for revision (1–5 scale).
-    exam_critique_threshold: float = 3.5
+    exam_critique_threshold: float = 3.8
 
     # ── App ─────────────────────────────────────────────────────────────────────
     app_title: str = "Zoom Transcriber"
@@ -129,6 +129,12 @@ class Settings(BaseSettings):
     # concurrent WebSocket connections + a loaded Whisper model.
     # Enable on a home server: ENABLE_STREAMING=true in .env
     enable_streaming: bool = False
+
+    # ── Rate limiting ───────────────────────────────────────────────────────────
+    # Maximum number of task-submission requests (POST /api/tasks and
+    # POST /api/tasks/upload) allowed per IP address per minute.
+    # Set to 0 to disable rate limiting entirely (e.g. during local dev).
+    rate_limit_per_minute: int = 10
 
     # ── LTI 1.3 (institutional SSO) ────────────────────────────────────────────
     # OIDC state TTL — must comfortably exceed the worst-case round-trip from

@@ -25,6 +25,7 @@ from app.models import ProcessingMode, TaskCreate, TaskResponse
 from app.services import anki_export, processor, summarizer
 from app.services.exporters.markdown import build_obsidian_markdown
 from app.services.llm_providers import get_provider
+from app.rate_limit import limiter
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -33,10 +34,20 @@ router = APIRouter()
 _ALLOWED_EXTENSIONS = {".mp3", ".mp4", ".m4a", ".wav", ".mkv", ".webm", ".avi"}
 
 
+# ── Rate-limit string helper ──────────────────────────────────────────────────────
+# Returns a slowapi limit string like "10/minute". Read at request time so that
+# tests can monkeypatch settings.rate_limit_per_minute without restarting.
+def _task_rate_limit(request: Request) -> str:  # noqa: ARG001 — request required by slowapi
+    n = settings.rate_limit_per_minute
+    return f"{n}/minute"
+
+
 # ── Start job from URL ────────────────────────────────────────────────────────────
 
 @router.post("/tasks", response_model=TaskResponse, status_code=202)
+@limiter.limit(_task_rate_limit)
 async def create_task(
+    request: Request,
     task_in: TaskCreate,
     background_tasks: BackgroundTasks,
     user_id: str = Depends(get_current_user),
@@ -67,7 +78,9 @@ async def create_task(
 # ── Start job from uploaded file ──────────────────────────────────────────────────
 
 @router.post("/tasks/upload", response_model=TaskResponse, status_code=202)
+@limiter.limit(_task_rate_limit)
 async def create_task_from_upload(
+    request: Request,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     mode: ProcessingMode = Form(ProcessingMode.GEMINI_DIRECT),
@@ -128,9 +141,14 @@ async def create_task_from_upload(
 # ── Query tasks ───────────────────────────────────────────────────────────────────
 
 @router.get("/tasks", response_model=list)
-async def list_tasks(limit: int = 20, user_id: str = Depends(get_current_user)):
-    """Return the most recent N processing jobs (newest first)."""
-    return await state.list_tasks(limit=limit, user_id=user_id)
+async def list_tasks(
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    search: str | None = Query(None, max_length=200),
+    user_id: str = Depends(get_current_user),
+):
+    """Return recent processing jobs (newest first) with optional search and pagination."""
+    return await state.list_tasks(limit=limit, user_id=user_id, search=search, offset=offset)
 
 
 @router.get("/tasks/{task_id}", response_model=TaskResponse)
@@ -547,6 +565,47 @@ async def export_obsidian_markdown(
     return Response(
         content=md,
         media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ── PDF export (Task 5) ───────────────────────────────────────────────────────
+
+@router.get("/tasks/{task_id}/export/pdf")
+async def export_pdf(
+    task_id: str,
+    user_id: str = Depends(get_current_user),
+):
+    """
+    Download the task's lesson as a PDF document.
+
+    Converts Obsidian Markdown → HTML → PDF via WeasyPrint.
+    Requires system libs (Pango, Cairo, fonts-dejavu-core) installed in Docker.
+    Returns 503 if WeasyPrint is unavailable on the current host.
+
+    RAM note: WeasyPrint uses ~80-150 MB during rendering. On the 512 MB
+    Fly.io machine this is safe when Whisper is idle, but concurrent PDF
+    generation + transcription may OOM. Acceptable for ≤6 users.
+    """
+    import asyncio as _asyncio
+
+    task = await state.get_task_for_user(task_id, user_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.result is None:
+        raise HTTPException(status_code=400, detail="Task has no result yet")
+
+    try:
+        from app.services.exporters.pdf import build_pdf
+        # Run in thread pool — WeasyPrint's Pango layout is CPU-bound
+        pdf_bytes = await _asyncio.to_thread(build_pdf, task)
+    except ImportError as exc:
+        raise HTTPException(status_code=503, detail=f"PDF export not available: {exc}")
+
+    filename = f"lesson-{task_id[:8]}.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 

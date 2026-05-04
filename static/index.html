@@ -628,6 +628,32 @@
     .h-badge.failed    { background: rgba(239,68,68,.12);  color: #fca5a5; border: 1px solid rgba(239,68,68,.2); }
     .h-badge.running   { background: rgba(124,58,237,.15); color: #c4b5fd; border: 1px solid rgba(124,58,237,.25); }
 
+    /* ── History search + pagination ── */
+    .history-controls { margin-bottom: 14px; }
+    .history-search-input {
+      width: 100%; padding: 9px 14px;
+      background: rgba(0,0,0,.25);
+      border: 1px solid rgba(255,255,255,.1);
+      border-radius: 10px; color: var(--text);
+      font-size: .85rem; font-family: inherit;
+      outline: none; direction: rtl;
+      transition: border-color .2s;
+    }
+    .history-search-input:focus { border-color: rgba(124,58,237,.5); }
+    .history-search-input::placeholder { color: var(--muted); }
+    .history-pagination {
+      display: flex; gap: 8px; margin-top: 12px;
+    }
+    .history-page-btn {
+      flex: 1; padding: 8px 16px;
+      background: rgba(255,255,255,.06);
+      border: 1px solid rgba(255,255,255,.1);
+      border-radius: 10px; cursor: pointer;
+      color: var(--muted); font-size: .8rem;
+      font-family: inherit; transition: all .2s;
+    }
+    .history-page-btn:hover { border-color: rgba(124,58,237,.4); color: var(--text); }
+
     /* ── History toggle button (fixed) ── */
     .history-toggle-btn {
       position: fixed; bottom: 24px; left: 24px;
@@ -1615,6 +1641,7 @@
     <button class="action-btn back-btn" onclick="reset()" title="חזרה למסך הראשי">← חזרה</button>
     <button class="action-btn" onclick="exportMarkdown()">⬇️ ייצוא Markdown</button>
     <button class="action-btn" onclick="exportObsidian()" title="פורמט Obsidian: frontmatter, action items כ-checkboxes, תגיות לפי owner">🟣 ייצוא Obsidian</button>
+    <button class="action-btn" onclick="exportPdf()" title="הורד PDF מעוצב לשיתוף או הדפסה">📄 הורד PDF</button>
     <button class="action-btn" id="copy-all-btn" onclick="copyAll()">📋 העתק הכל</button>
     <button class="action-btn" onclick="window.print()">🖨️ הדפסה</button>
   </div>
@@ -1703,7 +1730,12 @@
     <h2>🕘 היסטוריה</h2>
     <button class="history-close" onclick="toggleHistory()" aria-label="סגירת היסטוריה">✕</button>
   </div>
+  <div class="history-controls">
+    <input type="search" id="history-search" class="history-search-input"
+           placeholder="חיפוש בהקלטות..." oninput="onHistorySearch()" />
+  </div>
   <div id="history-content"></div>
+  <div id="history-pagination" class="history-pagination"></div>
 </div>
 
 </main><!-- /wrapper -->
@@ -1726,6 +1758,9 @@
   let currentTaskId = null;
   let currentSource = '';
   let historyVisible = false;
+  let historyOffset = 0;
+  let historySearchTimer = null;
+  const HISTORY_PAGE_SIZE = 10;
   let processingStartTime = null;
 
   // Progress creep state
@@ -2267,6 +2302,31 @@
     }
   }
 
+  // PDF export — server-rendered (Task 5)
+  async function exportPdf() {
+    if (!currentTaskId) return;
+    try {
+      const resp = await fetch(`/api/tasks/${currentTaskId}/export/pdf`, {
+        credentials: 'include',
+      });
+      if (!resp.ok) {
+        const msg = resp.status === 503
+          ? 'ייצוא PDF אינו זמין בסביבה זו (חסרות ספריות מערכת)'
+          : 'ייצוא PDF נכשל: ' + resp.status;
+        alert(msg);
+        return;
+      }
+      const blob = await resp.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `lesson-${currentTaskId.slice(0, 8)}.pdf`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch (err) {
+      alert('שגיאה בייצוא PDF: ' + err.message);
+    }
+  }
+
   // ══════════════════════════════════════════════════════════════════════════
   // History
   // ══════════════════════════════════════════════════════════════════════════
@@ -2274,62 +2334,108 @@
     historyVisible = !historyVisible;
     const card = document.getElementById('history-card');
     card.style.display = historyVisible ? 'block' : 'none';
-    if (historyVisible) await loadHistory();
+    if (historyVisible) {
+      historyOffset = 0;
+      document.getElementById('history-search').value = '';
+      await renderHistoryPage();
+    }
   }
 
+  // Kept for backward-compat (called from existing code paths)
   async function loadHistory() {
+    historyOffset = 0;
+    await renderHistoryPage();
+  }
+
+  function onHistorySearch() {
+    clearTimeout(historySearchTimer);
+    historySearchTimer = setTimeout(() => {
+      historyOffset = 0;
+      renderHistoryPage();
+    }, 300);
+  }
+
+  async function renderHistoryPage() {
     const container = document.getElementById('history-content');
+    const search = document.getElementById('history-search').value.trim();
     container.innerHTML = '<div class="history-empty">טוען...</div>';
+
+    // Fetch one extra item to detect whether a next page exists
+    const fetchLimit = HISTORY_PAGE_SIZE + 1;
+    const params = new URLSearchParams({ limit: fetchLimit, offset: historyOffset });
+    if (search) params.set('search', search);
+
     try {
-      const r = await fetch('/api/tasks?limit=30');
+      const r = await fetch(`/api/tasks?${params}`);
       const tasks = await r.json();
-      if (!tasks.length) {
-        container.innerHTML = '<div class="history-empty">אין היסטוריה עדיין</div>';
-        return;
+      const hasMore = tasks.length > HISTORY_PAGE_SIZE;
+      const displayTasks = tasks.slice(0, HISTORY_PAGE_SIZE);
+
+      if (!displayTasks.length) {
+        container.innerHTML = `<div class="history-empty">${search ? 'לא נמצאו הקלטות תואמות' : 'אין היסטוריה עדיין'}</div>`;
+      } else {
+        const list = document.createElement('div');
+        list.className = 'history-list';
+        displayTasks.forEach(t => {
+          const item = document.createElement('div');
+          const isCompleted = t.status === 'completed';
+          const isFailed    = t.status === 'failed';
+          item.className = `history-item${isFailed ? ' failed' : ''}`;
+          const statusIcon = isCompleted ? '✅' : isFailed ? '❌' : '⏳';
+          const badgeClass = isCompleted ? 'completed' : isFailed ? 'failed' : 'running';
+          const badgeText  = isCompleted ? 'הושלם' : isFailed ? 'נכשל' : 'בתהליך';
+          const dt = new Date(t.created_at).toLocaleString('he-IL', { dateStyle: 'short', timeStyle: 'short' });
+          const shortUrl = (t.url || '').replace(/^upload:/, '📁 ').replace('https://', '').slice(0, 60);
+
+          // Build history item with DOM APIs to prevent XSS from stored URLs
+          const statusSpan = document.createElement('span');
+          statusSpan.className = 'h-status';
+          statusSpan.textContent = statusIcon;
+          item.appendChild(statusSpan);
+
+          const infoDiv = document.createElement('div');
+          infoDiv.className = 'h-info';
+          const urlDiv = document.createElement('div');
+          urlDiv.className = 'h-url';
+          urlDiv.textContent = shortUrl || 'לא ידוע';
+          infoDiv.appendChild(urlDiv);
+          const metaDiv = document.createElement('div');
+          metaDiv.className = 'h-meta';
+          metaDiv.textContent = dt;
+          infoDiv.appendChild(metaDiv);
+          item.appendChild(infoDiv);
+
+          const badge = document.createElement('span');
+          badge.className = `h-badge ${badgeClass}`;
+          badge.textContent = badgeText;
+          item.appendChild(badge);
+
+          if (isCompleted) {
+            item.onclick = () => loadHistoryTask(t.id);
+          }
+          list.appendChild(item);
+        });
+        container.innerHTML = '';
+        container.appendChild(list);
       }
-      const list = document.createElement('div');
-      list.className = 'history-list';
-      tasks.forEach(t => {
-        const item = document.createElement('div');
-        const isCompleted = t.status === 'completed';
-        const isFailed    = t.status === 'failed';
-        item.className = `history-item${isFailed ? ' failed' : ''}`;
-        const statusIcon = isCompleted ? '✅' : isFailed ? '❌' : '⏳';
-        const badgeClass = isCompleted ? 'completed' : isFailed ? 'failed' : 'running';
-        const badgeText  = isCompleted ? 'הושלם' : isFailed ? 'נכשל' : 'בתהליך';
-        const dt = new Date(t.created_at).toLocaleString('he-IL', { dateStyle: 'short', timeStyle: 'short' });
-        const shortUrl = (t.url || '').replace(/^upload:/, '📁 ').replace('https://', '').slice(0, 60);
 
-        // Build history item with DOM APIs to prevent XSS from stored URLs
-        const statusSpan = document.createElement('span');
-        statusSpan.className = 'h-status';
-        statusSpan.textContent = statusIcon;
-        item.appendChild(statusSpan);
-
-        const infoDiv = document.createElement('div');
-        infoDiv.className = 'h-info';
-        const urlDiv = document.createElement('div');
-        urlDiv.className = 'h-url';
-        urlDiv.textContent = shortUrl || 'לא ידוע';
-        infoDiv.appendChild(urlDiv);
-        const metaDiv = document.createElement('div');
-        metaDiv.className = 'h-meta';
-        metaDiv.textContent = dt;
-        infoDiv.appendChild(metaDiv);
-        item.appendChild(infoDiv);
-
-        const badge = document.createElement('span');
-        badge.className = `h-badge ${badgeClass}`;
-        badge.textContent = badgeText;
-        item.appendChild(badge);
-
-        if (isCompleted) {
-          item.onclick = () => loadHistoryTask(t.id);
-        }
-        list.appendChild(item);
-      });
-      container.innerHTML = '';
-      container.appendChild(list);
+      // Pagination controls
+      const pg = document.getElementById('history-pagination');
+      pg.innerHTML = '';
+      if (historyOffset > 0) {
+        const prev = document.createElement('button');
+        prev.className = 'history-page-btn';
+        prev.textContent = '→ הקודם';
+        prev.onclick = () => { historyOffset -= HISTORY_PAGE_SIZE; renderHistoryPage(); };
+        pg.appendChild(prev);
+      }
+      if (hasMore) {
+        const next = document.createElement('button');
+        next.className = 'history-page-btn';
+        next.textContent = '← הבא';
+        next.onclick = () => { historyOffset += HISTORY_PAGE_SIZE; renderHistoryPage(); };
+        pg.appendChild(next);
+      }
     } catch {
       container.innerHTML = '<div class="history-empty">שגיאה בטעינת ההיסטוריה</div>';
     }
