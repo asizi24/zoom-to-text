@@ -60,6 +60,9 @@ async def lti_login(request: Request) -> RedirectResponse:
 
     iss = (params_in.get("iss") or "").strip()
     login_hint = params_in.get("login_hint")
+    # target_link_uri tells the tool which resource to open post-launch (spec §5.1.1).
+    # We require it to be present (the spec mandates it) but do not use it as a redirect
+    # destination — redirect_uri is always hardcoded to /api/lti/launch below.
     target_link_uri = params_in.get("target_link_uri")
     lti_message_hint = params_in.get("lti_message_hint")
     client_id = (params_in.get("client_id") or "").strip()
@@ -143,8 +146,11 @@ async def lti_launch(
         raise HTTPException(status_code=403, detail=str(exc))
 
     response = HTMLResponse(content=_TOP_REDIRECT_HTML)
-    # SameSite=None + Secure: required for the cross-site POST flow from the LMS (Q5a).
-    # Magic-link cookie path stays SameSite=Lax — see app/api/auth.py.
+    # SameSite=None requires Secure=True — browsers reject SameSite=None cookies
+    # that are not Secure. This means the LTI flow does not work over plain http://
+    # in local dev, but that is acceptable: the cross-site POST only happens from
+    # a real LMS (always https). Magic-link auth uses SameSite=Lax + conditional
+    # Secure (see app/api/auth.py) and works fine on localhost.
     response.set_cookie(
         key="session_id",
         value=session_id,

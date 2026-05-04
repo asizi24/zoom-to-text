@@ -161,7 +161,20 @@ async def init_db():
     await db.commit()
 
     await _mark_interrupted_tasks_failed()
+    await _purge_expired_lti_state()
     logger.info(f"Database ready: {DB_PATH}")
+
+
+async def _purge_expired_lti_state() -> None:
+    """Delete OIDC state rows whose TTL has lapsed (flows that never reached /launch)."""
+    db = await _get_db()
+    result = await db.execute(
+        "DELETE FROM lti_oidc_state WHERE expires_at < ?",
+        [datetime.now(timezone.utc).isoformat()],
+    )
+    if result.rowcount:
+        logger.info("Purged %d expired LTI OIDC state row(s)", result.rowcount)
+    await db.commit()
 
 
 async def _mark_interrupted_tasks_failed():
@@ -481,20 +494,22 @@ async def store_lti_oidc_state(
 async def consume_lti_oidc_state(state: str) -> Optional[dict]:
     """
     One-time-use lookup. Returns {'nonce', 'issuer', 'client_id'} on success,
-    None if state is unknown / already consumed / expired. Always deletes the
-    row on hit (whether or not it was expired) so a leaked state can't be
-    re-tried.
+    None if state is unknown / already consumed / expired.
+
+    Uses DELETE ... RETURNING so the read and delete are a single atomic
+    operation — concurrent /lti/launch replays see no row on the second call.
+    (SQLite RETURNING requires SQLite >= 3.35, bundled with Python 3.10+.)
     """
     db = await _get_db()
     async with db.execute(
-        "SELECT nonce, issuer, client_id, expires_at FROM lti_oidc_state WHERE state=?",
+        "DELETE FROM lti_oidc_state WHERE state=? "
+        "RETURNING nonce, issuer, client_id, expires_at",
         [state],
     ) as cursor:
         row = await cursor.fetchone()
+    await db.commit()
     if row is None:
         return None
-    await db.execute("DELETE FROM lti_oidc_state WHERE state=?", [state])
-    await db.commit()
     expires_at = datetime.fromisoformat(row["expires_at"])
     if datetime.now(timezone.utc) > expires_at:
         return None
