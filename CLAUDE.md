@@ -1,12 +1,15 @@
 # Zoom to Text — Project Context for Claude
 
-## Status (2026-04-28)
+## Status (2026-05-03)
 - **Branch:** `main` (single active branch; cycle/feature branches merged via fast-forward)
 - **Live URL:** https://zoom-to-text.fly.dev
 - **Cycle A shipped:** Task 1.3 (LLM Provider Abstraction)
 - **Cycle B shipped:** Task 1.1 (extraction-fields schema), Task 1.2 (Gemini text diarization), Task 1.4 (Obsidian export), Task 1.5 (ProcessingError + structured `error_details`)
 - **Task 2.1 shipped (code-only, not deployed):** `desktop/` loopback capture POC — runs on the user's machine, posts to existing `/api/tasks/upload`
-- **Test suite:** 187 passing (178 server + 9 desktop)
+- **Task 2.2 shipped (code-only, not deployed):** Pyannote acoustic diarization — `app/services/diarization/pyannote_provider.py`. Heavy deps in `requirements-heavy.txt`. Gate: `DIARIZATION_PROVIDER=pyannote`.
+- **Task 2.3 shipped (code-only, not deployed):** WebSocket streaming endpoint at `/ws/transcribe`. Gate: `ENABLE_STREAMING=false` (never enable on Fly.io). 8 tests in `tests/test_streaming.py`.
+- **LTI 1.3 SSO shipped + reviewed:** institutional auth via Canvas/Moodle. 42 LTI tests + atomic `DELETE … RETURNING` anti-replay fix applied post-review. Awaiting LMS admin handoff to seed `/data/lti_platforms.json`.
+- **Test suite:** 261 passing (252 server + 9 desktop)
 
 ## What This Project Does
 A FastAPI service that receives a Zoom recording (URL or file upload) and returns within minutes:
@@ -305,20 +308,14 @@ Use gstack roles for different types of work:
 ## Improvement Priorities (work through these in order)
 
 ### 🔴 High Priority
-1. **Task 2.2 — Pyannote diarization provider (code-only)** — implement
-   `app/services/diarization/pyannote_provider.py` against the existing
-   text-based diarization interface. Heavy deps (`pyannote.audio`) live in a
-   new `requirements-heavy.txt`, **never installed on Fly.io**. Gate with
-   `DIARIZATION_PROVIDER=gemini|pyannote`. Activates only on a future home
-   server with GPU.
-2. **Task 2.3 — WebSocket streaming endpoint** — `app/api/streaming.py` with
-   `/ws/transcribe` for incremental transcript + speaker labels. Production
-   stays at `ENABLE_STREAMING=False`; turned on only on the home server.
+
+1. ~~**Task 2.2 — Pyannote diarization provider (code-only)**~~ ✅ **Done (2026-05-03)** — `app/services/diarization/pyannote_provider.py` with 9 tests. `requirements-heavy.txt` created. Gate: `DIARIZATION_PROVIDER=pyannote`.
+2. ~~**Task 2.3 — WebSocket streaming endpoint**~~ ✅ **Done (2026-05-03)** — `app/api/streaming.py` at `/ws/transcribe` with 8 tests. Gate: `ENABLE_STREAMING=false`.
 3. **Gemini prompt quality** — exam questions are sometimes too easy; tighten
    the prompt (existing item, still open).
-4. **Task 3.\* — Test expansion + `/review` integration + this file's own
-   updates** — every shipped task should land with new tests, a `/review`
-   pass, and a CLAUDE.md refresh.
+4. ~~**Task 3.\* — Test expansion + `/review` + CLAUDE.md refresh**~~ ✅ **Done
+   (2026-05-03)** — LTI back-fill: 42 tests, atomic anti-replay fix, review
+   pass, this file updated.
 
 ### 🟡 Medium Priority
 5. **Whisper local memory leak** — `auto_shutdown_idle_minutes=30` exists in
