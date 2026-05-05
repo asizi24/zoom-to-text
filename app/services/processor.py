@@ -41,6 +41,16 @@ from app.services import summarizer, transcriber, zoom_downloader
 logger = logging.getLogger(__name__)
 
 
+class TaskCancelledError(Exception):
+    """Raised when a pipeline detects the task was cancelled mid-flight."""
+
+
+async def _check_cancellation(task_id: str) -> None:
+    """Raise TaskCancelledError if the user cancelled this task."""
+    if await state.is_task_cancelled(task_id):
+        raise TaskCancelledError(f"Task {task_id} was cancelled")
+
+
 # ── Stage wrapper ─────────────────────────────────────────────────────────────────
 
 async def _run_stage(stage: ProcessingStage, coro):
@@ -103,6 +113,7 @@ async def run_pipeline(
                 extract_to_mp3=(mode != ProcessingMode.GEMINI_DIRECT),
             ),
         )
+        await _check_cancellation(task_id)
         await state.update_task(
             task_id, TaskStatus.DOWNLOADING, 40, "✅ ההורדה הושלמה. מעבד אודיו..."
         )
@@ -115,6 +126,10 @@ async def run_pipeline(
         await state.complete_task(task_id, result)
         logger.info(f"Task {task_id} completed ✅")
 
+    except TaskCancelledError:
+        logger.info(f"Task {task_id} cancelled — cleaning up")
+        if audio_path:
+            await zoom_downloader.cleanup_audio(audio_path)
     except BaseException as exc:
         pe = classify_exception(exc, default_stage=ProcessingStage.UNKNOWN)
         logger.exception(
@@ -136,12 +151,16 @@ async def run_pipeline_from_file(
         await state.update_task(
             task_id, TaskStatus.TRANSCRIBING, 10, "📁 קובץ התקבל. מתחיל עיבוד..."
         )
+        await _check_cancellation(task_id)
         result = await _process_audio(task_id, file_path, mode, language)
         result = await _generate_flashcards_step(task_id, result)
         file_path = await _persist_audio_for_task(task_id, file_path)
         await state.complete_task(task_id, result)
         logger.info(f"Task {task_id} (upload) completed ✅")
 
+    except TaskCancelledError:
+        logger.info(f"Task {task_id} (upload) cancelled — cleaning up")
+        await zoom_downloader.cleanup_audio(file_path)
     except BaseException as exc:
         pe = classify_exception(exc, default_stage=ProcessingStage.UNKNOWN)
         logger.exception(
@@ -190,6 +209,7 @@ async def _process_audio(
             transcriber.transcribe_via_api(audio_path, language, task_id=task_id),
         )
 
+        await _check_cancellation(task_id)
         await state.update_task(
             task_id,
             TaskStatus.SUMMARIZING,
@@ -215,6 +235,7 @@ async def _process_audio(
             transcriber.transcribe_ivrit_ai(audio_path, language, task_id=task_id),
         )
 
+        await _check_cancellation(task_id)
         await state.update_task(
             task_id,
             TaskStatus.SUMMARIZING,
@@ -240,6 +261,7 @@ async def _process_audio(
             transcriber.transcribe(audio_path, language, task_id=task_id),
         )
 
+        await _check_cancellation(task_id)
         await state.update_task(
             task_id,
             TaskStatus.SUMMARIZING,

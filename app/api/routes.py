@@ -164,6 +164,22 @@ async def get_task(task_id: str, user_id: str = Depends(get_current_user)):
     return task
 
 
+@router.post("/tasks/{task_id}/cancel", status_code=200)
+async def cancel_task(task_id: str, user_id: str = Depends(get_current_user)):
+    """
+    Cancel an in-progress task. Only works on tasks that are still running
+    (pending / downloading / transcribing / summarizing).
+    Returns 400 if the task is already finished or not found.
+    """
+    task = await state.get_task_for_user(task_id, user_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    cancelled = await state.cancel_task(task_id)
+    if not cancelled:
+        raise HTTPException(status_code=400, detail="Task is already finished and cannot be cancelled")
+    return {"status": "cancelled"}
+
+
 @router.delete("/tasks/{task_id}", status_code=204)
 async def delete_task(task_id: str, user_id: str = Depends(get_current_user)):
     """

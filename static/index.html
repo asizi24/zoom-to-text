@@ -1613,6 +1613,9 @@
   </div>
   <div class="progress-pct" id="progress-pct">0%</div>
   <div class="progress-eta" id="progress-eta"></div>
+  <div style="margin-top:12px; text-align:center;">
+    <button id="cancel-task-btn" onclick="cancelCurrentTask()" style="background:none; border:1px solid #e11d48; color:#e11d48; border-radius:6px; padding:5px 16px; cursor:pointer; font-size:.85rem;">❌ בטל משימה</button>
+  </div>
 </div>
 
 <!-- ═══════════════ LIVE TRANSCRIPT CARD ═══════════════ -->
@@ -1919,9 +1922,31 @@
           hideLiveTranscript();
           hideProgress();
           showError(task.error || 'העיבוד נכשל', task.error_details);
+        } else if (task.status === 'cancelled') {
+          clearInterval(pollTimer);
+          hideLiveTranscript();
+          hideProgress();
+          showError('המשימה בוטלה', null);
         }
       } catch { /* retry next tick */ }
     }, 2000);
+  }
+
+  async function cancelCurrentTask() {
+    if (!currentTaskId) return;
+    const btn = document.getElementById('cancel-task-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'מבטל...'; }
+    try {
+      const r = await fetch(`/api/tasks/${currentTaskId}/cancel`, { method: 'POST' });
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        alert(body.detail || 'לא ניתן לבטל את המשימה');
+        if (btn) { btn.disabled = false; btn.textContent = '❌ בטל משימה'; }
+      }
+      // On success the poller will detect status=cancelled and clean up
+    } catch {
+      if (btn) { btn.disabled = false; btn.textContent = '❌ בטל משימה'; }
+    }
   }
 
   function _applyProgressBar(pct) {
@@ -2449,10 +2474,11 @@
           const item = document.createElement('div');
           const isCompleted = t.status === 'completed';
           const isFailed    = t.status === 'failed';
-          item.className = `history-item${isFailed ? ' failed' : ''}`;
-          const statusIcon = isCompleted ? '✅' : isFailed ? '❌' : '⏳';
-          const badgeClass = isCompleted ? 'completed' : isFailed ? 'failed' : 'running';
-          const badgeText  = isCompleted ? 'הושלם' : isFailed ? 'נכשל' : 'בתהליך';
+          const isCancelled = t.status === 'cancelled';
+          item.className = `history-item${isFailed || isCancelled ? ' failed' : ''}`;
+          const statusIcon = isCompleted ? '✅' : isFailed ? '❌' : isCancelled ? '🚫' : '⏳';
+          const badgeClass = isCompleted ? 'completed' : isFailed ? 'failed' : isCancelled ? 'failed' : 'running';
+          const badgeText  = isCompleted ? 'הושלם' : isFailed ? 'נכשל' : isCancelled ? 'בוטל' : 'בתהליך';
           const dt = new Date(t.created_at).toLocaleString('he-IL', { dateStyle: 'short', timeStyle: 'short' });
           const shortUrl = (t.url || '').replace(/^upload:/, '📁 ').replace('https://', '').slice(0, 60);
 

@@ -181,6 +181,39 @@ async def _purge_expired_lti_state() -> None:
     await db.commit()
 
 
+async def cancel_task(task_id: str) -> bool:
+    """
+    Mark a task as cancelled. Only acts on in-flight tasks (pending/downloading/
+    transcribing/summarizing). Returns True if the task was cancelled, False if it
+    was already finished or not found.
+    """
+    cancellable = [
+        TaskStatus.PENDING.value,
+        TaskStatus.DOWNLOADING.value,
+        TaskStatus.TRANSCRIBING.value,
+        TaskStatus.SUMMARIZING.value,
+    ]
+    placeholders = ",".join("?" * len(cancellable))
+    db = await _get_db()
+    result = await db.execute(
+        f"UPDATE tasks SET status=?, progress=0, message=? "
+        f"WHERE id=? AND status IN ({placeholders})",
+        [TaskStatus.CANCELLED.value, "❌ המשימה בוטלה על ידי המשתמש", task_id] + cancellable,
+    )
+    await db.commit()
+    return result.rowcount > 0
+
+
+async def is_task_cancelled(task_id: str) -> bool:
+    """Return True if the task has been cancelled (used by the pipeline to abort early)."""
+    db = await _get_db()
+    async with db.execute(
+        "SELECT status FROM tasks WHERE id=?", [task_id]
+    ) as cursor:
+        row = await cursor.fetchone()
+    return row is not None and row["status"] == TaskStatus.CANCELLED.value
+
+
 async def _mark_interrupted_tasks_failed():
     """
     On startup, any task that was mid-flight when the server died is marked failed.

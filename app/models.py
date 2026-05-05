@@ -15,6 +15,7 @@ class TaskStatus(str, Enum):
     SUMMARIZING  = "summarizing"
     COMPLETED    = "completed"
     FAILED       = "failed"
+    CANCELLED    = "cancelled"
 
 
 class ProcessingMode(str, Enum):
