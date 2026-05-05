@@ -1651,6 +1651,14 @@
     <button class="action-btn" onclick="exportPdf()" title="הורד PDF מעוצב לשיתוף או הדפסה">📄 הורד PDF</button>
     <button class="action-btn" id="copy-all-btn" onclick="copyAll()">📋 העתק הכל</button>
     <button class="action-btn" onclick="window.print()">🖨️ הדפסה</button>
+    <button class="action-btn share-btn" id="share-btn" onclick="shareLesson()" title="צור קישור שיתוף לחברים">🔗 שתף</button>
+  </div>
+
+  <!-- Share link banner (shown after share is created) -->
+  <div id="share-banner" style="display:none; margin:12px 0; padding:10px 14px; background:rgba(99,102,241,.1); border-radius:8px; font-size:.9rem; align-items:center; gap:10px; flex-wrap:wrap;">
+    <span>🔗 קישור לשיתוף:</span>
+    <a id="share-url-link" href="#" target="_blank" style="color:#6366f1; word-break:break-all;"></a>
+    <button class="copy-btn" style="position:static; padding:3px 10px;" onclick="copyShareLink()">📋 העתק</button>
   </div>
 
   <!-- Summary -->
@@ -2235,6 +2243,49 @@
       const orig = btn.innerHTML;
       btn.innerHTML = '✅ הועתק';
       setTimeout(() => { btn.classList.remove('success-flash'); btn.innerHTML = orig; }, 2000);
+    });
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // Share link
+  // ══════════════════════════════════════════════════════════════════════════
+
+  async function shareLesson() {
+    if (!currentTaskId) return;
+    const btn = document.getElementById('share-btn');
+    const orig = btn.innerHTML;
+    btn.innerHTML = '⏳ יוצר קישור...';
+    btn.disabled = true;
+    try {
+      const res = await fetch(`/api/tasks/${currentTaskId}/share`, { method: 'POST' });
+      if (!res.ok) throw new Error(await res.text());
+      const { share_url } = await res.json();
+      showShareBanner(share_url);
+      navigator.clipboard.writeText(share_url).catch(() => {});
+      btn.innerHTML = '✅ קישור הועתק';
+      setTimeout(() => { btn.innerHTML = orig; btn.disabled = false; }, 3000);
+    } catch (e) {
+      btn.innerHTML = orig;
+      btn.disabled = false;
+      alert('שגיאה ביצירת קישור: ' + e.message);
+    }
+  }
+
+  function showShareBanner(url) {
+    const banner = document.getElementById('share-banner');
+    const link = document.getElementById('share-url-link');
+    link.textContent = url;
+    link.href = url;
+    banner.style.display = 'flex';
+  }
+
+  function copyShareLink() {
+    const url = document.getElementById('share-url-link').textContent;
+    navigator.clipboard.writeText(url).then(() => {
+      const btn = event.target;
+      const orig = btn.innerHTML;
+      btn.innerHTML = '✅';
+      setTimeout(() => { btn.innerHTML = orig; }, 1500);
     });
   }
 
@@ -2952,7 +3003,45 @@
       console.warn('capabilities fetch failed', e);
     }
   }
-  document.addEventListener('DOMContentLoaded', loadCapabilities);
+  document.addEventListener('DOMContentLoaded', () => {
+    loadCapabilities();
+    // If we're on a /share/{token} URL, load the shared lesson (no auth needed)
+    const shareMatch = window.location.pathname.match(/^\/share\/([a-f0-9]{32})$/);
+    if (shareMatch) {
+      loadSharedLesson(shareMatch[1]);
+    }
+  });
+
+  async function loadSharedLesson(token) {
+    // Hide the input card — this is a read-only view
+    const inputCard = document.getElementById('input-card');
+    if (inputCard) inputCard.style.display = 'none';
+    // Hide auth-gated buttons that require a logged-in session
+    const shareBtn = document.getElementById('share-btn');
+    if (shareBtn) shareBtn.style.display = 'none';
+
+    try {
+      const res = await fetch(`/api/share/${token}`);
+      if (!res.ok) {
+        document.body.innerHTML = '<div style="text-align:center;padding:60px;font-family:sans-serif;">'
+          + '<h2>🔗 קישור שיתוף לא נמצא</h2>'
+          + '<p>הקישור אינו תקף או שהתוכן הוסר.</p></div>';
+        return;
+      }
+      const task = await res.json();
+      showResults(task.result, null, false);
+
+      // Show a non-auth banner at the top
+      const banner = document.createElement('div');
+      banner.style.cssText = 'background:rgba(99,102,241,.12);border-radius:8px;padding:10px 16px;'
+        + 'margin-bottom:16px;font-size:.9rem;text-align:center;';
+      banner.textContent = '👀 תצוגת שיתוף — כדי לעבד שיעור משלך, היכנס לאתר';
+      const resultsCard = document.getElementById('results-card');
+      resultsCard.prepend(banner);
+    } catch (e) {
+      console.error('share load failed', e);
+    }
+  }
 </script>
 </body>
 </html>

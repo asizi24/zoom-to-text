@@ -147,6 +147,15 @@ async def login_page():
     return HTMLResponse("<h1>Login</h1><p>static/login.html not found</p>")
 
 
+@app.get("/share/{token}", response_class=HTMLResponse, include_in_schema=False)
+async def share_page(token: str):
+    """Serve the SPA for a public share link — no auth required."""
+    index_path = Path("static/index.html")
+    if index_path.exists():
+        return FileResponse(index_path)
+    return HTMLResponse("<h1>Zoom Transcriber</h1><p>static/index.html not found</p>")
+
+
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def index(request: Request):
     """Serve the frontend. Redirect to /login if not authenticated."""

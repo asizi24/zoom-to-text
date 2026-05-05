@@ -610,6 +610,41 @@ async def export_pdf(
     )
 
 
+# ── Share links ───────────────────────────────────────────────────────────────
+
+@router.post("/tasks/{task_id}/share")
+async def create_share_link(
+    task_id: str,
+    request: Request,
+    user_id: str = Depends(get_current_user),
+):
+    """
+    Generate (or return existing) a permanent public share token for a completed task.
+    The token is embedded in a share URL the caller can give to anyone.
+    """
+    task = await state.get_task_for_user(task_id, user_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.result is None:
+        raise HTTPException(status_code=400, detail="Task is not complete yet")
+
+    token = await state.create_share_token(task_id)
+    base = str(request.base_url).rstrip("/")
+    return {"share_url": f"{base}/share/{token}"}
+
+
+@router.get("/share/{token}")
+async def get_shared_task(token: str):
+    """
+    Public endpoint — no auth required.
+    Returns the lesson result for a share token so the frontend can render it.
+    """
+    task = await state.get_task_by_share_token(token)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Share link not found or task incomplete")
+    return task
+
+
 # ── Provider capabilities (UI uses this to filter the mode dropdown) ──────────
 
 _ALL_MODES = ["gemini_direct", "whisper_local", "whisper_api", "ivrit_ai"]

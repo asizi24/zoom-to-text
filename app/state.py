@@ -155,6 +155,10 @@ async def init_db():
         await db.execute("ALTER TABLE tasks ADD COLUMN error_details TEXT")
         await db.commit()
         logger.info("Migrated tasks table: added error_details column (Task 1.5)")
+    if "share_token" not in cols:
+        await db.execute("ALTER TABLE tasks ADD COLUMN share_token TEXT")
+        await db.commit()
+        logger.info("Migrated tasks table: added share_token column")
 
     # Create index now that user_id column is guaranteed to exist
     await db.execute(CREATE_TASKS_INDEX_SQL)
@@ -671,3 +675,50 @@ async def get_audio_path(task_id: str) -> Optional[str]:
     if row is None:
         return None
     return row["audio_path"]
+
+
+# ── Share tokens ──────────────────────────────────────────────────────────────────
+
+async def create_share_token(task_id: str) -> str:
+    """
+    Create (or return existing) a permanent share token for a completed task.
+    Idempotent: calling twice returns the same token.
+    """
+    db = await _get_db()
+    # Reuse existing token if already generated
+    async with db.execute(
+        "SELECT share_token FROM tasks WHERE id=?", [task_id]
+    ) as cursor:
+        row = await cursor.fetchone()
+    if row and row["share_token"]:
+        return row["share_token"]
+    token = uuid.uuid4().hex  # 32-char hex, no hyphens — clean URLs
+    await db.execute(
+        "UPDATE tasks SET share_token=? WHERE id=?", [token, task_id]
+    )
+    await db.commit()
+    return token
+
+
+async def get_task_by_share_token(token: str) -> Optional[TaskResponse]:
+    """Return a completed task by its public share token. No user check."""
+    db = await _get_db()
+    async with db.execute(
+        "SELECT * FROM tasks WHERE share_token=?", [token]
+    ) as cursor:
+        row = await cursor.fetchone()
+    if row is None or not row["result_json"]:
+        return None
+    result = LessonResult.model_validate_json(row["result_json"])
+    return TaskResponse(
+        task_id=row["id"],
+        status=TaskStatus(row["status"]),
+        progress=row["progress"],
+        message=row["message"],
+        created_at=row["created_at"],
+        url=row["url"],
+        result=result,
+        error=row["error"],
+        error_details=_decode_error_details(row),
+        has_audio=False,  # audio requires auth; not exposed in public share
+    )
