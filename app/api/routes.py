@@ -22,7 +22,7 @@ from app import state
 from app.api.deps import get_current_user
 from app.config import settings
 from app.models import ProcessingMode, TaskCreate, TaskResponse
-from app.services import anki_export, processor, summarizer
+from app.services import anki_export, processor, summarizer, text_extractor
 from app.services.exporters.markdown import build_obsidian_markdown
 from app.services.llm_providers import get_provider
 from app.rate_limit import limiter
@@ -32,6 +32,11 @@ router = APIRouter()
 
 # Allowed audio/video extensions for upload
 _ALLOWED_EXTENSIONS = {".mp3", ".mp4", ".m4a", ".wav", ".mkv", ".webm", ".avi"}
+
+# Allowed supplementary material extensions (slides, handouts, readings)
+_ALLOWED_SUPP_EXTENSIONS = {".pdf", ".docx", ".html", ".htm", ".txt", ".md"}
+MAX_SUPP_FILES = 5
+MAX_SUPP_FILE_BYTES = 10 * 1024 * 1024  # 10 MB per file
 
 
 # ── Rate-limit string helper ──────────────────────────────────────────────────────
@@ -75,6 +80,79 @@ async def create_task(
     return task
 
 
+# ── Start job from URL with optional supplementary materials ─────────────────────
+
+@router.post("/tasks/url", response_model=TaskResponse, status_code=202)
+@limiter.limit(_task_rate_limit)
+async def create_task_from_url_with_materials(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    url: str = Form(...),
+    mode: ProcessingMode = Form(ProcessingMode.GEMINI_DIRECT),
+    language: str = Form("he"),
+    cookies: str | None = Form(None),
+    supplementary_files: list[UploadFile] = File(default=[]),
+    user_id: str = Depends(get_current_user),
+):
+    """
+    Submit a Zoom recording URL for processing, with optional supplementary materials.
+
+    Accepts multipart/form-data so supplementary files (PDF, DOCX, HTML, TXT)
+    can be uploaded alongside the URL. The extracted text is injected into the
+    Gemini prompt as reference material to improve summary and exam quality.
+    """
+    task_id = str(uuid.uuid4())
+
+    # ── Supplementary materials (optional) ────────────────────────────────────
+    supplementary_context: str | None = None
+    if supplementary_files:
+        if len(supplementary_files) > MAX_SUPP_FILES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"יותר מדי קבצי עזר. מקסימום {MAX_SUPP_FILES} קבצים.",
+            )
+        supp_pairs: list[tuple[str, str]] = []
+        settings.downloads_dir.mkdir(parents=True, exist_ok=True)
+        for sf in supplementary_files:
+            sf_name = Path(sf.filename).name if sf.filename else "material"
+            sf_ext = Path(sf_name).suffix.lower()
+            if sf_ext not in _ALLOWED_SUPP_EXTENSIONS:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"סוג קובץ עזר לא נתמך: {sf_ext}. קבצים נתמכים: PDF, DOCX, HTML, TXT, MD",
+                )
+            sf_content = await sf.read()
+            if len(sf_content) > MAX_SUPP_FILE_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"קובץ עזר גדול מדי: {sf_name}. מקסימום 10 MB לקובץ.",
+                )
+            sf_path = settings.downloads_dir / f"{task_id}_supp_{sf_name}"
+            async with aiofiles.open(sf_path, "wb") as f_supp:
+                await f_supp.write(sf_content)
+            supp_pairs.append((str(sf_path), sf_name))
+        try:
+            supplementary_context = text_extractor.extract_text_from_files(supp_pairs)
+        finally:
+            for sf_path_str, _ in supp_pairs:
+                try:
+                    Path(sf_path_str).unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+    task = await state.create_task(task_id, url, user_id=user_id)
+    background_tasks.add_task(
+        processor.run_pipeline,
+        task_id=task_id,
+        url=url,
+        mode=mode,
+        cookies=cookies,
+        language=language,
+        supplementary_context=supplementary_context,
+    )
+    return task
+
+
 # ── Start job from uploaded file ──────────────────────────────────────────────────
 
 @router.post("/tasks/upload", response_model=TaskResponse, status_code=202)
@@ -85,6 +163,7 @@ async def create_task_from_upload(
     file: UploadFile = File(...),
     mode: ProcessingMode = Form(ProcessingMode.GEMINI_DIRECT),
     language: str = Form("he"),
+    supplementary_files: list[UploadFile] = File(default=[]),
     user_id: str = Depends(get_current_user),
 ):
     """
@@ -126,6 +205,42 @@ async def create_task_from_upload(
             file_path.unlink()
         raise
 
+    # ── Supplementary materials (optional) ────────────────────────────────────
+    supplementary_context: str | None = None
+    if supplementary_files:
+        if len(supplementary_files) > MAX_SUPP_FILES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"יותר מדי קבצי עזר. מקסימום {MAX_SUPP_FILES} קבצים.",
+            )
+        supp_pairs: list[tuple[str, str]] = []
+        for sf in supplementary_files:
+            sf_name = Path(sf.filename).name if sf.filename else "material"
+            sf_ext = Path(sf_name).suffix.lower()
+            if sf_ext not in _ALLOWED_SUPP_EXTENSIONS:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"סוג קובץ עזר לא נתמך: {sf_ext}. קבצים נתמכים: PDF, DOCX, HTML, TXT, MD",
+                )
+            sf_content = await sf.read()
+            if len(sf_content) > MAX_SUPP_FILE_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"קובץ עזר גדול מדי: {sf_name}. מקסימום 10 MB לקובץ.",
+                )
+            sf_path = settings.downloads_dir / f"{task_id}_supp_{sf_name}"
+            async with aiofiles.open(sf_path, "wb") as f_supp:
+                await f_supp.write(sf_content)
+            supp_pairs.append((str(sf_path), sf_name))
+        try:
+            supplementary_context = text_extractor.extract_text_from_files(supp_pairs)
+        finally:
+            for sf_path_str, _ in supp_pairs:
+                try:
+                    Path(sf_path_str).unlink(missing_ok=True)
+                except Exception:
+                    pass
+
     task = await state.create_task(task_id, f"upload:{safe_name}", user_id=user_id)
 
     background_tasks.add_task(
@@ -134,6 +249,7 @@ async def create_task_from_upload(
         file_path=str(file_path),
         mode=mode,
         language=language,
+        supplementary_context=supplementary_context,
     )
     return task
 

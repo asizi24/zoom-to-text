@@ -138,11 +138,15 @@ app/services/summarizer.py     # Synthesis ‖ extraction + diarization
 app/services/zoom_downloader.py     # yt-dlp + cookie handling
 app/services/llm_providers/    # Provider abstraction (gemini/openrouter/ollama)
 app/services/exporters/markdown.py  # Obsidian-flavored markdown exporter (Task 1.4)
+app/services/anki_export.py    # Anki .apkg + CSV export for flashcards
+app/services/text_extractor.py # Text extraction utilities
+app/services/diarization/      # Diarization provider abstraction (gemini + pyannote)
+app/services/lti/              # LTI 1.3 SSO support modules
 static/index.html              # Full UI (incl. 🟣 Obsidian button)
 extension/                     # Chrome extension (Zoom-cookie helper for yt-dlp)
 desktop/capture.py             # Standalone loopback capture POC (Task 2.1)
 desktop/requirements.txt       # Desktop-only deps; never installed on Fly.io
-tests/                         # 178 server tests
+tests/                         # server test suite (261 tests)
 tests/desktop/                 # 9 desktop tests (mocked sounddevice + httpx)
 ```
 
@@ -179,6 +183,8 @@ pytest tests/ -q                     # full server suite (178 tests)
 pytest tests/desktop/ -v             # desktop POC (9 tests; needs desktop reqs)
 pytest tests/test_obsidian_export.py # single file, verbose
 ```
+`pytest.ini` sets `asyncio_mode = auto` — **do not** add `@pytest.mark.asyncio` decorators manually; all async test functions run automatically.
+
 **Do not run `pytest .` from the repo root** — it picks up
 `_legacy_archive/` and errors out on `from app import app`. Always
 restrict to `tests/`.
@@ -360,6 +366,15 @@ Use gstack roles for different types of work:
   module import that pulls them. This way the suite stays green on
   machines without the optional install (`tests/desktop/test_capture.py`
   is the reference pattern).
+- **Coding Conventions.** All new Python code must:
+  - Include type hints on every function signature (`def foo(x: str) -> TaskResult`)
+  - Use `async def` for any function that touches I/O (DB, network, filesystem)
+  - Wrap async pipeline stages with `processor._run_stage(stage, coro)` — never
+    use bare `except: pass`, which swallows the `error_details` payload the UI needs
+- **Bias for Action.** Proceed autonomously for routine operations: editing files,
+  running tests, reading code, making commits on dev branches. Pause and ask only for
+  actions that are irreversible at scale — dropping database tables, force-pushing to
+  `main`, bulk-deleting data — or when a required external credential is absent.
 
 ---
 

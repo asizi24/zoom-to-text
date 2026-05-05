@@ -82,7 +82,10 @@ async def lifespan(app: FastAPI):
     )
 
     logger.info("✅ Server ready — listening on port 8000")
-    logger.info(f"   API docs: {settings.base_url}/docs")
+    if settings.enable_docs:
+        logger.info(f"   API docs: {settings.base_url}/docs")
+    else:
+        logger.info("   API docs: disabled (ENABLE_DOCS=false)")
 
     yield  # ← application runs here
 
@@ -99,6 +102,8 @@ app = FastAPI(
     version="2.0.0",
     description="Transcribe and summarize Zoom class recordings with AI",
     lifespan=lifespan,
+    docs_url="/docs" if settings.enable_docs else None,
+    redoc_url="/redoc" if settings.enable_docs else None,
 )
 
 app.state.limiter = limiter

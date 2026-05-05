@@ -483,9 +483,23 @@
 
     /* ── Results action bar ── */
     .results-actions {
-      display: flex; gap: 8px; flex-wrap: wrap;
+      display: flex; flex-direction: column; gap: 10px;
       margin-bottom: 28px; padding-bottom: 24px;
       border-bottom: 1px solid rgba(255,255,255,.07);
+    }
+    /* Primary row: navigation + high-value actions */
+    .results-primary {
+      display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+    }
+    /* Secondary row: export/utility actions, visually subdued */
+    .results-secondary {
+      display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+      padding: 8px 12px; border-radius: 10px;
+      background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.06);
+    }
+    .export-label {
+      font-size: .7rem; color: var(--muted); letter-spacing: .05em;
+      text-transform: uppercase; padding-inline-end: 6px; white-space: nowrap; flex-shrink: 0;
     }
     .action-btn {
       padding: 8px 18px;
@@ -497,8 +511,11 @@
     }
     .action-btn:hover { border-color: rgba(124,58,237,.5); color: #c4b5fd; background: rgba(124,58,237,.1); }
     .action-btn.success-flash { border-color: var(--success); color: #6ee7b7; }
-    .action-btn.back-btn { margin-inline-end: auto; color: rgba(255,255,255,.85); }
+    .action-btn.back-btn { color: rgba(255,255,255,.85); }
     .action-btn.back-btn:hover { border-color: rgba(255,255,255,.35); color: #fff; background: rgba(255,255,255,.08); }
+    /* Export buttons: smaller + slightly dimmer */
+    .action-btn-export { font-size: .78rem; padding: 6px 13px; opacity: .8; }
+    .action-btn-export:hover { opacity: 1; }
 
     /* ── Copyable ── */
     .copyable-wrap { position: relative; }
@@ -583,6 +600,14 @@
       margin-bottom: 18px;
       box-shadow: 0 4px 16px rgba(124,58,237,.3);
     }
+
+    /* ── Cancel task btn ── */
+    .cancel-btn {
+      background: none; border: 1px solid #e11d48; color: #e11d48;
+      border-radius: 6px; padding: 5px 16px; cursor: pointer;
+      font-size: .85rem; font-family: inherit; transition: all .2s;
+    }
+    .cancel-btn:hover { background: rgba(225,29,72,.1); }
 
     /* ── Reset btn ── */
     .reset-btn {
@@ -741,8 +766,10 @@
 
       .btn { padding: 13px 32px; font-size: .95rem; border-radius: 12px; }
 
-      .results-actions { gap: 6px; }
+      .results-actions { gap: 8px; }
+      .results-secondary { padding: 6px 10px; gap: 5px; }
       .action-btn { padding: 7px 14px; font-size: .78rem; }
+      .action-btn-export { font-size: .73rem; padding: 5px 10px; }
 
       .section-title { font-size: 1rem; }
 
@@ -1535,6 +1562,19 @@
              placeholder="https://admin-ort-org-il.zoom.us/rec/share/..." />
     </div>
     <p class="url-hint">💡 לקישורי Zoom פרטיים — השתמש בתוסף Chrome לשליחה אוטומטית</p>
+    <div class="supp-section" style="margin-top:12px;">
+      <label class="supp-label" style="display:block;font-size:13px;color:#666;margin-bottom:6px;">
+        📎 חומרי עזר (אופציונלי) — מצגת, דף קריאה, PDF
+      </label>
+      <input type="file"
+             id="linkSuppFiles"
+             multiple
+             accept=".pdf,.docx,.html,.htm,.txt,.md"
+             style="font-size:13px;width:100%;">
+      <div style="font-size:11px;color:#999;margin-top:4px;">
+        עד 5 קבצים • PDF, DOCX, HTML, TXT, MD • עד 10 MB לקובץ
+      </div>
+    </div>
   </div>
 
   <!-- File upload tab -->
@@ -1547,6 +1587,19 @@
              accept=".mp3,.mp4,.m4a,.wav,.mkv,.webm,.avi" />
       <div class="file-badge" id="file-badge">
         <span>📎</span><span id="file-name"></span>
+      </div>
+    </div>
+    <div class="supp-section" style="margin-top:12px;">
+      <label class="supp-label" style="display:block;font-size:13px;color:#666;margin-bottom:6px;">
+        📎 חומרי עזר (אופציונלי) — מצגת, דף קריאה, PDF
+      </label>
+      <input type="file"
+             id="uploadSuppFiles"
+             multiple
+             accept=".pdf,.docx,.html,.htm,.txt,.md"
+             style="font-size:13px;width:100%;">
+      <div style="font-size:11px;color:#999;margin-top:4px;">
+        עד 5 קבצים • PDF, DOCX, HTML, TXT, MD • עד 10 MB לקובץ
       </div>
     </div>
   </div>
@@ -1614,7 +1667,7 @@
   <div class="progress-pct" id="progress-pct">0%</div>
   <div class="progress-eta" id="progress-eta"></div>
   <div style="margin-top:12px; text-align:center;">
-    <button id="cancel-task-btn" onclick="cancelCurrentTask()" style="background:none; border:1px solid #e11d48; color:#e11d48; border-radius:6px; padding:5px 16px; cursor:pointer; font-size:.85rem;">❌ בטל משימה</button>
+    <button id="cancel-task-btn" class="cancel-btn" onclick="cancelCurrentTask()">❌ בטל משימה</button>
   </div>
 </div>
 
@@ -1648,13 +1701,20 @@
 
   <!-- Action bar -->
   <div class="results-actions">
-    <button class="action-btn back-btn" onclick="reset()" title="חזרה למסך הראשי">← חזרה</button>
-    <button class="action-btn" onclick="exportMarkdown()">⬇️ ייצוא Markdown</button>
-    <button class="action-btn" onclick="exportObsidian()" title="פורמט Obsidian: frontmatter, action items כ-checkboxes, תגיות לפי owner">🟣 ייצוא Obsidian</button>
-    <button class="action-btn" onclick="exportPdf()" title="הורד PDF מעוצב לשיתוף או הדפסה">📄 הורד PDF</button>
-    <button class="action-btn" id="copy-all-btn" onclick="copyAll()">📋 העתק הכל</button>
-    <button class="action-btn" onclick="window.print()">🖨️ הדפסה</button>
-    <button class="action-btn share-btn" id="share-btn" onclick="shareLesson()" title="צור קישור שיתוף לחברים">🔗 שתף</button>
+    <!-- Primary actions -->
+    <div class="results-primary">
+      <button class="action-btn back-btn" onclick="reset()" title="חזרה למסך הראשי">← חזרה</button>
+      <button class="action-btn" id="copy-all-btn" onclick="copyAll()">📋 העתק הכל</button>
+      <button class="action-btn share-btn" id="share-btn" onclick="shareLesson()" title="צור קישור שיתוף לחברים">🔗 שתף</button>
+    </div>
+    <!-- Secondary export actions -->
+    <div class="results-secondary">
+      <span class="export-label">ייצוא:</span>
+      <button class="action-btn action-btn-export" onclick="exportMarkdown()">⬇️ Markdown</button>
+      <button class="action-btn action-btn-export" onclick="exportObsidian()" title="פורמט Obsidian: frontmatter, action items כ-checkboxes, תגיות לפי owner">🟣 Obsidian</button>
+      <button class="action-btn action-btn-export" onclick="exportPdf()" title="הורד PDF מעוצב לשיתוף או הדפסה">📄 PDF</button>
+      <button class="action-btn action-btn-export" onclick="window.print()">🖨️ הדפסה</button>
+    </div>
   </div>
 
   <!-- Share link banner (shown after share is created) -->
@@ -1883,12 +1943,13 @@
   }
 
   async function submitUrl(url) {
-    const body = { url, mode: selectedMode, language: 'he' };
-    const r = await fetch('/api/tasks', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
+    const fd = new FormData();
+    fd.append('url', url);
+    fd.append('mode', selectedMode);
+    fd.append('language', 'he');
+    const suppFiles = document.getElementById('linkSuppFiles')?.files || [];
+    for (const f of suppFiles) fd.append('supplementary_files', f);
+    const r = await fetch('/api/tasks/url', { method: 'POST', body: fd });
     if (!r.ok) { const e = await r.json(); throw new Error(e.detail || 'שגיאה בשרת'); }
     return (await r.json()).task_id;
   }
@@ -1898,6 +1959,8 @@
     fd.append('file', selectedFile);
     fd.append('mode', selectedMode);
     fd.append('language', 'he');
+    const suppFiles = document.getElementById('uploadSuppFiles')?.files || [];
+    for (const f of suppFiles) fd.append('supplementary_files', f);
     const r = await fetch('/api/tasks/upload', { method: 'POST', body: fd });
     if (!r.ok) { const e = await r.json(); throw new Error(e.detail || 'שגיאה בשרת'); }
     return (await r.json()).task_id;

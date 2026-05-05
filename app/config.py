@@ -136,6 +136,11 @@ class Settings(BaseSettings):
     # Set to 0 to disable rate limiting entirely (e.g. during local dev).
     rate_limit_per_minute: int = 10
 
+    # ── API documentation ─────────────────────────────────────────────────────
+    # Set ENABLE_DOCS=false on Fly.io (or any production deployment) to hide
+    # /docs and /redoc from public access.  Local dev keeps them enabled.
+    enable_docs: bool = True
+
     # ── Content language ────────────────────────────────────────────────────────
     # "auto" — Gemini detects the lecture language and responds in kind (default).
     # ISO 639-1 code ("he", "en", "ar", "fr" …) — force a specific output language.

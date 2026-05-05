@@ -177,7 +177,7 @@ quiz.options, quiz.correct_answer, quiz.explanation.
 """
 
 
-def _system_prompt() -> str:
+def _system_prompt(supplementary_context: str | None = None) -> str:
     """Return the synthesis system prompt with the configured language instruction."""
     lang = settings.lecture_language
     if lang == "auto":
@@ -189,11 +189,21 @@ def _system_prompt() -> str:
         lang_line = "הפק פלט מובנה ומקיף **בעברית**."
     else:
         lang_line = f"Produce all output in the lecture's language (forced: {lang})."
-    return (
+
+    prompt = (
         "אתה מומחה לחינוך וניתוח שיעורים אקדמיים.\n"
         f"המשימה שלך: לנתח את הקלטת השיעור ולהפיק פלט מובנה ומקיף. {lang_line}\n"
         + _PROMPT_BODY
     )
+    if supplementary_context:
+        prompt += (
+            "\n\n══════════════════════════════════════════════════\n"
+            "חומרי עזר לשיעור (מצגת / תוכנית לימודים / מסמך רקע):\n"
+            "השתמש בחומרים אלה כהקשר נוסף לשיפור הסיכום, הפרקים, והמבחן.\n"
+            "══════════════════════════════════════════════════\n"
+            + supplementary_context
+        )
+    return prompt
 
 # ── Critique prompt ───────────────────────────────────────────────────────────────
 
@@ -627,6 +637,7 @@ def _needs_revision(critique: dict, threshold: float) -> bool:
 def _summarize_audio_sync(
     audio_path: str,
     progress_cb: _ProgressCallback | None = None,
+    supplementary_context: str | None = None,
 ) -> LessonResult:
     """Upload audio to Gemini and get summary + quiz in one call."""
     client = _get_client()
@@ -660,7 +671,7 @@ def _summarize_audio_sync(
     result = None
     last_error = None
     for attempt in range(2):
-        response = _generate_with_retry(client, [_system_prompt(), audio_file])
+        response = _generate_with_retry(client, [_system_prompt(supplementary_context), audio_file])
         try:
             result = _parse_response(_response_text(response))
             break
@@ -693,6 +704,7 @@ _MAX_CHUNK_CHARS = 350_000
 def _summarize_text_sync(
     transcript: str,
     progress_cb: _ProgressCallback | None = None,
+    supplementary_context: str | None = None,
 ) -> LessonResult:
     """
     Send transcript text to Gemini. Handles chunking for very long classes.
@@ -705,7 +717,7 @@ def _summarize_text_sync(
     client = _get_client()
 
     if len(transcript) <= _MAX_CHUNK_CHARS:
-        prompt = _system_prompt() + "\n\nתמלול השיעור:\n" + transcript
+        prompt = _system_prompt(supplementary_context) + "\n\nתמלול השיעור:\n" + transcript
         result = None
         last_error = None
         for attempt in range(2):
@@ -750,7 +762,7 @@ def _summarize_text_sync(
         progress_cb(86, "🔗 מאחד את כל החלקים לסיכום מלא ומבחן...")
 
     merge_prompt = (
-        _system_prompt() + "\n\n"
+        _system_prompt(supplementary_context) + "\n\n"
         "להלן סיכומי ביניים של חלקי השיעור. "
         "בנה מהם סיכום מלא, פרקים ומבחן אמריקאי כפי שנדרש:\n\n"
         + "\n\n---\n\n".join(partial_summaries)
@@ -1159,7 +1171,7 @@ def _diarize_transcript_sync(transcript: str) -> tuple[str, dict[str, str]]:
 
 # ── Synthesis call wrappers that capture raw text (for raw_llm_response) ─────────
 
-def _synthesize_text_capture(transcript: str) -> tuple[LessonResult, str]:
+def _synthesize_text_capture(transcript: str, supplementary_context: str | None = None) -> tuple[LessonResult, str]:
     """
     Single Gemini synthesis call on a transcript. Returns (parsed result, raw text).
 
@@ -1170,7 +1182,7 @@ def _synthesize_text_capture(transcript: str) -> tuple[LessonResult, str]:
     client = _get_client()
 
     if len(transcript) <= _MAX_CHUNK_CHARS:
-        prompt = _system_prompt() + "\n\nתמלול השיעור:\n" + transcript
+        prompt = _system_prompt(supplementary_context) + "\n\nתמלול השיעור:\n" + transcript
         last_raw = ""
         last_error: Exception | None = None
         for attempt in range(2):
@@ -1203,7 +1215,7 @@ def _synthesize_text_capture(transcript: str) -> tuple[LessonResult, str]:
         partial_summaries.append(resp.text)
 
     merge_prompt = (
-        _system_prompt() + "\n\n"
+        _system_prompt(supplementary_context) + "\n\n"
         "להלן סיכומי ביניים של חלקי השיעור. "
         "בנה מהם סיכום מלא, פרקים ומבחן אמריקאי כפי שנדרש:\n\n"
         + "\n\n---\n\n".join(partial_summaries)
@@ -1213,7 +1225,7 @@ def _synthesize_text_capture(transcript: str) -> tuple[LessonResult, str]:
     return _parse_response(raw), raw
 
 
-def _synthesize_audio_capture(audio_file, progress_cb: _ProgressCallback | None = None) -> tuple[LessonResult, str]:
+def _synthesize_audio_capture(audio_file, progress_cb: _ProgressCallback | None = None, supplementary_context: str | None = None) -> tuple[LessonResult, str]:
     """Synthesis call on a pre-uploaded audio file. Returns (parsed, raw text)."""
     client = _get_client()
     if progress_cb:
@@ -1222,7 +1234,7 @@ def _synthesize_audio_capture(audio_file, progress_cb: _ProgressCallback | None 
     last_raw = ""
     last_error: Exception | None = None
     for attempt in range(2):
-        response = _generate_with_retry(client, [_system_prompt(), audio_file])
+        response = _generate_with_retry(client, [_system_prompt(supplementary_context), audio_file])
         last_raw = _response_text(response)
         try:
             return _parse_response(last_raw), last_raw
@@ -1455,6 +1467,7 @@ def _transcribe_audio_chunk_via_gemini(chunk_path: str) -> str:
 async def _summarize_audio_chunked(
     audio_path: str,
     progress_cb: _ProgressCallback | None,
+    supplementary_context: str | None = None,
 ) -> LessonResult:
     """Long-audio path: chunk → Gemini-transcribe each piece → summarize text.
 
@@ -1511,7 +1524,7 @@ async def _summarize_audio_chunked(
     if progress_cb:
         progress_cb(78, "🤖 מסכם את התמלול המאוחד...")
 
-    result = await summarize_transcript(full_transcript, progress_cb)
+    result = await summarize_transcript(full_transcript, progress_cb, supplementary_context=supplementary_context)
     # Preserve the merged transcript so the History tab shows it like the
     # WHISPER paths do — without this, callers would see an empty transcript
     # field on a result that was built from a real transcript.
@@ -1558,6 +1571,7 @@ def _merge_results(
 async def summarize_audio(
     audio_path: str,
     progress_cb: _ProgressCallback | None = None,
+    supplementary_context: str | None = None,
 ) -> LessonResult:
     """
     Async: upload audio directly to LLM (GEMINI_DIRECT mode).
@@ -1586,7 +1600,7 @@ async def summarize_audio(
             f"{_GEMINI_DIRECT_MAX_SECONDS / 60:.0f}-min direct threshold; "
             f"routing through chunked path"
         )
-        return await _summarize_audio_chunked(audio_path, progress_cb)
+        return await _summarize_audio_chunked(audio_path, progress_cb, supplementary_context)
 
     loop = asyncio.get_running_loop()
 
@@ -1598,7 +1612,7 @@ async def summarize_audio(
     try:
         # Step 2: Synthesis + Extraction in parallel.
         synthesis_future = loop.run_in_executor(
-            None, _synthesize_audio_capture, audio_file, progress_cb
+            None, _synthesize_audio_capture, audio_file, progress_cb, supplementary_context
         )
         extraction_future = loop.run_in_executor(
             None, _extract_audio_capture, audio_file
@@ -1630,7 +1644,7 @@ async def summarize_audio(
                 f"({duration / 60 if duration else '?'} min audio); "
                 "falling back to chunked path"
             )
-            return await _summarize_audio_chunked(audio_path, progress_cb)
+            return await _summarize_audio_chunked(audio_path, progress_cb, supplementary_context)
         raise synthesis_outcome
     synthesis_result, raw_summary = synthesis_outcome  # type: ignore[misc]
 
@@ -1650,6 +1664,7 @@ async def summarize_transcript(
     transcript: str,
     progress_cb: _ProgressCallback | None = None,
     audio_path: str | None = None,
+    supplementary_context: str | None = None,
 ) -> LessonResult:
     """
     Async: summarize a text transcript (WHISPER_LOCAL / WHISPER_API mode).
@@ -1665,7 +1680,7 @@ async def summarize_transcript(
       3. Merge results, then run the exam critique pipeline.
     """
     if not _is_gemini_provider():
-        return await _summarize_transcript_via_provider(transcript, progress_cb)
+        return await _summarize_transcript_via_provider(transcript, progress_cb, supplementary_context)
 
     loop = asyncio.get_running_loop()
 
@@ -1701,7 +1716,7 @@ async def summarize_transcript(
 
     # Step 2: Synthesis + Extraction in parallel on the (possibly diarized) text.
     synthesis_future = loop.run_in_executor(
-        None, _synthesize_text_capture, text_for_downstream
+        None, _synthesize_text_capture, text_for_downstream, supplementary_context
     )
     extraction_future = loop.run_in_executor(
         None, _extract_text_capture, text_for_downstream
@@ -1741,6 +1756,7 @@ async def summarize_transcript(
 async def _summarize_transcript_via_provider(
     transcript: str,
     progress_cb: _ProgressCallback | None = None,
+    supplementary_context: str | None = None,
 ) -> LessonResult:
     """Run the full transcript→summary pipeline through a non-Gemini provider."""
     provider = get_provider()
@@ -1748,7 +1764,7 @@ async def _summarize_transcript_via_provider(
     if progress_cb:
         progress_cb(82, f"🤖 שולח ל-{provider.name} — מייצר סיכום ומבחן...")
 
-    prompt = _system_prompt() + "\n\nתמלול השיעור:\n" + transcript[:_MAX_CHUNK_CHARS]
+    prompt = _system_prompt(supplementary_context) + "\n\nתמלול השיעור:\n" + transcript[:_MAX_CHUNK_CHARS]
     text = await provider.generate_text(prompt)
     return _parse_response(text)
 

@@ -94,6 +94,7 @@ async def run_pipeline(
     mode: ProcessingMode,
     cookies: str | None,
     language: str,
+    supplementary_context: str | None = None,
 ):
     """Full pipeline starting from a Zoom URL."""
     audio_path: str | None = None
@@ -118,7 +119,7 @@ async def run_pipeline(
             task_id, TaskStatus.DOWNLOADING, 40, "✅ ההורדה הושלמה. מעבד אודיו..."
         )
 
-        result = await _process_audio(task_id, audio_path, mode, language)
+        result = await _process_audio(task_id, audio_path, mode, language, supplementary_context)
         result = await _generate_flashcards_step(task_id, result)
         # Move the audio into a persistent per-task location so the UI player
         # can stream it back. Replaces the old "cleanup in finally" pattern.
@@ -145,6 +146,7 @@ async def run_pipeline_from_file(
     file_path: str,
     mode: ProcessingMode,
     language: str,
+    supplementary_context: str | None = None,
 ):
     """Pipeline starting from an already-saved uploaded file."""
     try:
@@ -152,7 +154,7 @@ async def run_pipeline_from_file(
             task_id, TaskStatus.TRANSCRIBING, 10, "📁 קובץ התקבל. מתחיל עיבוד..."
         )
         await _check_cancellation(task_id)
-        result = await _process_audio(task_id, file_path, mode, language)
+        result = await _process_audio(task_id, file_path, mode, language, supplementary_context)
         result = await _generate_flashcards_step(task_id, result)
         file_path = await _persist_audio_for_task(task_id, file_path)
         await state.complete_task(task_id, result)
@@ -177,6 +179,7 @@ async def _process_audio(
     audio_path: str,
     mode: ProcessingMode,
     language: str,
+    supplementary_context: str | None = None,
 ) -> LessonResult:
     """
     Transcribe and/or summarize the audio depending on the selected mode.
@@ -194,7 +197,7 @@ async def _process_audio(
         progress_cb = _make_progress_cb(task_id, TaskStatus.SUMMARIZING, loop)
         result = await _run_stage(
             ProcessingStage.SUMMARIZE,
-            summarizer.summarize_audio(audio_path, progress_cb),
+            summarizer.summarize_audio(audio_path, progress_cb, supplementary_context=supplementary_context),
         )
 
     elif mode == ProcessingMode.WHISPER_API:
@@ -219,7 +222,7 @@ async def _process_audio(
         progress_cb = _make_progress_cb(task_id, TaskStatus.SUMMARIZING, loop)
         result = await _run_stage(
             ProcessingStage.SUMMARIZE,
-            summarizer.summarize_transcript(transcript, progress_cb, audio_path=audio_path),
+            summarizer.summarize_transcript(transcript, progress_cb, audio_path=audio_path, supplementary_context=supplementary_context),
         )
         result.transcript = transcript
 
@@ -245,7 +248,7 @@ async def _process_audio(
         progress_cb = _make_progress_cb(task_id, TaskStatus.SUMMARIZING, loop)
         result = await _run_stage(
             ProcessingStage.SUMMARIZE,
-            summarizer.summarize_transcript(transcript, progress_cb, audio_path=audio_path),
+            summarizer.summarize_transcript(transcript, progress_cb, audio_path=audio_path, supplementary_context=supplementary_context),
         )
         result.transcript = transcript
 
@@ -271,7 +274,7 @@ async def _process_audio(
         progress_cb = _make_progress_cb(task_id, TaskStatus.SUMMARIZING, loop)
         result = await _run_stage(
             ProcessingStage.SUMMARIZE,
-            summarizer.summarize_transcript(transcript, progress_cb, audio_path=audio_path),
+            summarizer.summarize_transcript(transcript, progress_cb, audio_path=audio_path, supplementary_context=supplementary_context),
         )
         result.transcript = transcript
 
