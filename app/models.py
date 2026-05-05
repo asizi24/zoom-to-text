@@ -45,6 +45,7 @@ class Chapter(BaseModel):
     title:      str
     content:    str
     key_points: list[str] = []
+    start_time: Optional[str] = None  # [MM:SS] of when this topic begins; None = not available
 
 
 class Flashcard(BaseModel):

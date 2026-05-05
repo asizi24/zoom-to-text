@@ -1159,6 +1159,13 @@
     }
     .ts-link:hover { background: rgba(99,102,241,.22); }
     .ts-link.active { background: #4f46e5; color: #fff; }
+    .chapter-ts {
+      font-size: .75rem;
+      font-weight: 500;
+      margin-right: 8px;
+      opacity: .75;
+      vertical-align: middle;
+    }
 
     /* ── Liquid Glass button (adapted from shadcn liquid-glass-button) ── */
     /* The real magic is the SVG `#container-glass` filter + the inset shadow
@@ -2076,7 +2083,18 @@
 
       const titleDiv = document.createElement('div');
       titleDiv.className = 'chapter-title';
-      titleDiv.textContent = ch.title || '';
+      if (ch.start_time && currentAudioTaskId) {
+        const titleText = document.createTextNode(ch.title || '');
+        titleDiv.appendChild(titleText);
+        const tsSpan = document.createElement('span');
+        tsSpan.className = 'ts-link chapter-ts';
+        tsSpan.textContent = ch.start_time;
+        const ts = ch.start_time.replace(/[\[\]]/g, '');
+        tsSpan.addEventListener('click', (e) => { e.stopPropagation(); seekTo(ts); });
+        titleDiv.appendChild(tsSpan);
+      } else {
+        titleDiv.textContent = ch.title || '';
+      }
       chDiv.appendChild(titleDiv);
 
       const contentDiv = document.createElement('div');

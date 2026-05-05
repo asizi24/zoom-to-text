@@ -74,6 +74,7 @@ _PROMPT_BODY = """
   "chapters": [
     {
       "title": "topic title",
+      "start_time": "[MM:SS]",
       "content": "detailed explanation of the topic (at least 3-4 sentences)",
       "key_points": ["key point 1", "key point 2", "key point 3"]
     }
@@ -111,17 +112,25 @@ Applies to all output fields: summary, chapters.content, key_points, quiz.questi
 quiz.options, quiz.correct_answer, quiz.explanation.
 
 ══════════════════════════════════════════════════
-הנחיה קריטית — ציטוט timestamps:
+הנחיה קריטית — ציטוט timestamps (חובה):
 ══════════════════════════════════════════════════
-אם התמלול שלפניך מכיל סימוני זמן בפורמט [MM:SS] (למשל "[12:34] ..."),
-שלב אותם בתגובותיך כשאתה מתייחס לקטע ספציפי. הסימן מופיע בתחילת
-הקטע הרלוונטי והוא יהפוך ל-link בממשק.
+כל פרק חייב לכלול שדה start_time בפורמט "[MM:SS]" — הזמן שבו הנושא
+מתחיל בהקלטה. הוא יהפוך ל-link שמקפיץ את הנגן לנקודה הנכונה בממשק.
+
+אם מקור הקלט הוא תמלול עם סימוני [MM:SS]:
+  • קח את ה-[MM:SS] של הפיסקה הראשונה שעוסקת בנושא כ-start_time.
+  • שלב timestamps נוספים בתוך key_points ו-content כשאתה מתייחס לרגע ספציפי.
+
+אם מקור הקלט הוא קובץ אודיו ישיר:
+  • אמוד את הדקה והשנייה שבהן כל נושא מתחיל ורשום כ-start_time.
+  • הוסף timestamps גם בתוך key_points לדוגמאות ספציפיות.
 
 דוגמאות:
+  ✅ start_time: "[03:15]"
   ✅ "המרצה הציג את המושג בפרק השני [15:42] והרחיב עליו בהמשך [23:10]"
   ✅ key_points: ["הגדרה של useState נמצאת ב-[05:22]", "דוגמה מעשית ב-[18:45]"]
   ✅ explanation: "ראה הסבר המרצה ב-[42:15] — הוא מדגים שם את הטעות הזו"
-אל תמציא timestamps אם הם לא מופיעים במקור.
+אל תמציא timestamps שאינם נסמכים על המקור.
 
 ══════════════════════════════════════════════════
 הנחיות למבחן — קרא בעיון ופעל לפיהן במדויק:
@@ -451,6 +460,7 @@ def _parse_response(text: str) -> LessonResult:
             title=c.get("title", ""),
             content=c.get("content", ""),
             key_points=c.get("key_points", []),
+            start_time=c.get("start_time"),
         )
         for c in data.get("chapters", [])
     ]

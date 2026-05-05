@@ -195,6 +195,37 @@ def test_raw_llm_response_partial_extraction_only():
     assert r.extraction_call == "extraction raw"
 
 
+# ── Chapter.start_time ────────────────────────────────────────────────────────
+
+def test_chapter_without_start_time_loads_as_none():
+    """Old Chapter blobs without start_time must deserialize with start_time=None."""
+    from app.models import Chapter
+
+    ch = Chapter(title="Intro", content="some content", key_points=["a", "b"])
+    assert ch.start_time is None
+
+
+def test_chapter_with_start_time_loads_correctly():
+    from app.models import Chapter
+
+    ch = Chapter(title="Hooks", content="...", key_points=[], start_time="[07:23]")
+    assert ch.start_time == "[07:23]"
+
+
+def test_lesson_result_old_json_chapter_missing_start_time():
+    """Old SQLite blobs whose chapters lack start_time must still validate."""
+    from app.models import LessonResult
+
+    blob = {
+        "summary": "s",
+        "chapters": [{"title": "ch1", "content": "...", "key_points": []}],
+        "quiz": [],
+        "language": "he",
+    }
+    r = LessonResult.model_validate(blob)
+    assert r.chapters[0].start_time is None
+
+
 # ── content_type ──────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("ctype", ["lecture", "meeting", "discussion"])
