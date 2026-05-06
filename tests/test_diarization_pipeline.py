@@ -29,7 +29,7 @@ async def test_summarize_transcript_runs_diarize_then_synth_then_extract(monkeyp
         assert transcript == "raw transcript"
         return ("Speaker A: raw transcript", {"Speaker A": "אסף"})
 
-    def fake_synth(text):
+    def fake_synth(text, supplementary_context=None):
         order.append(f"synth({text})")
         return (LessonResult(summary="ok", content_type="meeting"), "raw S")
 
@@ -73,7 +73,7 @@ async def test_summarize_transcript_diarization_failure_falls_back_to_raw(monkey
     def fake_diarize_fails(transcript):
         raise ValueError("simulated diarization JSON parse failure")
 
-    def fake_synth(text):
+    def fake_synth(text, supplementary_context=None):
         received_by_downstream.append(text)
         return (LessonResult(summary="ok"), "raw")
 
@@ -117,7 +117,7 @@ async def test_summarize_transcript_skips_diarization_when_flag_disabled(monkeyp
         diarize_called["n"] += 1
         return ("Speaker A: x", {})
 
-    def fake_synth(text):
+    def fake_synth(text, supplementary_context=None):
         return (LessonResult(summary="ok"), "raw")
 
     def fake_extract(text):
@@ -160,7 +160,7 @@ async def test_summarize_audio_does_not_run_diarization(monkeypatch):
     monkeypatch.setattr(s, "_delete_gemini_file", lambda f: None)
     monkeypatch.setattr(
         s, "_synthesize_audio_capture",
-        lambda f, cb=None: (LessonResult(summary="audio summary"), "raw"),
+        lambda f, cb=None, supp=None: (LessonResult(summary="audio summary"), "raw"),
     )
     monkeypatch.setattr(
         s, "_extract_audio_capture",

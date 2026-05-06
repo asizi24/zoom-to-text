@@ -90,6 +90,6 @@ def build_pdf(task: TaskResponse) -> bytes:
     """
     from weasyprint import HTML  # lazy: avoids hard error at module load time
 
-    md = build_obsidian_markdown(task)
+    md = build_obsidian_markdown(task, include_transcript=False)
     html = _to_html(md)
     return HTML(string=html).write_pdf()

@@ -7,6 +7,7 @@ GET  /api/tasks          — list recent jobs
 GET  /api/tasks/{id}     — get job status + result
 DELETE /api/tasks/{id}   — delete a job record
 """
+import asyncio
 import json
 import re
 import uuid
@@ -21,9 +22,10 @@ from pydantic import BaseModel, Field
 from app import state
 from app.api.deps import get_current_user, enforce_rate_limit
 from app.config import settings
-from app.models import CramGuideRequest, ProcessingMode, TaskCreate, TaskResponse
+from app.models import CramGuideRequest, ProcessingMode, TaskCreate, TaskResponse, TaskStatus
 from app.services import anki_export, processor, summarizer, text_extractor
 from app.services.exporters.markdown import build_obsidian_markdown
+from app.services.task_service import prepare_supplementary_context
 from app.services.llm_providers import get_provider
 from app.rate_limit import limiter
 
@@ -32,11 +34,6 @@ router = APIRouter()
 
 # Allowed audio/video extensions for upload
 _ALLOWED_EXTENSIONS = {".mp3", ".mp4", ".m4a", ".wav", ".mkv", ".webm", ".avi"}
-
-# Allowed supplementary material extensions (slides, handouts, readings)
-_ALLOWED_SUPP_EXTENSIONS = {".pdf", ".docx", ".html", ".htm", ".txt", ".md"}
-MAX_SUPP_FILES = 5
-MAX_SUPP_FILE_BYTES = 10 * 1024 * 1024  # 10 MB per file
 
 
 # ── Rate-limit string helper ──────────────────────────────────────────────────────
@@ -102,44 +99,7 @@ async def create_task_from_url_with_materials(
     Gemini prompt as reference material to improve summary and exam quality.
     """
     task_id = str(uuid.uuid4())
-
-    # ── Supplementary materials (optional) ────────────────────────────────────
-    supplementary_context: str | None = None
-    if supplementary_files:
-        if len(supplementary_files) > MAX_SUPP_FILES:
-            raise HTTPException(
-                status_code=400,
-                detail=f"יותר מדי קבצי עזר. מקסימום {MAX_SUPP_FILES} קבצים.",
-            )
-        supp_pairs: list[tuple[str, str]] = []
-        settings.downloads_dir.mkdir(parents=True, exist_ok=True)
-        for sf in supplementary_files:
-            sf_name = Path(sf.filename).name if sf.filename else "material"
-            sf_ext = Path(sf_name).suffix.lower()
-            if sf_ext not in _ALLOWED_SUPP_EXTENSIONS:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"סוג קובץ עזר לא נתמך: {sf_ext}. קבצים נתמכים: PDF, DOCX, HTML, TXT, MD",
-                )
-            sf_content = await sf.read()
-            if len(sf_content) > MAX_SUPP_FILE_BYTES:
-                raise HTTPException(
-                    status_code=413,
-                    detail=f"קובץ עזר גדול מדי: {sf_name}. מקסימום 10 MB לקובץ.",
-                )
-            sf_path = settings.downloads_dir / f"{task_id}_supp_{sf_name}"
-            async with aiofiles.open(sf_path, "wb") as f_supp:
-                await f_supp.write(sf_content)
-            supp_pairs.append((str(sf_path), sf_name))
-        try:
-            supplementary_context = text_extractor.extract_text_from_files(supp_pairs)
-        finally:
-            for sf_path_str, _ in supp_pairs:
-                try:
-                    Path(sf_path_str).unlink(missing_ok=True)
-                except Exception:
-                    pass
-
+    supplementary_context = await prepare_supplementary_context(task_id, supplementary_files)
     task = await state.create_task(task_id, url, user_id=user_id)
     background_tasks.add_task(
         processor.run_pipeline,
@@ -205,42 +165,7 @@ async def create_task_from_upload(
             file_path.unlink()
         raise
 
-    # ── Supplementary materials (optional) ────────────────────────────────────
-    supplementary_context: str | None = None
-    if supplementary_files:
-        if len(supplementary_files) > MAX_SUPP_FILES:
-            raise HTTPException(
-                status_code=400,
-                detail=f"יותר מדי קבצי עזר. מקסימום {MAX_SUPP_FILES} קבצים.",
-            )
-        supp_pairs: list[tuple[str, str]] = []
-        for sf in supplementary_files:
-            sf_name = Path(sf.filename).name if sf.filename else "material"
-            sf_ext = Path(sf_name).suffix.lower()
-            if sf_ext not in _ALLOWED_SUPP_EXTENSIONS:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"סוג קובץ עזר לא נתמך: {sf_ext}. קבצים נתמכים: PDF, DOCX, HTML, TXT, MD",
-                )
-            sf_content = await sf.read()
-            if len(sf_content) > MAX_SUPP_FILE_BYTES:
-                raise HTTPException(
-                    status_code=413,
-                    detail=f"קובץ עזר גדול מדי: {sf_name}. מקסימום 10 MB לקובץ.",
-                )
-            sf_path = settings.downloads_dir / f"{task_id}_supp_{sf_name}"
-            async with aiofiles.open(sf_path, "wb") as f_supp:
-                await f_supp.write(sf_content)
-            supp_pairs.append((str(sf_path), sf_name))
-        try:
-            supplementary_context = text_extractor.extract_text_from_files(supp_pairs)
-        finally:
-            for sf_path_str, _ in supp_pairs:
-                try:
-                    Path(sf_path_str).unlink(missing_ok=True)
-                except Exception:
-                    pass
-
+    supplementary_context = await prepare_supplementary_context(task_id, supplementary_files)
     task = await state.create_task(task_id, f"upload:{safe_name}", user_id=user_id)
 
     background_tasks.add_task(
@@ -278,6 +203,63 @@ async def get_task(task_id: str, user_id: str = Depends(get_current_user)):
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
     return task
+
+
+_TERMINAL_STATUSES = {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}
+
+
+@router.get("/tasks/{task_id}/events")
+async def task_events(task_id: str, user_id: str = Depends(get_current_user)):
+    """
+    Stream task progress as Server-Sent Events.
+
+    Emits one JSON event per poll cycle until the task reaches a terminal state
+    (completed / failed / cancelled), then closes the stream.
+
+    Event shape:
+      data: {"progress": N, "message": "...", "status": "...", "done": true/false,
+             "result": {...}, "has_audio": true/false}
+
+    The "result" and "has_audio" fields are only present on the final done=true event
+    when status is "completed".
+
+    The frontend should replace its 2-second polling loop with:
+      const es = new EventSource('/api/tasks/{id}/events', {withCredentials: true});
+      es.onmessage = e => { const d = JSON.parse(e.data); updateProgress(d); if (d.done) es.close(); };
+    """
+    task = await state.get_task_for_user(task_id, user_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    async def _generate():
+        while True:
+            t = await state.get_task_for_user(task_id, user_id)
+            if t is None:
+                break
+
+            terminal = t.status in _TERMINAL_STATUSES
+            payload: dict = {
+                "progress": t.progress,
+                "message": t.message or "",
+                "status": t.status,
+                "done": terminal,
+            }
+            if terminal and t.status == TaskStatus.COMPLETED:
+                payload["has_audio"] = t.has_audio
+                if t.result is not None:
+                    payload["result"] = t.result.model_dump()
+
+            yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+            if terminal:
+                break
+            await asyncio.sleep(0.8)
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.post("/tasks/{task_id}/cancel", status_code=200)

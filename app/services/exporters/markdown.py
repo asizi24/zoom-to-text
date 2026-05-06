@@ -21,7 +21,7 @@ from app.models import LessonResult, TaskResponse
 
 # ── Public API ──────────────────────────────────────────────────────────────
 
-def build_obsidian_markdown(task: TaskResponse) -> str:
+def build_obsidian_markdown(task: TaskResponse, *, include_transcript: bool = True) -> str:
     """Render the full Obsidian-flavored Markdown for a completed task."""
     if task.result is None:
         # Defensive — the API layer is expected to 400 before reaching here
@@ -109,14 +109,15 @@ def build_obsidian_markdown(task: TaskResponse) -> str:
         parts.append("</details>")
         parts.append("")
 
-    transcript_text = result.diarized_transcript or result.transcript
-    if transcript_text:
-        if result.diarized_transcript:
-            parts.append("## 🗣️ תמלול עם דוברים")
-        else:
-            parts.append("## 📄 תמלול")
-        parts.append(transcript_text.strip())
-        parts.append("")
+    if include_transcript:
+        transcript_text = result.diarized_transcript or result.transcript
+        if transcript_text:
+            if result.diarized_transcript:
+                parts.append("## 🗣️ תמלול עם דוברים")
+            else:
+                parts.append("## 📄 תמלול")
+            parts.append(transcript_text.strip())
+            parts.append("")
 
     return "\n".join(parts).rstrip() + "\n"
 

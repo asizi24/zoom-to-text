@@ -82,19 +82,24 @@ def test_cancel_is_idempotent(authed_client):
 
 # ── is_task_cancelled helper ───────────────────────────────────────────────────
 
-def test_is_task_cancelled_returns_true_after_cancel():
-    _seed_pending_task("cancel-flag-check")
-
-    async def _run():
-        await state_module.cancel_task("cancel-flag-check")
-        return await state_module.is_task_cancelled("cancel-flag-check")
-
-    result = asyncio.run(_run())
+@pytest.mark.asyncio
+async def test_is_task_cancelled_returns_true_after_cancel(monkeypatch, tmp_path):
+    monkeypatch.setattr(state_module, "DB_PATH", tmp_path / "cancel_flag.db")
+    monkeypatch.setattr(state_module, "_db", None, raising=False)
+    await state_module.init_db()
+    await state_module.create_task("cancel-flag-check", url="http://test/rec", user_id="test-user")
+    await state_module.cancel_task("cancel-flag-check")
+    result = await state_module.is_task_cancelled("cancel-flag-check")
     assert result is True
+    await state_module.close_db()
 
 
-def test_is_task_cancelled_returns_false_for_pending():
-    _seed_pending_task("cancel-flag-pending")
-
-    result = asyncio.run(state_module.is_task_cancelled("cancel-flag-pending"))
+@pytest.mark.asyncio
+async def test_is_task_cancelled_returns_false_for_pending(monkeypatch, tmp_path):
+    monkeypatch.setattr(state_module, "DB_PATH", tmp_path / "cancel_pending.db")
+    monkeypatch.setattr(state_module, "_db", None, raising=False)
+    await state_module.init_db()
+    await state_module.create_task("cancel-flag-pending", url="http://test/rec", user_id="test-user")
+    result = await state_module.is_task_cancelled("cancel-flag-pending")
     assert result is False
+    await state_module.close_db()

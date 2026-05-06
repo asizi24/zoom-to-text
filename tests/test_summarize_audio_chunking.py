@@ -35,7 +35,7 @@ def test_short_audio_uses_direct_path(monkeypatch):
         direct_called["flag"] = True
         return _FakeAudioFile()
 
-    async def fake_chunked(path, progress_cb):
+    async def fake_chunked(path, progress_cb, supplementary_context=None):
         chunked_called["flag"] = True
         return LessonResult(summary="from-chunked")
 
@@ -44,7 +44,7 @@ def test_short_audio_uses_direct_path(monkeypatch):
     monkeypatch.setattr(summarizer, "_is_gemini_provider", lambda: True)
     monkeypatch.setattr(
         summarizer, "_synthesize_audio_capture",
-        lambda audio_file, progress_cb=None: (LessonResult(summary="direct"), "raw"),
+        lambda audio_file, progress_cb=None, supp=None: (LessonResult(summary="direct"), "raw"),
     )
     monkeypatch.setattr(
         summarizer, "_extract_audio_capture",
@@ -73,7 +73,7 @@ def test_long_audio_routes_to_chunked_path(monkeypatch):
         direct_called["flag"] = True
         return _FakeAudioFile()
 
-    async def fake_chunked(path, progress_cb):
+    async def fake_chunked(path, progress_cb, supplementary_context=None):
         return LessonResult(summary="from-chunked-path")
 
     monkeypatch.setattr(summarizer, "_upload_audio_to_gemini", fake_upload)
@@ -97,7 +97,7 @@ def test_unknown_duration_falls_back_to_direct_path(monkeypatch):
     )
     monkeypatch.setattr(
         summarizer, "_synthesize_audio_capture",
-        lambda audio_file, progress_cb=None: (LessonResult(summary="direct-fallback"), "raw"),
+        lambda audio_file, progress_cb=None, supp=None: (LessonResult(summary="direct-fallback"), "raw"),
     )
     monkeypatch.setattr(
         summarizer, "_extract_audio_capture",
@@ -143,7 +143,7 @@ def test_chunked_path_concatenates_transcripts_and_summarizes(monkeypatch):
 
     seen_transcript = {"value": None}
 
-    async def fake_summarize_transcript(transcript, progress_cb=None):
+    async def fake_summarize_transcript(transcript, progress_cb=None, supplementary_context=None):
         seen_transcript["value"] = transcript
         return LessonResult(summary="merged-summary")
 
@@ -254,7 +254,7 @@ def test_summarize_audio_falls_back_to_chunked_on_token_exceeded(monkeypatch):
         lambda path, progress_cb=None: _FakeAudioFile(),
     )
 
-    def boom(audio_file, progress_cb=None):
+    def boom(audio_file, progress_cb=None, supplementary_context=None):
         raise RuntimeError(
             "400 INVALID_ARGUMENT. The input token count exceeds the "
             "maximum number of tokens allowed 1048576."
@@ -269,7 +269,7 @@ def test_summarize_audio_falls_back_to_chunked_on_token_exceeded(monkeypatch):
 
     chunked_args = {"path": None}
 
-    async def fake_chunked(path, progress_cb):
+    async def fake_chunked(path, progress_cb, supplementary_context=None):
         chunked_args["path"] = path
         return LessonResult(summary="recovered-via-chunked")
 
@@ -294,7 +294,7 @@ def test_summarize_audio_does_not_fall_back_on_other_errors(monkeypatch):
         lambda path, progress_cb=None: _FakeAudioFile(),
     )
 
-    def boom(audio_file, progress_cb=None):
+    def boom(audio_file, progress_cb=None, supplementary_context=None):
         raise RuntimeError("some other API error")
 
     monkeypatch.setattr(summarizer, "_synthesize_audio_capture", boom)
@@ -306,7 +306,7 @@ def test_summarize_audio_does_not_fall_back_on_other_errors(monkeypatch):
 
     fallback_called = {"flag": False}
 
-    async def fake_chunked(path, progress_cb):
+    async def fake_chunked(path, progress_cb, supplementary_context=None):
         fallback_called["flag"] = True
         return LessonResult(summary="should-not-be-called")
 
@@ -349,7 +349,7 @@ def test_chunked_path_runs_chunks_in_parallel(monkeypatch):
         summarizer, "_transcribe_audio_chunk_via_gemini", fake_transcribe
     )
 
-    async def fake_summarize_transcript(transcript, progress_cb=None):
+    async def fake_summarize_transcript(transcript, progress_cb=None, supplementary_context=None):
         return LessonResult(summary="merged")
 
     monkeypatch.setattr(

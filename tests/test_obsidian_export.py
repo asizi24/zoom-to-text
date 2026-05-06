@@ -363,3 +363,31 @@ def test_endpoint_400_when_no_result(client):
         assert resp.status_code == 400
     finally:
         app.dependency_overrides.pop(deps.get_current_user, None)
+
+
+# ── include_transcript flag (Task: print/PDF fix) ─────────────────────────────
+
+def test_include_transcript_false_omits_transcript_section():
+    """With include_transcript=False the raw transcript must not appear in output."""
+    r = LessonResult(summary="x", transcript="raw transcript text here")
+    md = build_obsidian_markdown(_make_task(r), include_transcript=False)
+    assert "raw transcript text here" not in md
+    assert "## 📄 תמלול" not in md
+
+
+def test_include_transcript_false_omits_diarized_transcript():
+    """With include_transcript=False diarized transcripts are also excluded."""
+    r = LessonResult(
+        summary="x",
+        diarized_transcript="Speaker A: שלום",
+    )
+    md = build_obsidian_markdown(_make_task(r), include_transcript=False)
+    assert "Speaker A: שלום" not in md
+    assert "## 🗣️ תמלול עם דוברים" not in md
+
+
+def test_include_transcript_default_includes_transcript():
+    """Default behavior (include_transcript=True) must still include the transcript."""
+    r = LessonResult(summary="x", transcript="should appear by default")
+    md = build_obsidian_markdown(_make_task(r))
+    assert "should appear by default" in md

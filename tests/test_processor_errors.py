@@ -97,7 +97,7 @@ async def test_run_pipeline_from_file_persists_user_message_on_summarize_failure
     monkeypatch.setattr(processor.state, "set_audio_path", lambda *a, **kw: asyncio.sleep(0))
 
     # Make summarize_audio fail with a Gemini 429
-    async def boom_summarize(audio_path, progress_cb=None):
+    async def boom_summarize(audio_path, progress_cb=None, supplementary_context=None):
         raise RuntimeError("Gemini API HTTP 429: quota exceeded")
 
     monkeypatch.setattr(processor.summarizer, "summarize_audio", boom_summarize)
@@ -144,7 +144,7 @@ async def test_run_pipeline_from_file_classifies_unknown_failure(
     monkeypatch.setattr(processor.state, "fail_task", fake_fail)
     monkeypatch.setattr(processor.state, "complete_task", lambda *a, **k: asyncio.sleep(0))
 
-    async def boom(audio_path, progress_cb=None):
+    async def boom(audio_path, progress_cb=None, supplementary_context=None):
         raise ValueError("some weird internal thing")
 
     monkeypatch.setattr(processor.summarizer, "summarize_audio", boom)

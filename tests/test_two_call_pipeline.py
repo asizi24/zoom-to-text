@@ -110,7 +110,7 @@ async def test_summarize_transcript_runs_both_calls_and_merges(monkeypatch):
     # Stub synthesis: returns parsed LessonResult and raw text
     synth_called = {"n": 0}
 
-    def fake_synth_text_capture(transcript):
+    def fake_synth_text_capture(transcript, supplementary_context=None):
         synth_called["n"] += 1
         return (
             LessonResult(summary="meeting summary", content_type="meeting"),
@@ -151,7 +151,7 @@ async def test_summarize_transcript_extraction_failure_graceful_skip(monkeypatch
     from app.models import LessonResult
     from app.services import summarizer as s
 
-    def fake_synth_text_capture(transcript):
+    def fake_synth_text_capture(transcript, supplementary_context=None):
         return (LessonResult(summary="ok"), "raw")
 
     def fake_extract_fails(transcript):
@@ -174,7 +174,7 @@ async def test_summarize_transcript_synthesis_failure_propagates(monkeypatch):
     """If synthesis fails, the whole task fails (no graceful skip)."""
     from app.services import summarizer as s
 
-    def fake_synth_fails(transcript):
+    def fake_synth_fails(transcript, supplementary_context=None):
         raise RuntimeError("Gemini exploded")
 
     def fake_extract_text(transcript):
@@ -199,7 +199,7 @@ async def test_summarize_transcript_raw_responses_persisted_when_flag_on(monkeyp
 
     monkeypatch.setattr(settings, "llm_debug_raw_responses", True, raising=False)
 
-    def fake_synth(transcript):
+    def fake_synth(transcript, supplementary_context=None):
         return (LessonResult(summary="s"), "S-RAW")
 
     def fake_extract(transcript):
@@ -243,7 +243,7 @@ async def test_summarize_audio_runs_both_calls_and_merges(monkeypatch):
     def fake_cleanup(audio_file):
         cleanup_called["n"] += 1
 
-    def fake_synth_audio(audio_file, progress_cb=None):
+    def fake_synth_audio(audio_file, progress_cb=None, supplementary_context=None):
         synth_called["n"] += 1
         assert audio_file is fake_audio_handle
         return (LessonResult(summary="audio summary", content_type="lecture"), "raw S")
@@ -290,7 +290,7 @@ async def test_summarize_audio_cleans_up_even_when_extraction_fails(monkeypatch)
     monkeypatch.setattr(s, "_delete_gemini_file", fake_cleanup)
     monkeypatch.setattr(
         s, "_synthesize_audio_capture",
-        lambda f, cb=None: (LessonResult(summary="s"), "raw"),
+        lambda f, cb=None, supp=None: (LessonResult(summary="s"), "raw"),
     )
     monkeypatch.setattr(
         s, "_extract_audio_capture",
