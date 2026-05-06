@@ -3,10 +3,7 @@ import pytest
 
 
 def test_capabilities_returns_gemini_defaults(client):
-    """With default settings, the endpoint reports Gemini + all four modes."""
-    # The /api/capabilities endpoint is public (no auth) so the UI can read
-    # provider info before the user logs in. Test does not need the auth
-    # header that the protected endpoints require.
+    """With default settings (no OpenAI key), reports Gemini + modes except whisper_api."""
     resp = client.get("/api/capabilities")
     assert resp.status_code == 200
     data = resp.json()
@@ -15,8 +12,26 @@ def test_capabilities_returns_gemini_defaults(client):
     assert data["supports_streaming"] is True
     assert "gemini_direct" in data["available_modes"]
     assert "whisper_local" in data["available_modes"]
-    assert "whisper_api" in data["available_modes"]
     assert "ivrit_ai" in data["available_modes"]
+    # whisper_api requires OPENAI_API_KEY — absent in test env, so excluded
+
+
+def test_capabilities_excludes_whisper_api_when_no_openai_key(client, monkeypatch):
+    """whisper_api must be absent from available_modes when OPENAI_API_KEY is empty."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "openai_api_key", "")
+    resp = client.get("/api/capabilities")
+    assert resp.status_code == 200
+    assert "whisper_api" not in resp.json()["available_modes"]
+
+
+def test_capabilities_includes_whisper_api_when_key_set(client, monkeypatch):
+    """whisper_api appears in available_modes when OPENAI_API_KEY is non-empty."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "openai_api_key", "sk-test-key-123")
+    resp = client.get("/api/capabilities")
+    assert resp.status_code == 200
+    assert "whisper_api" in resp.json()["available_modes"]
 
 
 def test_capabilities_hides_gemini_direct_for_openrouter(client, monkeypatch):

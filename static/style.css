@@ -288,6 +288,85 @@ body {
     border-right: 4px solid #ef4444;
 }
 
+/* Auxiliary materials file picker */
+.supp-section {
+    margin-top: 14px;
+}
+
+.supp-label {
+    display: block;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+}
+
+.supp-file-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    border: 1.5px solid var(--border-color);
+    border-radius: 10px;
+    background: var(--input-bg);
+    padding: 7px 12px;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.supp-file-row:focus-within {
+    border-color: var(--accent-from);
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+}
+
+.supp-pick-btn {
+    flex-shrink: 0;
+    padding: 4px 14px;
+    background: linear-gradient(135deg, var(--accent-from), var(--accent-to));
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    cursor: pointer;
+    transition: opacity 0.15s ease, transform 0.1s ease;
+    white-space: nowrap;
+}
+
+.supp-pick-btn:hover {
+    opacity: 0.88;
+    transform: translateY(-1px);
+}
+
+.supp-pick-btn:active {
+    transform: translateY(0);
+    opacity: 1;
+}
+
+.supp-file-names {
+    flex: 1;
+    font-size: 13px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    direction: ltr;
+    min-width: 0;
+}
+
+.supp-file-names.has-files {
+    color: var(--text-primary);
+    font-weight: 500;
+}
+
+.supp-hint {
+    margin-top: 6px;
+    font-size: 11px;
+    color: var(--text-secondary);
+    opacity: 0.6;
+}
+
 /* Responsive adjustments */
 @media (max-width: 768px) {
     .dark-mode-toggle {

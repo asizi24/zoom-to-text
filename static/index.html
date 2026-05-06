@@ -1673,18 +1673,14 @@
              placeholder="https://admin-ort-org-il.zoom.us/rec/share/..." />
     </div>
     <p class="url-hint">💡 לקישורי Zoom פרטיים — השתמש בתוסף Chrome לשליחה אוטומטית</p>
-    <div class="supp-section" style="margin-top:12px;">
-      <label class="supp-label" style="display:block;font-size:13px;color:#666;margin-bottom:6px;">
-        📎 חומרי עזר (אופציונלי) — מצגת, דף קריאה, PDF
-      </label>
-      <input type="file"
-             id="linkSuppFiles"
-             multiple
-             accept=".pdf,.docx,.html,.htm,.txt,.md"
-             style="font-size:13px;width:100%;">
-      <div style="font-size:11px;color:#999;margin-top:4px;">
-        עד 5 קבצים • PDF, DOCX, HTML, TXT, MD • עד 10 MB לקובץ
+    <div class="supp-section">
+      <label class="supp-label">📎 חומרי עזר (אופציונלי) — מצגת, דף קריאה, PDF</label>
+      <div class="supp-file-row">
+        <button type="button" class="supp-pick-btn" onclick="document.getElementById('linkSuppFiles').click()">בחר קבצים</button>
+        <span class="supp-file-names" id="linkSuppNames">לא נבחרו קבצים</span>
+        <input type="file" id="linkSuppFiles" multiple accept=".pdf,.docx,.html,.htm,.txt,.md" style="display:none">
       </div>
+      <div class="supp-hint">עד 5 קבצים • PDF, DOCX, HTML, TXT, MD • עד 10 MB לקובץ</div>
     </div>
   </div>
 
@@ -1700,18 +1696,14 @@
         <span>📎</span><span id="file-name"></span>
       </div>
     </div>
-    <div class="supp-section" style="margin-top:12px;">
-      <label class="supp-label" style="display:block;font-size:13px;color:#666;margin-bottom:6px;">
-        📎 חומרי עזר (אופציונלי) — מצגת, דף קריאה, PDF
-      </label>
-      <input type="file"
-             id="uploadSuppFiles"
-             multiple
-             accept=".pdf,.docx,.html,.htm,.txt,.md"
-             style="font-size:13px;width:100%;">
-      <div style="font-size:11px;color:#999;margin-top:4px;">
-        עד 5 קבצים • PDF, DOCX, HTML, TXT, MD • עד 10 MB לקובץ
+    <div class="supp-section">
+      <label class="supp-label">📎 חומרי עזר (אופציונלי) — מצגת, דף קריאה, PDF</label>
+      <div class="supp-file-row">
+        <button type="button" class="supp-pick-btn" onclick="document.getElementById('uploadSuppFiles').click()">בחר קבצים</button>
+        <span class="supp-file-names" id="uploadSuppNames">לא נבחרו קבצים</span>
+        <input type="file" id="uploadSuppFiles" multiple accept=".pdf,.docx,.html,.htm,.txt,.md" style="display:none">
       </div>
+      <div class="supp-hint">עד 5 קבצים • PDF, DOCX, HTML, TXT, MD • עד 10 MB לקובץ</div>
     </div>
   </div>
 
@@ -2050,6 +2042,21 @@
     if (e.dataTransfer.files[0]) setFile(e.dataTransfer.files[0]);
   });
   fileInput.addEventListener('change', e => { if (e.target.files[0]) setFile(e.target.files[0]); });
+
+  function _updateSuppNames(inputId, spanId) {
+    const files = document.getElementById(inputId)?.files || [];
+    const span  = document.getElementById(spanId);
+    if (!span) return;
+    if (files.length === 0) {
+      span.textContent = 'לא נבחרו קבצים';
+      span.classList.remove('has-files');
+    } else {
+      span.textContent = Array.from(files).map(f => f.name).join(', ');
+      span.classList.add('has-files');
+    }
+  }
+  document.getElementById('linkSuppFiles').addEventListener('change',  () => _updateSuppNames('linkSuppFiles',   'linkSuppNames'));
+  document.getElementById('uploadSuppFiles').addEventListener('change', () => _updateSuppNames('uploadSuppFiles', 'uploadSuppNames'));
 
   function setFile(f) {
     selectedFile = f;

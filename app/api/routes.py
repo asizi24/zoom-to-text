@@ -766,9 +766,10 @@ _ALL_MODES = ["gemini_direct", "whisper_local", "whisper_api", "ivrit_ai"]
 
 def _available_modes_for(provider) -> list[str]:
     """Filter the four processing modes by what the provider can actually do."""
-    if provider.supports_audio_upload:
-        return list(_ALL_MODES)
-    return [m for m in _ALL_MODES if m != "gemini_direct"]
+    modes = list(_ALL_MODES) if provider.supports_audio_upload else [m for m in _ALL_MODES if m != "gemini_direct"]
+    if not settings.openai_api_key:
+        modes = [m for m in modes if m != "whisper_api"]
+    return modes
 
 
 @router.get("/capabilities")
