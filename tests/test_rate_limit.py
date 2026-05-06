@@ -28,13 +28,17 @@ import io
 import pytest
 
 
-# ── Limiter reset ─────────────────────────────────────────────────────────────
+# ── Limiter reset + user rate-limit bypass ────────────────────────────────────
 
 @pytest.fixture(autouse=True)
-def _reset_limiter():
-    """Clear the in-memory limiter state before each test to prevent bleed-over."""
+def _reset_limiter(monkeypatch):
+    """Clear the in-memory limiter state and disable per-user daily limit."""
     from app.rate_limit import limiter
+    from app.config import settings
     limiter._windows.clear()
+    # These tests exercise the per-IP limiter only; disable the per-user daily
+    # limit so it doesn't interfere when a test makes more than 2 requests.
+    monkeypatch.setattr(settings, "user_daily_task_limit", 0)
     yield
     limiter._windows.clear()
 

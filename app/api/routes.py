@@ -19,9 +19,9 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app import state
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, enforce_rate_limit
 from app.config import settings
-from app.models import ProcessingMode, TaskCreate, TaskResponse
+from app.models import CramGuideRequest, ProcessingMode, TaskCreate, TaskResponse
 from app.services import anki_export, processor, summarizer, text_extractor
 from app.services.exporters.markdown import build_obsidian_markdown
 from app.services.llm_providers import get_provider
@@ -55,7 +55,7 @@ async def create_task(
     request: Request,
     task_in: TaskCreate,
     background_tasks: BackgroundTasks,
-    user_id: str = Depends(get_current_user),
+    user_id: str = Depends(enforce_rate_limit),
 ):
     """
     Submit a Zoom recording URL for processing.
@@ -92,7 +92,7 @@ async def create_task_from_url_with_materials(
     language: str = Form("he"),
     cookies: str | None = Form(None),
     supplementary_files: list[UploadFile] = File(default=[]),
-    user_id: str = Depends(get_current_user),
+    user_id: str = Depends(enforce_rate_limit),
 ):
     """
     Submit a Zoom recording URL for processing, with optional supplementary materials.
@@ -164,7 +164,7 @@ async def create_task_from_upload(
     mode: ProcessingMode = Form(ProcessingMode.GEMINI_DIRECT),
     language: str = Form("he"),
     supplementary_files: list[UploadFile] = File(default=[]),
-    user_id: str = Depends(get_current_user),
+    user_id: str = Depends(enforce_rate_limit),
 ):
     """
     Upload an audio or video file directly for processing.
@@ -802,3 +802,85 @@ async def get_capabilities() -> dict:
         "supports_streaming": p.supports_streaming,
         "available_modes": _available_modes_for(p),
     }
+
+
+# ── Per-task content search ───────────────────────────────────────────────────
+
+@router.get("/tasks/{task_id}/search")
+async def search_task_content(
+    task_id: str,
+    q: str = Query(..., min_length=1, max_length=200, description="Search term"),
+    user_id: str = Depends(get_current_user),
+):
+    """
+    Search within a completed task's summary, chapters, and transcript.
+
+    Returns a list of matching excerpts with surrounding context and position
+    metadata.  Each hit has: type, context, position, and (for chapters)
+    chapter_title, chapter_index, chapter_start_time.
+    """
+    hits = await state.search_task_content(task_id, user_id, q)
+    if hits is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if hits == [] and not (await state.get_task_for_user(task_id, user_id)):
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    # Distinguish "task exists but has no result" from "no matches"
+    task = await state.get_task_for_user(task_id, user_id)
+    if task and task.result is None:
+        raise HTTPException(status_code=400, detail="Task has no result yet")
+
+    return {"query": q, "results": hits}
+
+
+# ── Multi-Lecture Cram Guide ──────────────────────────────────────────────────
+
+@router.post("/study-guide")
+async def create_study_guide(
+    body: CramGuideRequest,
+    user_id: str = Depends(get_current_user),
+):
+    """
+    Synthesize multiple completed tasks into a single combined study guide + exam.
+
+    Accepts 2-10 task IDs owned by the authenticated user.  All tasks must be
+    in `completed` status (have a result).  The LLM call is synchronous — expect
+    30-90 seconds for large sets of lectures.
+    """
+    # Verify ownership and completeness of all tasks
+    tasks = []
+    for tid in body.task_ids:
+        t = await state.get_task_for_user(tid, user_id)
+        if t is None:
+            raise HTTPException(status_code=404, detail=f"Task not found: {tid}")
+        if t.result is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Task {tid} is not complete yet — wait for processing to finish",
+            )
+        tasks.append(t)
+
+    # Build lesson dicts for the summarizer
+    lessons = []
+    for t in tasks:
+        r = t.result
+        lessons.append({
+            "title": t.url or t.task_id,
+            "summary": r.summary,
+            "chapters": [
+                {
+                    "title": ch.title,
+                    "content": ch.content,
+                    "key_points": ch.key_points,
+                }
+                for ch in r.chapters
+            ],
+        })
+
+    try:
+        guide = await summarizer.generate_cram_guide(lessons)
+    except Exception as exc:
+        logger.error(f"Cram guide generation failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    return guide

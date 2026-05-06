@@ -16,7 +16,7 @@ import asyncio
 import uuid
 import aiosqlite
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -26,6 +26,11 @@ from app.models import TaskStatus, TaskResponse, LessonResult
 logger = logging.getLogger(__name__)
 
 DB_PATH = settings.data_dir / "tasks.db"
+
+
+def _now() -> datetime:
+    """Return current UTC time. Isolated so tests can monkeypatch it."""
+    return datetime.now(timezone.utc)
 
 # ── Shared connection ────────────────────────────────────────────────────────
 _db: aiosqlite.Connection | None = None
@@ -163,6 +168,22 @@ async def init_db():
     # Create index now that user_id column is guaranteed to exist
     await db.execute(CREATE_TASKS_INDEX_SQL)
     await db.commit()
+
+    # Migrate: add rate-limiting columns to users table if needed
+    async with db.execute("PRAGMA table_info(users)") as cursor:
+        user_cols = [row[1] for row in await cursor.fetchall()]
+    if "request_timestamps" not in user_cols:
+        await db.execute("ALTER TABLE users ADD COLUMN request_timestamps TEXT DEFAULT '[]'")
+        await db.commit()
+        logger.info("Migrated users table: added request_timestamps column")
+    if "block_until" not in user_cols:
+        await db.execute("ALTER TABLE users ADD COLUMN block_until TEXT")
+        await db.commit()
+        logger.info("Migrated users table: added block_until column")
+    if "is_banned" not in user_cols:
+        await db.execute("ALTER TABLE users ADD COLUMN is_banned INTEGER NOT NULL DEFAULT 0")
+        await db.commit()
+        logger.info("Migrated users table: added is_banned column")
 
     await _mark_interrupted_tasks_failed()
     await _purge_expired_lti_state()
@@ -527,6 +548,89 @@ async def delete_session(session_id: str):
     await db.commit()
 
 
+# ── Per-user rate limiting ─────────────────────────────────────────────────────
+
+async def get_user_email(user_id: str) -> Optional[str]:
+    """Return the email address for a user_id, or None if not found."""
+    db = await _get_db()
+    async with db.execute("SELECT email FROM users WHERE id=?", [user_id]) as cursor:
+        row = await cursor.fetchone()
+    return row["email"] if row else None
+
+
+async def check_and_record_request(user_id: str) -> str:
+    """
+    Atomically check rate-limit status and record a new request.
+
+    State machine:
+      is_banned=1           → "reject_banned"  (403)
+      blocked and not expired → ban now         → "ban_now"    (403)
+      block expired / no block, count >= limit  → block now    → "block_now"  (429)
+      count < limit         → record timestamp  → "allow"      (proceed)
+
+    Returns one of: "allow", "block_now", "ban_now", "reject_banned".
+    """
+    import json as _json
+
+    if settings.user_daily_task_limit <= 0:
+        return "allow"
+
+    db = await _get_db()
+    async with db.execute(
+        "SELECT request_timestamps, block_until, is_banned FROM users WHERE id=?",
+        [user_id],
+    ) as cursor:
+        row = await cursor.fetchone()
+
+    if row is None:
+        # Unknown user_id (e.g. test dependency override) — session already validated.
+        return "allow"
+
+    if row["is_banned"]:
+        return "reject_banned"
+
+    now = _now()
+
+    # Check active block
+    if row["block_until"]:
+        block_until_dt = datetime.fromisoformat(row["block_until"])
+        if now < block_until_dt:
+            # Still within block window → permanent ban
+            await db.execute("UPDATE users SET is_banned=1 WHERE id=?", [user_id])
+            await db.commit()
+            return "ban_now"
+        # Block has expired — fall through; old timestamps will be pruned below
+
+    # Prune timestamps older than 24 hours
+    cutoff = now - timedelta(hours=24)
+    raw = row["request_timestamps"] or "[]"
+    try:
+        timestamps: list[str] = _json.loads(raw)
+    except (ValueError, TypeError):
+        timestamps = []
+
+    fresh = [ts for ts in timestamps if datetime.fromisoformat(ts) > cutoff]
+
+    if len(fresh) >= settings.user_daily_task_limit:
+        # Quota exhausted → 24-hour block
+        block_until = (now + timedelta(hours=24)).isoformat()
+        await db.execute(
+            "UPDATE users SET block_until=?, request_timestamps=? WHERE id=?",
+            [block_until, _json.dumps(fresh, ensure_ascii=False), user_id],
+        )
+        await db.commit()
+        return "block_now"
+
+    # Within quota → record timestamp
+    fresh.append(now.isoformat())
+    await db.execute(
+        "UPDATE users SET request_timestamps=?, block_until=NULL WHERE id=?",
+        [_json.dumps(fresh, ensure_ascii=False), user_id],
+    )
+    await db.commit()
+    return "allow"
+
+
 # ── LTI 1.3 OIDC state (anti-replay; one-time use, ~5 min TTL) ───────────────
 
 async def store_lti_oidc_state(
@@ -685,6 +789,81 @@ async def clear_chat_history(task_id: str) -> None:
         "UPDATE tasks SET chat_history=NULL WHERE id=?", [task_id]
     )
     await db.commit()
+
+
+# ── Per-task content search ────────────────────────────────────────────────────────
+
+async def search_task_content(
+    task_id: str,
+    user_id: Optional[str],
+    query: str,
+    max_results: int = 20,
+) -> Optional[list[dict]]:
+    """
+    Search within a task's summary, chapters, and transcript for `query`.
+
+    Returns None if the task doesn't exist (or is not owned by user_id when
+    user_id is provided).  Returns an empty list when the task exists but has
+    no matches.  Each hit dict has:
+      type        — "summary" | "chapter" | "transcript"
+      context     — up to 200 chars around the match
+      position    — character offset of the match in the source string
+      chapter_title      (chapter hits only)
+      chapter_index      (chapter hits only)
+      chapter_start_time (chapter hits only, may be None)
+    """
+    if user_id:
+        task = await get_task_for_user(task_id, user_id)
+    else:
+        task = await get_task(task_id)
+
+    if task is None or task.result is None:
+        return None if (task is None) else []
+
+    q = query.lower()
+    hits: list[dict] = []
+    ctx_radius = 100  # chars of context on each side
+
+    def _excerpt(text: str, idx: int) -> str:
+        start = max(0, idx - ctx_radius)
+        end = min(len(text), idx + len(query) + ctx_radius)
+        return text[start:end]
+
+    # Summary
+    if task.result.summary:
+        src = task.result.summary
+        pos = src.lower().find(q)
+        if pos != -1:
+            hits.append({"type": "summary", "context": _excerpt(src, pos), "position": pos})
+
+    # Chapters (title + content + key_points joined)
+    for i, ch in enumerate(task.result.chapters or []):
+        src = f"{ch.title}\n{ch.content}\n" + "\n".join(ch.key_points or [])
+        pos = src.lower().find(q)
+        if pos != -1:
+            hits.append({
+                "type": "chapter",
+                "context": _excerpt(src, pos),
+                "position": pos,
+                "chapter_title": ch.title,
+                "chapter_index": i,
+                "chapter_start_time": ch.start_time,
+            })
+        if len(hits) >= max_results:
+            return hits
+
+    # Transcript (cap at multiple matches)
+    transcript = task.result.diarized_transcript or task.result.transcript or ""
+    if transcript:
+        search_from = 0
+        while len(hits) < max_results:
+            pos = transcript.lower().find(q, search_from)
+            if pos == -1:
+                break
+            hits.append({"type": "transcript", "context": _excerpt(transcript, pos), "position": pos})
+            search_from = pos + 1
+
+    return hits
 
 
 # ── Audio path tracking (Feature 7) ───────────────────────────────────────────────

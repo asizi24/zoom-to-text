@@ -136,6 +136,26 @@ class LessonResult(BaseModel):
     speaker_map:         Optional[dict[str, str]] = None  # {"Speaker A": "Asaf", ...} when names detected
 
 
+# ── Cram Guide schemas (Multi-Lecture Study Guide) ──────────────────────────────
+
+class CramChapter(BaseModel):
+    title:        str
+    summary:      str
+    key_concepts: list[str] = []
+
+
+class CramGuideResult(BaseModel):
+    overall_summary: str         = ""
+    key_themes:      list[str]   = []
+    chapters:        list[CramChapter]   = []
+    quiz:            list[QuizQuestion]  = []
+    lecture_count:   int         = 0
+
+
+class CramGuideRequest(BaseModel):
+    task_ids: list[str] = Field(..., min_length=2, max_length=10)
+
+
 # ── API request/response schemas ────────────────────────────────────────────────
 
 class TaskCreate(BaseModel):

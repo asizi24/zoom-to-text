@@ -41,6 +41,8 @@ from app.config import settings
 from app.models import (
     ActionItem,
     Chapter,
+    CramChapter,
+    CramGuideResult,
     Decision,
     Flashcard,
     LessonResult,
@@ -2038,3 +2040,110 @@ async def generate_flashcards(
     except asyncio.TimeoutError:
         logger.warning("Flashcards generation timed out — returning empty list")
         return []
+
+
+# ── Multi-Lecture Cram Guide ──────────────────────────────────────────────────────
+
+_CRAM_GUIDE_TIMEOUT = 180  # 3 minutes — synthesising multiple lectures can take time
+
+_CRAM_GUIDE_PROMPT = """\
+אתה פרופסור מומחה שמכין דף מידע (cheat-sheet) לבחינה עבור סטודנטים.
+
+קיבלת סיכומים של {n} שיעורים. משימתך:
+1. כתוב סיכום כולל (overall_summary) הממזג את כל הנושאים — 3-5 פסקאות.
+2. חלץ את הנושאים המרכזיים (key_themes) — רשימת 5-8 מילות מפתח.
+3. צור פרקים (chapters) — אחד לכל נושא ראשי. כל פרק: title, summary (2-3 משפטים), key_concepts (רשימה של 3-6 מונחים חשובים).
+4. צור שאלות בחינה (quiz) הכוללות 12-15 שאלות רב-ברירה המכסות את כל השיעורים. כל שאלה: question, options (4 תשובות), correct_answer (חייב להיות אחד מ-options), explanation.
+5. שים ב-lecture_count את מספר השיעורים שקיבלת.
+
+תוכן השיעורים:
+{lessons_text}
+
+החזר אך ורק JSON תקין במבנה הבא — ללא markdown, ללא טקסט נוסף:
+{{
+  "overall_summary": "...",
+  "key_themes": ["..."],
+  "chapters": [{{"title": "...", "summary": "...", "key_concepts": ["..."]}}],
+  "quiz": [{{"question": "...", "options": ["א. ...", "ב. ...", "ג. ...", "ד. ..."], "correct_answer": "...", "explanation": "..."}}],
+  "lecture_count": {n}
+}}\
+"""
+
+
+def _build_lessons_text(lessons: list[dict]) -> str:
+    parts = []
+    for i, lesson in enumerate(lessons, 1):
+        title = lesson.get("title") or f"שיעור {i}"
+        summary = lesson.get("summary", "")
+        chapters_text = ""
+        for ch in lesson.get("chapters", []):
+            chapters_text += f"  • {ch.get('title', '')}: {ch.get('content', '')[:300]}\n"
+        parts.append(f"=== שיעור {i}: {title} ===\nסיכום: {summary}\nפרקים:\n{chapters_text}")
+    return "\n\n".join(parts)
+
+
+def _parse_cram_guide_response(text: str) -> CramGuideResult:
+    text = text.strip()
+    # Strip markdown fences if present
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    # Skip leading non-JSON preamble (Gemini "thinking" output)
+    brace = text.find("{")
+    if brace > 0:
+        text = text[brace:]
+    try:
+        raw = json.loads(text)
+        chapters = [CramChapter(**ch) for ch in raw.get("chapters", [])]
+        quiz = []
+        for q in raw.get("quiz", []):
+            try:
+                quiz.append(QuizQuestion(**q))
+            except Exception:
+                pass
+        return CramGuideResult(
+            overall_summary=raw.get("overall_summary", ""),
+            key_themes=raw.get("key_themes", []),
+            chapters=chapters,
+            quiz=quiz,
+            lecture_count=raw.get("lecture_count", len(chapters)),
+        )
+    except Exception as exc:
+        logger.error(f"Failed to parse cram guide response: {exc}\nRaw: {text[:500]}")
+        return CramGuideResult()
+
+
+def _generate_cram_guide_sync(lessons: list[dict]) -> CramGuideResult:
+    lessons_text = _build_lessons_text(lessons)
+    prompt = _CRAM_GUIDE_PROMPT.format(n=len(lessons), lessons_text=lessons_text)
+
+    if not _is_gemini_provider():
+        provider = get_provider()
+        import asyncio as _aio
+        text = _aio.run(provider.generate_text(prompt, timeout=_CRAM_GUIDE_TIMEOUT))
+        return _parse_cram_guide_response(text)
+
+    client = _get_client()
+    response = _generate_with_retry(client, prompt)
+    return _parse_cram_guide_response(_response_text(response))
+
+
+async def generate_cram_guide(lessons: list[dict]) -> CramGuideResult:
+    """
+    Async: synthesize multiple lesson summaries into one combined study guide + exam.
+
+    `lessons` is a list of dicts, each with at least 'summary' and 'chapters' keys
+    (the serialised form of a completed task's LessonResult).
+    """
+    if not lessons:
+        return CramGuideResult()
+
+    loop = asyncio.get_running_loop()
+    try:
+        return await asyncio.wait_for(
+            loop.run_in_executor(None, _generate_cram_guide_sync, lessons),
+            timeout=_CRAM_GUIDE_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Cram guide generation timed out")
+        return CramGuideResult()

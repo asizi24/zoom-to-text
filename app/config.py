@@ -136,6 +136,11 @@ class Settings(BaseSettings):
     # Set to 0 to disable rate limiting entirely (e.g. during local dev).
     rate_limit_per_minute: int = 10
 
+    # Maximum number of task-submission requests allowed per authenticated user
+    # per 24-hour rolling window. Exceeding this triggers a 24-hour block; a
+    # request while blocked causes a permanent ban. Set to 0 to disable.
+    user_daily_task_limit: int = 2
+
     # ── API documentation ─────────────────────────────────────────────────────
     # Set ENABLE_DOCS=false on Fly.io (or any production deployment) to hide
     # /docs and /redoc from public access.  Local dev keeps them enabled.

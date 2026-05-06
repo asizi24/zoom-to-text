@@ -82,6 +82,32 @@ async def logout(session_id: Optional[str] = Cookie(default=None)):
     return response
 
 
+async def _send_rate_limit_warning_email(email: str) -> None:
+    """Call the Resend API to warn a user that their account has been blocked."""
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {settings.resend_api_key}"},
+            json={
+                "from": "Zoom to Text <onboarding@resend.dev>",
+                "to": [email],
+                "subject": "Zoom to Text — חשבונך נחסם זמנית",
+                "html": (
+                    "<div dir='rtl' style='font-family:sans-serif;max-width:420px;margin:auto'>"
+                    "<h2>⚠️ חשבונך נחסם זמנית</h2>"
+                    "<p>חרגת ממכסת <strong>2 בקשות עיבוד</strong> ב-24 שעות.</p>"
+                    "<p>חשבונך חסום למשך <strong>24 שעות</strong>.</p>"
+                    "<p style='color:#c0392b'><strong>שים לב:</strong> ניסיון נוסף בזמן החסימה "
+                    "יגרום לחסימה <em>קבועה</em> של החשבון.</p>"
+                    "<p><small>לפניות: צור קשר עם מנהל המערכת.</small></p>"
+                    "</div>"
+                ),
+            },
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+
+
 async def _send_magic_link_email(email: str, token: str) -> None:
     """Call the Resend API to send the magic link email."""
     magic_url = f"{settings.base_url}/api/auth/verify?token={token}"
