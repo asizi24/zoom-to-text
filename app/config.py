@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     google_api_key: str = ""
     # Option B: GCP Service Account key file (Vertex AI — for production)
     google_application_credentials: str = "key.json"
-    gcp_project_id: str = "gen-lang-client-0633910627"
+    gcp_project_id: str = ""
     gcp_location: str = "us-central1"
     # Gemini model to use for summarization
     gemini_model: str = "gemini-2.5-flash"

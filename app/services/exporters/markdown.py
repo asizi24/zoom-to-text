@@ -10,18 +10,21 @@ collapsible <details> block.
 This is a pure function — no I/O, no Gemini calls — so it can render
 historical tasks that pre-date Task 1.1 fields just as cleanly.
 """
+
 from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import Iterable
 
 from app.models import LessonResult, TaskResponse
 
 
 # ── Public API ──────────────────────────────────────────────────────────────
 
-def build_obsidian_markdown(task: TaskResponse, *, include_transcript: bool = True) -> str:
+
+def build_obsidian_markdown(
+    task: TaskResponse, *, include_transcript: bool = True
+) -> str:
     """Render the full Obsidian-flavored Markdown for a completed task."""
     if task.result is None:
         # Defensive — the API layer is expected to 400 before reaching here
@@ -33,8 +36,15 @@ def build_obsidian_markdown(task: TaskResponse, *, include_transcript: bool = Tr
     participants = _collect_participants(result)
 
     parts: list[str] = []
-    parts.append(_render_frontmatter(date=date, source=source, content_type=result.content_type,
-                                     language=result.language, participants=participants))
+    parts.append(
+        _render_frontmatter(
+            date=date,
+            source=source,
+            content_type=result.content_type,
+            language=result.language,
+            participants=participants,
+        )
+    )
     parts.append("")
     parts.append(f"# סיכום שיעור — {date}")
     parts.append(f"> מקור: {task.url or 'unknown'}")
@@ -84,6 +94,12 @@ def build_obsidian_markdown(task: TaskResponse, *, include_transcript: bool = Tr
             parts.append(_render_objection(o))
         parts.append("")
 
+    if result.key_terms:
+        parts.append("## Key Terms")
+        for kt in result.key_terms:
+            parts.append(_render_key_term(kt))
+        parts.append("")
+
     if result.chapters:
         parts.append("## 📚 פרקים ונושאים")
         for i, ch in enumerate(result.chapters, start=1):
@@ -124,8 +140,15 @@ def build_obsidian_markdown(task: TaskResponse, *, include_transcript: bool = Tr
 
 # ── Frontmatter ─────────────────────────────────────────────────────────────
 
-def _render_frontmatter(*, date: str, source: str, content_type: str | None,
-                        language: str, participants: list[str]) -> str:
+
+def _render_frontmatter(
+    *,
+    date: str,
+    source: str,
+    content_type: str | None,
+    language: str,
+    participants: list[str],
+) -> str:
     lines: list[str] = ["---", f"date: {date}", f"source: {source}"]
     if content_type:
         lines.append(f"content_type: {content_type}")
@@ -153,7 +176,11 @@ def _date_from_created_at(created_at: str) -> str:
     """Extract YYYY-MM-DD; fall back to today on parse error."""
     try:
         # SQLite stores ISO 8601; strip a trailing Z if present
-        s = created_at.replace("Z", "+00:00") if created_at.endswith("Z") else created_at
+        s = (
+            created_at.replace("Z", "+00:00")
+            if created_at.endswith("Z")
+            else created_at
+        )
         return datetime.fromisoformat(s).date().isoformat()
     except Exception:
         return datetime.utcnow().date().isoformat()
@@ -175,6 +202,7 @@ def _source_label(url: str | None) -> str:
 def _collect_participants(result: LessonResult) -> list[str]:
     """Union of speaker_map values, action_item owners, and decision stakeholders."""
     seen: list[str] = []
+
     def _add(name: str | None):
         if name:
             n = name.strip()
@@ -194,6 +222,7 @@ def _collect_participants(result: LessonResult) -> list[str]:
 
 # ── Section renderers ───────────────────────────────────────────────────────
 
+
 def _owner_tag(owner: str) -> str:
     """Whitespace → hyphens; Obsidian tags can't contain spaces."""
     cleaned = re.sub(r"\s+", "-", owner.strip())
@@ -205,7 +234,9 @@ def _render_action_item(ai) -> str:
     if ai.deadline:
         parts.append(f"📅 {ai.deadline}")
     if ai.priority:
-        emoji = {"high": "🔥", "medium": "⚡", "low": "🌱"}.get(ai.priority.lower(), "•")
+        emoji = {"high": "🔥", "medium": "⚡", "low": "🌱"}.get(
+            ai.priority.lower(), "•"
+        )
         parts.append(f"{emoji} {ai.priority}")
     parts.append(_owner_tag(ai.owner))
     line = " ".join(parts)
@@ -247,6 +278,13 @@ def _render_sentiment(s) -> str:
     return "\n".join(lines)
 
 
+def _render_key_term(kt) -> str:
+    line = f"- **{kt.term.strip()}** — {kt.definition.strip()}"
+    if kt.context:
+        line += f"\n  - _{kt.context.strip()}_"
+    return line
+
+
 def _render_objection(o) -> str:
     line = f"- **{o.objection.strip()}**"
     if o.raised_by:
@@ -262,6 +300,7 @@ def _render_objection(o) -> str:
 
 
 # ── Fallbacks ───────────────────────────────────────────────────────────────
+
 
 def _empty_skeleton(task: TaskResponse) -> str:
     date = _date_from_created_at(task.created_at)

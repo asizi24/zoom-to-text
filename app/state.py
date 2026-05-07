@@ -164,6 +164,10 @@ async def init_db():
         await db.execute("ALTER TABLE tasks ADD COLUMN share_token TEXT")
         await db.commit()
         logger.info("Migrated tasks table: added share_token column")
+    if "share_token_expires_at" not in cols:
+        await db.execute("ALTER TABLE tasks ADD COLUMN share_token_expires_at TEXT")
+        await db.commit()
+        logger.info("Migrated tasks table: added share_token_expires_at column")
 
     # Create index now that user_id column is guaranteed to exist
     await db.execute(CREATE_TASKS_INDEX_SQL)
@@ -891,35 +895,53 @@ async def get_audio_path(task_id: str) -> Optional[str]:
 
 # ── Share tokens ──────────────────────────────────────────────────────────────────
 
-async def create_share_token(task_id: str) -> str:
+_SHARE_TOKEN_TTL_DAYS = 90
+
+
+async def create_share_token(task_id: str) -> tuple[str, str]:
     """
-    Create (or return existing) a permanent share token for a completed task.
+    Create (or return existing) a share token for a completed task.
     Idempotent: calling twice returns the same token.
+    Returns (token, expires_at_iso).
     """
     db = await _get_db()
-    # Reuse existing token if already generated
     async with db.execute(
-        "SELECT share_token FROM tasks WHERE id=?", [task_id]
+        "SELECT share_token, share_token_expires_at FROM tasks WHERE id=?", [task_id]
     ) as cursor:
         row = await cursor.fetchone()
     if row and row["share_token"]:
-        return row["share_token"]
+        return row["share_token"], row["share_token_expires_at"]
     token = uuid.uuid4().hex  # 32-char hex, no hyphens — clean URLs
+    expires_at = (datetime.now(timezone.utc) + timedelta(days=_SHARE_TOKEN_TTL_DAYS)).isoformat()
     await db.execute(
-        "UPDATE tasks SET share_token=? WHERE id=?", [token, task_id]
+        "UPDATE tasks SET share_token=?, share_token_expires_at=? WHERE id=?",
+        [token, expires_at, task_id],
     )
     await db.commit()
-    return token
+    return token, expires_at
+
+
+async def revoke_share_token(task_id: str) -> None:
+    """Remove the share token for a task, invalidating any existing share links."""
+    db = await _get_db()
+    await db.execute(
+        "UPDATE tasks SET share_token=NULL, share_token_expires_at=NULL WHERE id=?",
+        [task_id],
+    )
+    await db.commit()
 
 
 async def get_task_by_share_token(token: str) -> Optional[TaskResponse]:
-    """Return a completed task by its public share token. No user check."""
+    """Return a completed task by its public share token. Returns None if expired."""
     db = await _get_db()
     async with db.execute(
         "SELECT * FROM tasks WHERE share_token=?", [token]
     ) as cursor:
         row = await cursor.fetchone()
     if row is None or not row["result_json"]:
+        return None
+    expires_at = row["share_token_expires_at"]
+    if expires_at and datetime.fromisoformat(expires_at) < datetime.now(timezone.utc):
         return None
     result = LessonResult.model_validate_json(row["result_json"])
     return TaskResponse(

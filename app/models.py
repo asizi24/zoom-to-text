@@ -1,6 +1,7 @@
 """
 Pydantic schemas for request/response validation.
 """
+
 from enum import Enum
 from typing import Optional
 from pydantic import BaseModel, Field
@@ -8,14 +9,15 @@ from pydantic import BaseModel, Field
 
 # ── Enums ───────────────────────────────────────────────────────────────────────
 
+
 class TaskStatus(str, Enum):
-    PENDING      = "pending"
-    DOWNLOADING  = "downloading"
+    PENDING = "pending"
+    DOWNLOADING = "downloading"
     TRANSCRIBING = "transcribing"
-    SUMMARIZING  = "summarizing"
-    COMPLETED    = "completed"
-    FAILED       = "failed"
-    CANCELLED    = "cancelled"
+    SUMMARIZING = "summarizing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class ProcessingMode(str, Enum):
@@ -34,53 +36,57 @@ class ProcessingMode(str, Enum):
 
 # ── Result schemas ──────────────────────────────────────────────────────────────
 
+
 class QuizQuestion(BaseModel):
-    question:       str
-    options:        list[str]        # ["א. ...", "ב. ...", "ג. ...", "ד. ..."]
-    correct_answer: str              # Must match one of the options exactly
-    explanation:    str = ""
-    bloom_level:    Optional[int] = None   # Bloom level 1-6; None = not labeled
+    question: str
+    options: list[str]  # ["א. ...", "ב. ...", "ג. ...", "ד. ..."]
+    correct_answer: str  # Must match one of the options exactly
+    explanation: str = ""
+    bloom_level: Optional[int] = None  # Bloom level 1-6; None = not labeled
 
 
 class Chapter(BaseModel):
-    title:      str
-    content:    str
+    title: str
+    content: str
     key_points: list[str] = []
-    start_time: Optional[str] = None  # [MM:SS] of when this topic begins; None = not available
+    start_time: Optional[str] = (
+        None  # [MM:SS] of when this topic begins; None = not available
+    )
 
 
 class Flashcard(BaseModel):
-    front: str                  # Question or concept prompt
-    back:  str                  # 1-3 sentence answer/explanation
-    tags:  list[str] = []       # Topic/chapter tags for Anki filtering
+    front: str  # Question or concept prompt
+    back: str  # 1-3 sentence answer/explanation
+    tags: list[str] = []  # Topic/chapter tags for Anki filtering
 
 
 # ── Extraction artifacts (Task 1.1 schema upgrade) ──────────────────────────────
 
+
 class ActionItem(BaseModel):
-    owner:        str
-    task:         str
-    deadline:     Optional[str] = None  # free-form: "EOW", "2026-05-01"
-    priority:     Optional[str] = None  # "high" | "medium" | "low"
+    owner: str
+    task: str
+    deadline: Optional[str] = None  # free-form: "EOW", "2026-05-01"
+    priority: Optional[str] = None  # "high" | "medium" | "low"
     source_quote: Optional[str] = None
 
 
 class Decision(BaseModel):
-    decision:     str
-    context:      Optional[str] = None
+    decision: str
+    context: Optional[str] = None
     stakeholders: list[str] = []
     source_quote: Optional[str] = None
 
 
 class OpenQuestion(BaseModel):
-    question:  str
+    question: str
     raised_by: Optional[str] = None
-    context:   Optional[str] = None
+    context: Optional[str] = None
 
 
 class PerSpeakerSentiment(BaseModel):
-    speaker:   str                       # "Speaker A" or named when known
-    sentiment: str                       # "positive" | "neutral" | "negative" | "mixed"
+    speaker: str  # "Speaker A" or named when known
+    sentiment: str  # "positive" | "neutral" | "negative" | "mixed"
     rationale: Optional[str] = None
 
 
@@ -89,67 +95,79 @@ class ToneShift(BaseModel):
     # while the Python attributes use _tone suffix.
     model_config = {"populate_by_name": True}
 
-    at:        str                       # rough timestamp or paragraph anchor
+    at: str  # rough timestamp or paragraph anchor
     from_tone: str = Field(..., alias="from")
-    to_tone:   str = Field(..., alias="to")
-    trigger:   Optional[str] = None
+    to_tone: str = Field(..., alias="to")
+    trigger: Optional[str] = None
 
 
 class SentimentAnalysis(BaseModel):
-    overall_tone:          str
+    overall_tone: str
     per_speaker_sentiment: list[PerSpeakerSentiment] = []
-    shifts_in_tone:        list[ToneShift] = []
+    shifts_in_tone: list[ToneShift] = []
 
 
 class Objection(BaseModel):
-    objection:      str
-    raised_by:      Optional[str] = None
+    objection: str
+    raised_by: Optional[str] = None
     response_given: Optional[str] = None
-    resolved:       Optional[bool] = None
+    resolved: Optional[bool] = None
 
 
 class RawLLMResponse(BaseModel):
     """Raw LLM output captured for offline debugging when LLM_DEBUG_RAW_RESPONSES=true."""
-    summary_call:    Optional[str] = None
+
+    summary_call: Optional[str] = None
     extraction_call: Optional[str] = None
 
 
+class KeyTerm(BaseModel):
+    term: str
+    definition: str
+    context: Optional[str] = None
+
+
 class LessonResult(BaseModel):
-    transcript:        Optional[str] = None  # Raw transcript (only in WHISPER_LOCAL mode)
-    summary:           str = ""
-    chapters:          list[Chapter] = []
-    quiz:              list[QuizQuestion] = []
-    flashcards:        list[Flashcard] = []   # 15-25 spaced-repetition cards
-    language:          str = "he"
+    transcript: Optional[str] = None  # Raw transcript (only in WHISPER_LOCAL mode)
+    summary: str = ""
+    chapters: list[Chapter] = []
+    quiz: list[QuizQuestion] = []
+    flashcards: list[Flashcard] = []  # 15-25 spaced-repetition cards
+    language: str = "he"
     # Critique pipeline debug log — populated when ENABLE_EXAM_CRITIQUE=True
     exam_critique_log: Optional[dict] = None
     # ── Task 1.1 schema upgrade — all optional, default-empty ──
-    content_type:       Optional[str] = None  # "lecture" | "meeting" | "discussion"
-    action_items:       list[ActionItem] = []
-    decisions:          list[Decision] = []
-    open_questions:     list[OpenQuestion] = []
+    content_type: Optional[str] = None  # "lecture" | "meeting" | "discussion"
+    action_items: list[ActionItem] = []
+    decisions: list[Decision] = []
+    open_questions: list[OpenQuestion] = []
     sentiment_analysis: Optional[SentimentAnalysis] = None
     objections_tracked: list[Objection] = []
-    raw_llm_response:   Optional[RawLLMResponse] = None
+    raw_llm_response: Optional[RawLLMResponse] = None
     # ── Task 1.2 Gemini-based diarization (WHISPER paths only) ──
-    diarized_transcript: Optional[str]            = None  # transcript with "Speaker A:" anchors
-    speaker_map:         Optional[dict[str, str]] = None  # {"Speaker A": "Asaf", ...} when names detected
+    diarized_transcript: Optional[str] = None  # transcript with "Speaker A:" anchors
+    speaker_map: Optional[dict[str, str]] = (
+        None  # {"Speaker A": "Asaf", ...} when names detected
+    )
+    # ── Key Terms Glossary — important vocabulary extracted from the recording ──
+    key_terms: list[KeyTerm] = []
 
 
 # ── Cram Guide schemas (Multi-Lecture Study Guide) ──────────────────────────────
 
+
 class CramChapter(BaseModel):
-    title:        str
-    summary:      str
+    title: str
+    summary: str
     key_concepts: list[str] = []
 
 
 class CramGuideResult(BaseModel):
-    overall_summary: str         = ""
-    key_themes:      list[str]   = []
-    chapters:        list[CramChapter]   = []
-    quiz:            list[QuizQuestion]  = []
-    lecture_count:   int         = 0
+    overall_summary: str = ""
+    key_themes: list[str] = []
+    chapters: list[CramChapter] = []
+    quiz: list[QuizQuestion] = []
+    lecture_count: int = 0
 
 
 class CramGuideRequest(BaseModel):
@@ -158,27 +176,32 @@ class CramGuideRequest(BaseModel):
 
 # ── API request/response schemas ────────────────────────────────────────────────
 
+
 class TaskCreate(BaseModel):
-    url:      str = Field(..., description="Zoom recording URL")
-    mode:     ProcessingMode = ProcessingMode.GEMINI_DIRECT
+    url: str = Field(..., description="Zoom recording URL")
+    mode: ProcessingMode = ProcessingMode.GEMINI_DIRECT
     # Netscape-format cookie string extracted by the Chrome extension.
     # Required for private/institutional Zoom recordings (e.g. admin-ort-org-il.zoom.us).
-    cookies:  Optional[str] = Field(None, description="Zoom session cookies (Netscape format)")
-    language: str = Field("he", description="Audio language hint for Whisper (he, en, auto)")
+    cookies: Optional[str] = Field(
+        None, description="Zoom session cookies (Netscape format)"
+    )
+    language: str = Field(
+        "he", description="Audio language hint for Whisper (he, en, auto)"
+    )
 
 
 class TaskResponse(BaseModel):
-    task_id:    str
-    status:     TaskStatus
-    progress:   int = Field(0, ge=0, le=100)
-    message:    str = ""
+    task_id: str
+    status: TaskStatus
+    progress: int = Field(0, ge=0, le=100)
+    message: str = ""
     created_at: str
-    url:        Optional[str] = None
-    result:     Optional[LessonResult] = None
-    error:      Optional[str] = None
+    url: Optional[str] = None
+    result: Optional[LessonResult] = None
+    error: Optional[str] = None
     # Structured error info (Task 1.5). Keys: stage, code, user_message,
     # technical_details. None for tasks that succeeded or failed before
     # the schema migration.
     error_details: Optional[dict] = None
     # True iff the server has a playable audio file for this task (Feature 7)
-    has_audio:  bool = False
+    has_audio: bool = False

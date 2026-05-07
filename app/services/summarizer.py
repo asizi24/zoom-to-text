@@ -23,6 +23,7 @@ Output is always a structured LessonResult with:
   - chapters   : logical topic breakdown with key points
   - quiz       : 8-10 MCQ questions (Bloom's levels 1-6) with 4 options + explanations
 """
+
 import asyncio
 import json
 import logging
@@ -45,6 +46,7 @@ from app.models import (
     CramGuideResult,
     Decision,
     Flashcard,
+    KeyTerm,
     LessonResult,
     Objection,
     OpenQuestion,
@@ -63,6 +65,7 @@ _ProgressCallback = Callable[[int, str], None]
 def _is_gemini_provider() -> bool:
     """True if the current provider is Gemini (use existing code path)."""
     return settings.llm_provider == "gemini"
+
 
 # ── Prompt ────────────────────────────────────────────────────────────────────────
 
@@ -207,6 +210,7 @@ def _system_prompt(supplementary_context: str | None = None) -> str:
         )
     return prompt
 
+
 # ── Critique prompt ───────────────────────────────────────────────────────────────
 
 _CRITIQUE_PROMPT = """
@@ -337,7 +341,10 @@ _GEMINI_TIMEOUT = 600.0
 
 # ── Retry helper ──────────────────────────────────────────────────────────────────
 
-def _generate_with_retry(client: genai.Client, contents, max_retries: int = 3, config=None):
+
+def _generate_with_retry(
+    client: genai.Client, contents, max_retries: int = 3, config=None
+):
     """
     Exponential backoff with error classification.
     Rate-limit (429/quota) → longer backoff + user-friendly raise.
@@ -358,7 +365,9 @@ def _generate_with_retry(client: genai.Client, contents, max_retries: int = 3, c
         except Exception as exc:
             exc_str = str(exc)
             exc_low = exc_str.lower()
-            is_rate_limit = "429" in exc_str or "quota" in exc_low or "rate limit" in exc_low
+            is_rate_limit = (
+                "429" in exc_str or "quota" in exc_low or "rate limit" in exc_low
+            )
             is_server_error = any(c in exc_str for c in ("500", "502", "503", "504"))
             is_retriable = is_rate_limit or is_server_error
 
@@ -378,6 +387,7 @@ def _generate_with_retry(client: genai.Client, contents, max_retries: int = 3, c
 
 
 # ── Parsing ───────────────────────────────────────────────────────────────────────
+
 
 def _response_text(response) -> str:
     """
@@ -419,7 +429,7 @@ def _sanitize_json_escapes(text: str) -> str:
     Valid JSON unicode escape:       \\uXXXX  (u + exactly 4 hex digits)
     Everything else → double the backslash.
     """
-    return re.sub(r'\\(?!["\\/bfnrtu]|u[0-9a-fA-F]{4})', r'\\\\', text)
+    return re.sub(r'\\(?!["\\/bfnrtu]|u[0-9a-fA-F]{4})', r"\\\\", text)
 
 
 def _parse_response(text: str) -> LessonResult:
@@ -462,10 +472,10 @@ def _parse_response(text: str) -> LessonResult:
     try:
         data = json.loads(stripped)
     except json.JSONDecodeError as e:
-        logger.error(f"JSON parse error: {e}\nRaw response (first 500 chars):\n{text[:500]}")
-        raise RuntimeError(
-            "🔄 Gemini החזיר JSON לא תקין — זו שגיאה חולפת, נסה שוב"
+        logger.error(
+            f"JSON parse error: {e}\nRaw response (first 500 chars):\n{text[:500]}"
         )
+        raise RuntimeError("🔄 Gemini החזיר JSON לא תקין — זו שגיאה חולפת, נסה שוב")
 
     chapters = [
         Chapter(
@@ -495,6 +505,7 @@ def _parse_response(text: str) -> LessonResult:
 
 
 # ── Exam critique helpers ─────────────────────────────────────────────────────────
+
 
 def critique_exam(exam: list, summary: str) -> dict:
     """
@@ -558,8 +569,7 @@ def revise_exam(exam: list, critique: dict, summary: str) -> list:
 
     # Build score lookup by index
     score_by_idx = {
-        q["index"]: q.get("avg", 5.0)
-        for q in critique.get("questions", [])
+        q["index"]: q.get("avg", 5.0) for q in critique.get("questions", [])
     }
 
     # Mark questions for revision
@@ -628,13 +638,11 @@ def revise_exam(exam: list, critique: dict, summary: str) -> list:
 
 def _needs_revision(critique: dict, threshold: float) -> bool:
     """Return True if at least one question scored below the threshold."""
-    return any(
-        q.get("avg", 5.0) < threshold
-        for q in critique.get("questions", [])
-    )
+    return any(q.get("avg", 5.0) < threshold for q in critique.get("questions", []))
 
 
 # ── Direct audio mode ─────────────────────────────────────────────────────────────
+
 
 def _summarize_audio_sync(
     audio_path: str,
@@ -673,7 +681,9 @@ def _summarize_audio_sync(
     result = None
     last_error = None
     for attempt in range(2):
-        response = _generate_with_retry(client, [_system_prompt(supplementary_context), audio_file])
+        response = _generate_with_retry(
+            client, [_system_prompt(supplementary_context), audio_file]
+        )
         try:
             result = _parse_response(_response_text(response))
             break
@@ -719,7 +729,9 @@ def _summarize_text_sync(
     client = _get_client()
 
     if len(transcript) <= _MAX_CHUNK_CHARS:
-        prompt = _system_prompt(supplementary_context) + "\n\nתמלול השיעור:\n" + transcript
+        prompt = (
+            _system_prompt(supplementary_context) + "\n\nתמלול השיעור:\n" + transcript
+        )
         result = None
         last_error = None
         for attempt in range(2):
@@ -738,7 +750,7 @@ def _summarize_text_sync(
 
     # Long transcript: chunk → partial summaries → final merge
     chunks = [
-        transcript[i: i + _MAX_CHUNK_CHARS]
+        transcript[i : i + _MAX_CHUNK_CHARS]
         for i in range(0, len(transcript), _MAX_CHUNK_CHARS)
     ]
     n = len(chunks)
@@ -848,6 +860,13 @@ null when a category is irrelevant):
   - sentiment_analysis:  {overall_tone, per_speaker_sentiment[], shifts_in_tone[]}
                          OR null if not applicable (e.g. solo lecture)
   - objections_tracked:  [{objection, raised_by?, response_given?, resolved?}]
+  - key_terms:           [{term, definition, context?}]
+                         Important domain-specific vocabulary introduced or
+                         defined in the recording. Each entry: "term" is the
+                         word or phrase, "definition" is a concise explanation
+                         as used in this recording (1–2 sentences), "context"
+                         is an optional note on where/why the term appears.
+                         Return [] if no noteworthy terms are introduced.
 
 Hard rules:
   • DO NOT wrap your output in markdown code fences. Bare JSON only.
@@ -858,6 +877,7 @@ Hard rules:
     the optional field for that item.
   • For pure lectures, action_items and objections_tracked are usually [].
   • For meetings, sentiment_analysis is usually populated.
+  • For lectures, key_terms is usually populated; for short meetings, [] is fine.
 
 ══════════════════════════════════════════════════
 Few-shot example 1 — Hebrew product meeting (excerpt):
@@ -887,7 +907,8 @@ Few-shot example 1 — Hebrew product meeting (excerpt):
     ],
     "shifts_in_tone": []
   },
-  "objections_tracked": []
+  "objections_tracked": [],
+  "key_terms": []
 }
 
 ══════════════════════════════════════════════════
@@ -906,7 +927,37 @@ Few-shot example 2 — English physics lecture (excerpt):
      "context": "Mentioned by the lecturer as still debated"}
   ],
   "sentiment_analysis": null,
-  "objections_tracked": []
+  "objections_tracked": [],
+  "key_terms": [
+    {"term": "Bell's theorem",
+     "definition": "A result showing that no local hidden-variable theory can reproduce all predictions of quantum mechanics.",
+     "context": "Core topic of this lecture segment"},
+    {"term": "non-locality",
+     "definition": "The phenomenon where quantum correlations between distant particles cannot be explained by local influences.",
+     "context": "Still debated whether Bell inequality violations prove it"}
+  ]
+}
+
+══════════════════════════════════════════════════
+Few-shot example 3 — Hebrew biology lecture (excerpt):
+══════════════════════════════════════════════════
+"היום נדבר על המיטוכונדריה — האורגנלה שאחראית על ייצור האנרגיה בתא.
+ היא מייצרת ATP בתהליך שנקרא זרחון חמצוני. בלעדיה, התא לא יכול לתפקד."
+
+→ {
+  "action_items": [],
+  "decisions": [],
+  "open_questions": [],
+  "sentiment_analysis": null,
+  "objections_tracked": [],
+  "key_terms": [
+    {"term": "מיטוכונדריה",
+     "definition": "אורגנלה בתא האחראית על ייצור אנרגיה בצורת ATP.",
+     "context": "הוצגה כנושא המרכזי של השיעור"},
+    {"term": "זרחון חמצוני",
+     "definition": "תהליך ביולוגי שבו מיטוכונדריה מייצרת ATP באמצעות חמצן.",
+     "context": "מנגנון ייצור האנרגיה המרכזי בתא"}
+  ]
 }
 
 ══════════════════════════════════════════════════
@@ -1003,6 +1054,14 @@ def _parse_extraction_response(text: str) -> dict:
                 resolved=o.get("resolved"),
             )
             for o in data.get("objections_tracked", [])
+        ],
+        "key_terms": [
+            KeyTerm(
+                term=k.get("term", ""),
+                definition=k.get("definition", ""),
+                context=k.get("context"),
+            )
+            for k in data.get("key_terms", [])
         ],
     }
 
@@ -1173,7 +1232,10 @@ def _diarize_transcript_sync(transcript: str) -> tuple[str, dict[str, str]]:
 
 # ── Synthesis call wrappers that capture raw text (for raw_llm_response) ─────────
 
-def _synthesize_text_capture(transcript: str, supplementary_context: str | None = None) -> tuple[LessonResult, str]:
+
+def _synthesize_text_capture(
+    transcript: str, supplementary_context: str | None = None
+) -> tuple[LessonResult, str]:
     """
     Single Gemini synthesis call on a transcript. Returns (parsed result, raw text).
 
@@ -1184,7 +1246,9 @@ def _synthesize_text_capture(transcript: str, supplementary_context: str | None 
     client = _get_client()
 
     if len(transcript) <= _MAX_CHUNK_CHARS:
-        prompt = _system_prompt(supplementary_context) + "\n\nתמלול השיעור:\n" + transcript
+        prompt = (
+            _system_prompt(supplementary_context) + "\n\nתמלול השיעור:\n" + transcript
+        )
         last_raw = ""
         last_error: Exception | None = None
         for attempt in range(2):
@@ -1200,7 +1264,7 @@ def _synthesize_text_capture(transcript: str, supplementary_context: str | None 
 
     # Chunked path — produce partials, merge, then capture raw of final merge
     chunks = [
-        transcript[i: i + _MAX_CHUNK_CHARS]
+        transcript[i : i + _MAX_CHUNK_CHARS]
         for i in range(0, len(transcript), _MAX_CHUNK_CHARS)
     ]
     n = len(chunks)
@@ -1227,7 +1291,11 @@ def _synthesize_text_capture(transcript: str, supplementary_context: str | None 
     return _parse_response(raw), raw
 
 
-def _synthesize_audio_capture(audio_file, progress_cb: _ProgressCallback | None = None, supplementary_context: str | None = None) -> tuple[LessonResult, str]:
+def _synthesize_audio_capture(
+    audio_file,
+    progress_cb: _ProgressCallback | None = None,
+    supplementary_context: str | None = None,
+) -> tuple[LessonResult, str]:
     """Synthesis call on a pre-uploaded audio file. Returns (parsed, raw text)."""
     client = _get_client()
     if progress_cb:
@@ -1236,7 +1304,9 @@ def _synthesize_audio_capture(audio_file, progress_cb: _ProgressCallback | None 
     last_raw = ""
     last_error: Exception | None = None
     for attempt in range(2):
-        response = _generate_with_retry(client, [_system_prompt(supplementary_context), audio_file])
+        response = _generate_with_retry(
+            client, [_system_prompt(supplementary_context), audio_file]
+        )
         last_raw = _response_text(response)
         try:
             return _parse_response(last_raw), last_raw
@@ -1249,7 +1319,10 @@ def _synthesize_audio_capture(audio_file, progress_cb: _ProgressCallback | None 
 
 # ── Audio upload + cleanup helpers (split out of _summarize_audio_sync) ──────────
 
-def _upload_audio_to_gemini(audio_path: str, progress_cb: _ProgressCallback | None = None):
+
+def _upload_audio_to_gemini(
+    audio_path: str, progress_cb: _ProgressCallback | None = None
+):
     """Upload audio to Gemini Files API and wait for processing. Returns the file handle."""
     client = _get_client()
     logger.info(f"Uploading audio to Gemini Files API: {audio_path}")
@@ -1349,9 +1422,7 @@ def _hard_split_audio_for_gemini(audio_path: str) -> list[str]:
     """
     duration = _audio_duration_seconds(audio_path)
     if duration is None or duration <= 0:
-        raise RuntimeError(
-            "❌ ffprobe לא הצליח למדוד את אורך ההקלטה — לא ניתן לחתוך"
-        )
+        raise RuntimeError("❌ ffprobe לא הצליח למדוד את אורך ההקלטה — לא ניתן לחתוך")
 
     suffix = Path(audio_path).suffix or ".mp3"
     chunk_s = _GEMINI_CHUNK_SECONDS
@@ -1364,12 +1435,18 @@ def _hard_split_audio_for_gemini(audio_path: str) -> list[str]:
         try:
             subprocess.run(
                 [
-                    "ffmpeg", "-y",
-                    "-ss", str(start),
-                    "-t", str(chunk_s),
-                    "-i", audio_path,
-                    "-c", "copy",
-                    "-loglevel", "error",
+                    "ffmpeg",
+                    "-y",
+                    "-ss",
+                    str(start),
+                    "-t",
+                    str(chunk_s),
+                    "-i",
+                    audio_path,
+                    "-c",
+                    "copy",
+                    "-loglevel",
+                    "error",
                     out,
                 ],
                 check=True,
@@ -1403,12 +1480,19 @@ def _audio_duration_seconds(path: str) -> float | None:
     try:
         result = subprocess.run(
             [
-                "ffprobe", "-v", "error",
-                "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1",
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
                 path,
             ],
-            capture_output=True, text=True, check=True, timeout=30,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
         )
         return float(result.stdout.strip())
     except (subprocess.SubprocessError, ValueError, FileNotFoundError) as exc:
@@ -1486,9 +1570,7 @@ async def _summarize_audio_chunked(
         progress_cb(52, "📦 ההקלטה ארוכה — מחלק לחלקים לתמלול...")
 
     loop = asyncio.get_running_loop()
-    chunks = await loop.run_in_executor(
-        None, _hard_split_audio_for_gemini, audio_path
-    )
+    chunks = await loop.run_in_executor(None, _hard_split_audio_for_gemini, audio_path)
     total = max(len(chunks), 1)
 
     # Parallelism: up to `_GEMINI_CHUNK_PARALLELISM` chunks in flight at once.
@@ -1519,14 +1601,14 @@ async def _summarize_audio_chunked(
 
     full_transcript = "\n\n".join(t for t in transcripts if t)
     if not full_transcript.strip():
-        raise RuntimeError(
-            "❌ תמלול Gemini החזיר טקסט ריק לכל חלקי ההקלטה — נסה שוב"
-        )
+        raise RuntimeError("❌ תמלול Gemini החזיר טקסט ריק לכל חלקי ההקלטה — נסה שוב")
 
     if progress_cb:
         progress_cb(78, "🤖 מסכם את התמלול המאוחד...")
 
-    result = await summarize_transcript(full_transcript, progress_cb, supplementary_context=supplementary_context)
+    result = await summarize_transcript(
+        full_transcript, progress_cb, supplementary_context=supplementary_context
+    )
     # Preserve the merged transcript so the History tab shows it like the
     # WHISPER paths do — without this, callers would see an empty transcript
     # field on a result that was built from a real transcript.
@@ -1535,6 +1617,7 @@ async def _summarize_audio_chunked(
 
 
 # ── Result merging (synthesis Call 1 + extraction Call 2) ────────────────────────
+
 
 def _merge_results(
     synthesis: LessonResult,
@@ -1552,14 +1635,16 @@ def _merge_results(
     is True (per spec §7).
     """
     if extraction:
-        synthesis.action_items       = extraction.get("action_items", [])
-        synthesis.decisions          = extraction.get("decisions", [])
-        synthesis.open_questions     = extraction.get("open_questions", [])
+        synthesis.action_items = extraction.get("action_items", [])
+        synthesis.decisions = extraction.get("decisions", [])
+        synthesis.open_questions = extraction.get("open_questions", [])
         synthesis.sentiment_analysis = extraction.get("sentiment_analysis")
         synthesis.objections_tracked = extraction.get("objections_tracked", [])
+        synthesis.key_terms = extraction.get("key_terms", [])
 
     if settings.llm_debug_raw_responses:
         from app.models import RawLLMResponse
+
         synthesis.raw_llm_response = RawLLMResponse(
             summary_call=raw_summary,
             extraction_call=raw_extraction,
@@ -1569,6 +1654,7 @@ def _merge_results(
 
 
 # ── Async wrappers ────────────────────────────────────────────────────────────────
+
 
 async def summarize_audio(
     audio_path: str,
@@ -1602,7 +1688,9 @@ async def summarize_audio(
             f"{_GEMINI_DIRECT_MAX_SECONDS / 60:.0f}-min direct threshold; "
             f"routing through chunked path"
         )
-        return await _summarize_audio_chunked(audio_path, progress_cb, supplementary_context)
+        return await _summarize_audio_chunked(
+            audio_path, progress_cb, supplementary_context
+        )
 
     loop = asyncio.get_running_loop()
 
@@ -1614,16 +1702,18 @@ async def summarize_audio(
     try:
         # Step 2: Synthesis + Extraction in parallel.
         synthesis_future = loop.run_in_executor(
-            None, _synthesize_audio_capture, audio_file, progress_cb, supplementary_context
+            None,
+            _synthesize_audio_capture,
+            audio_file,
+            progress_cb,
+            supplementary_context,
         )
         extraction_future = loop.run_in_executor(
             None, _extract_audio_capture, audio_file
         )
 
         synthesis_outcome, extraction_outcome = await asyncio.wait_for(
-            asyncio.gather(
-                synthesis_future, extraction_future, return_exceptions=True
-            ),
+            asyncio.gather(synthesis_future, extraction_future, return_exceptions=True),
             timeout=_GEMINI_TIMEOUT,
         )
     except asyncio.TimeoutError:
@@ -1646,20 +1736,22 @@ async def summarize_audio(
                 f"({duration / 60 if duration else '?'} min audio); "
                 "falling back to chunked path"
             )
-            return await _summarize_audio_chunked(audio_path, progress_cb, supplementary_context)
+            return await _summarize_audio_chunked(
+                audio_path, progress_cb, supplementary_context
+            )
         raise synthesis_outcome
     synthesis_result, raw_summary = synthesis_outcome  # type: ignore[misc]
 
     # Step 5: Extraction is best-effort.
     extraction_dict, raw_extraction = None, None
     if isinstance(extraction_outcome, BaseException):
-        logger.warning(
-            f"Extraction call failed (graceful skip): {extraction_outcome}"
-        )
+        logger.warning(f"Extraction call failed (graceful skip): {extraction_outcome}")
     else:
         extraction_dict, raw_extraction = extraction_outcome  # type: ignore[misc]
 
-    return _merge_results(synthesis_result, extraction_dict, raw_summary, raw_extraction)
+    return _merge_results(
+        synthesis_result, extraction_dict, raw_summary, raw_extraction
+    )
 
 
 async def summarize_transcript(
@@ -1682,7 +1774,9 @@ async def summarize_transcript(
       3. Merge results, then run the exam critique pipeline.
     """
     if not _is_gemini_provider():
-        return await _summarize_transcript_via_provider(transcript, progress_cb, supplementary_context)
+        return await _summarize_transcript_via_provider(
+            transcript, progress_cb, supplementary_context
+        )
 
     loop = asyncio.get_running_loop()
 
@@ -1700,6 +1794,7 @@ async def summarize_transcript(
                     )
                 else:
                     from app.services.diarization import pyannote_provider
+
                     diarized_transcript, speaker_map = await loop.run_in_executor(
                         None, pyannote_provider.diarize_audio, audio_path, transcript
                     )
@@ -1710,9 +1805,7 @@ async def summarize_transcript(
             if diarized_transcript:
                 text_for_downstream = diarized_transcript
         except Exception as exc:
-            logger.warning(
-                f"Diarization call failed (graceful skip): {exc}"
-            )
+            logger.warning(f"Diarization call failed (graceful skip): {exc}")
             diarized_transcript = None
             speaker_map = None
 
@@ -1726,9 +1819,7 @@ async def summarize_transcript(
 
     try:
         synthesis_outcome, extraction_outcome = await asyncio.wait_for(
-            asyncio.gather(
-                synthesis_future, extraction_future, return_exceptions=True
-            ),
+            asyncio.gather(synthesis_future, extraction_future, return_exceptions=True),
             timeout=_GEMINI_TIMEOUT,
         )
     except asyncio.TimeoutError:
@@ -1740,9 +1831,7 @@ async def summarize_transcript(
 
     extraction_dict, raw_extraction = None, None
     if isinstance(extraction_outcome, BaseException):
-        logger.warning(
-            f"Extraction call failed (graceful skip): {extraction_outcome}"
-        )
+        logger.warning(f"Extraction call failed (graceful skip): {extraction_outcome}")
     else:
         extraction_dict, raw_extraction = extraction_outcome  # type: ignore[misc]
 
@@ -1766,7 +1855,11 @@ async def _summarize_transcript_via_provider(
     if progress_cb:
         progress_cb(82, f"🤖 שולח ל-{provider.name} — מייצר סיכום ומבחן...")
 
-    prompt = _system_prompt(supplementary_context) + "\n\nתמלול השיעור:\n" + transcript[:_MAX_CHUNK_CHARS]
+    prompt = (
+        _system_prompt(supplementary_context)
+        + "\n\nתמלול השיעור:\n"
+        + transcript[:_MAX_CHUNK_CHARS]
+    )
     text = await provider.generate_text(prompt)
     return _parse_response(text)
 
@@ -1784,7 +1877,9 @@ _ASK_SYSTEM_PROMPT = """
 def _ask_sync(context: str, question: str) -> str:
     """Synchronous: send a question with lesson context to Gemini."""
     client = _get_client()
-    prompt = f"{_ASK_SYSTEM_PROMPT}\n\nתוכן השיעור:\n{context}\n\nשאלת התלמיד: {question}"
+    prompt = (
+        f"{_ASK_SYSTEM_PROMPT}\n\nתוכן השיעור:\n{context}\n\nשאלת התלמיד: {question}"
+    )
     response = _generate_with_retry(client, prompt)
     return response.text
 
@@ -1843,10 +1938,15 @@ def _build_chat_contents(context: str, history: list[dict], question: str) -> li
         f"תוכן השיעור:\n{context[:40_000]}"  # cap at 40 k chars (~30 k tokens)
     )
     contents.append({"role": "user", "parts": [{"text": context_turn}]})
-    contents.append({"role": "model", "parts": [{"text": "הבנתי. אני מוכן לענות על שאלות על השיעור הזה."}]})
+    contents.append(
+        {
+            "role": "model",
+            "parts": [{"text": "הבנתי. אני מוכן לענות על שאלות על השיעור הזה."}],
+        }
+    )
 
     # Recent history (trim to avoid overly long context)
-    trimmed = history[-(2 * _MAX_HISTORY_TURNS):]  # 2× because user+model per turn
+    trimmed = history[-(2 * _MAX_HISTORY_TURNS) :]  # 2× because user+model per turn
     for msg in trimmed:
         role = msg.get("role", "user")
         contents.append({"role": role, "parts": [{"text": msg.get("content", "")}]})
@@ -1866,7 +1966,6 @@ def _stream_chat_sync(
     Blocking: calls Gemini generate_content_stream, puts each text chunk into
     out_queue, and puts None as sentinel on completion or Exception on error.
     """
-    import queue as _q_mod
     client = _get_client()
     contents = _build_chat_contents(context, history, question)
     try:
@@ -1963,7 +2062,7 @@ def _parse_flashcards_response(text: str) -> list[Flashcard]:
     # Anchor on our known root key to skip any thinking preamble
     m = re.search(r'\{\s*"flashcards"\s*:', stripped)
     if m:
-        stripped = stripped[m.start():]
+        stripped = stripped[m.start() :]
     json_end = stripped.rfind("}")
     if json_end != -1:
         stripped = stripped[: json_end + 1]
@@ -1972,13 +2071,15 @@ def _parse_flashcards_response(text: str) -> list[Flashcard]:
     try:
         data = json.loads(stripped)
     except json.JSONDecodeError as exc:
-        logger.error(f"Flashcards JSON parse error: {exc}\nRaw (first 300): {text[:300]}")
+        logger.error(
+            f"Flashcards JSON parse error: {exc}\nRaw (first 300): {text[:300]}"
+        )
         return []
 
     cards = []
     for c in data.get("flashcards", []):
         front = (c.get("front") or "").strip()
-        back  = (c.get("back") or "").strip()
+        back = (c.get("back") or "").strip()
         if not front or not back:
             continue
         tags = [str(t).strip() for t in c.get("tags", []) if str(t).strip()]
@@ -2077,8 +2178,12 @@ def _build_lessons_text(lessons: list[dict]) -> str:
         summary = lesson.get("summary", "")
         chapters_text = ""
         for ch in lesson.get("chapters", []):
-            chapters_text += f"  • {ch.get('title', '')}: {ch.get('content', '')[:300]}\n"
-        parts.append(f"=== שיעור {i}: {title} ===\nסיכום: {summary}\nפרקים:\n{chapters_text}")
+            chapters_text += (
+                f"  • {ch.get('title', '')}: {ch.get('content', '')[:300]}\n"
+            )
+        parts.append(
+            f"=== שיעור {i}: {title} ===\nסיכום: {summary}\nפרקים:\n{chapters_text}"
+        )
     return "\n\n".join(parts)
 
 
@@ -2120,6 +2225,7 @@ def _generate_cram_guide_sync(lessons: list[dict]) -> CramGuideResult:
     if not _is_gemini_provider():
         provider = get_provider()
         import asyncio as _aio
+
         text = _aio.run(provider.generate_text(prompt, timeout=_CRAM_GUIDE_TIMEOUT))
         return _parse_cram_guide_response(text)
 

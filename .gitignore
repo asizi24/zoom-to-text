@@ -77,3 +77,7 @@ _legacy_archive/
 
 # Brainstorm session artifacts
 .superpowers/
+
+# RuFlo / Claude-flow tooling (generated, never committed)
+.claude-flow/
+.swarm/

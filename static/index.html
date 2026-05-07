@@ -563,6 +563,17 @@
       overflow-y: auto; color: var(--muted); direction: rtl;
     }
 
+    /* ── Key Terms Glossary ── */
+    .key-term-card {
+      background: rgba(255,255,255,.04);
+      border-radius: 12px; padding: 14px 18px;
+      border: 1px solid rgba(255,255,255,.08);
+      margin-bottom: 10px;
+    }
+    .key-term-term { font-weight: 700; color: #a78bfa; font-size: .95rem; }
+    .key-term-def  { color: var(--muted); font-size: .88rem; line-height: 1.6; margin-top: 4px; }
+    .key-term-ctx  { color: rgba(148,163,184,.6); font-size: .8rem; margin-top: 4px; font-style: italic; }
+
     /* ── Quiz ── */
     .quiz-list { display: flex; flex-direction: column; gap: 16px; }
     .q-card {
@@ -652,6 +663,15 @@
     .h-badge.completed { background: rgba(16,185,129,.15); color: #6ee7b7; border: 1px solid rgba(16,185,129,.25); }
     .h-badge.failed    { background: rgba(239,68,68,.12);  color: #fca5a5; border: 1px solid rgba(239,68,68,.2); }
     .h-badge.running   { background: rgba(124,58,237,.15); color: #c4b5fd; border: 1px solid rgba(124,58,237,.25); }
+    .h-delete {
+      flex-shrink: 0;
+      background: none; border: 1px solid rgba(239,68,68,.25);
+      color: #fca5a5; cursor: pointer;
+      padding: 4px 8px; border-radius: 8px; font-size: .85rem;
+      transition: all .15s;
+    }
+    .h-delete:hover { background: rgba(239,68,68,.15); border-color: rgba(239,68,68,.5); color: #fff; }
+    .h-delete:disabled { opacity: .5; cursor: wait; }
 
     /* ── History search + pagination ── */
     .history-controls { margin-bottom: 14px; }
@@ -1825,6 +1845,8 @@
     <span>🔗 קישור לשיתוף:</span>
     <a id="share-url-link" href="#" target="_blank" style="color:#6366f1; word-break:break-all;"></a>
     <button class="copy-btn" style="position:static; padding:3px 10px;" onclick="copyShareLink()">📋 העתק</button>
+    <button class="copy-btn" id="revoke-share-btn" style="position:static; padding:3px 10px; background:rgba(239,68,68,.15); border-color:rgba(239,68,68,.4);" onclick="revokeShare()">🗑️ בטל שיתוף</button>
+    <span id="share-expires-label" style="color:var(--muted); font-size:.8rem;"></span>
   </div>
 
   <!-- Summary -->
@@ -1864,6 +1886,12 @@
     <div class="section-title">🧠 מבחן — בחן את עצמך</div>
     <div class="score-badge" id="score-badge" style="display:none">ציון: 0 / 0</div>
     <div class="quiz-list" id="quiz-list"></div>
+  </div>
+
+  <!-- Key Terms Glossary -->
+  <div id="key-terms-section" style="display:none; margin-top:36px;">
+    <div class="section-title">📖 מילון מונחים</div>
+    <div id="key-terms-list"></div>
   </div>
 
   <!-- Flashcards -->
@@ -2468,6 +2496,40 @@
     document.getElementById('search-results-panel').style.display = 'none';
     window.scrollTo({ top: 0, behavior: 'smooth' });
 
+    // Key Terms Glossary — built with DOM APIs (no innerHTML) to prevent XSS
+    const ktSection = document.getElementById('key-terms-section');
+    const ktList    = document.getElementById('key-terms-list');
+    ktList.textContent = '';
+    const keyTerms = result.key_terms || [];
+    if (keyTerms.length) {
+      keyTerms.forEach(kt => {
+        const card = document.createElement('div');
+        card.className = 'key-term-card';
+
+        const termEl = document.createElement('div');
+        termEl.className = 'key-term-term';
+        termEl.textContent = kt.term || '';
+        card.appendChild(termEl);
+
+        const defEl = document.createElement('div');
+        defEl.className = 'key-term-def';
+        defEl.textContent = kt.definition || '';
+        card.appendChild(defEl);
+
+        if (kt.context) {
+          const ctxEl = document.createElement('div');
+          ctxEl.className = 'key-term-ctx';
+          ctxEl.textContent = kt.context;
+          card.appendChild(ctxEl);
+        }
+
+        ktList.appendChild(card);
+      });
+      ktSection.style.display = 'block';
+    } else {
+      ktSection.style.display = 'none';
+    }
+
     renderFlashcards(result.flashcards || [], taskId);
     if (taskId) showChatPanel(taskId);
   }
@@ -2550,8 +2612,8 @@
     try {
       const res = await fetch(`/api/tasks/${currentTaskId}/share`, { method: 'POST' });
       if (!res.ok) throw new Error(await res.text());
-      const { share_url } = await res.json();
-      showShareBanner(share_url);
+      const { share_url, expires_at } = await res.json();
+      showShareBanner(share_url, expires_at);
       navigator.clipboard.writeText(share_url).catch(() => {});
       btn.innerHTML = '✅ קישור הועתק';
       setTimeout(() => { btn.innerHTML = orig; btn.disabled = false; }, 3000);
@@ -2562,12 +2624,34 @@
     }
   }
 
-  function showShareBanner(url) {
+  function showShareBanner(url, expiresAt) {
     const banner = document.getElementById('share-banner');
     const link = document.getElementById('share-url-link');
     link.textContent = url;
     link.href = url;
+    if (expiresAt) {
+      const d = new Date(expiresAt);
+      document.getElementById('share-expires-label').textContent =
+        'בתוקף עד ' + d.toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit', year: 'numeric' });
+    }
     banner.style.display = 'flex';
+  }
+
+  async function revokeShare() {
+    if (!currentTaskId) return;
+    const btn = document.getElementById('revoke-share-btn');
+    const orig = btn.innerHTML;
+    btn.innerHTML = '⏳';
+    btn.disabled = true;
+    try {
+      const res = await fetch(`/api/tasks/${currentTaskId}/share`, { method: 'DELETE' });
+      if (!res.ok) throw new Error(await res.text());
+      document.getElementById('share-banner').style.display = 'none';
+    } catch (e) {
+      btn.innerHTML = orig;
+      btn.disabled = false;
+      alert('שגיאה בביטול השיתוף: ' + e.message);
+    }
   }
 
   function copyShareLink() {
@@ -2619,6 +2703,31 @@
   async function loadHistory() {
     historyOffset = 0;
     await renderHistoryPage();
+  }
+
+  async function deleteHistoryTask(taskId, btn) {
+    if (!confirm('למחוק את המשימה? פעולה זו אינה הפיכה.')) return;
+    if (btn) { btn.disabled = true; btn.textContent = '…'; }
+    try {
+      const r = await fetch(`/api/tasks/${taskId}`, { method: 'DELETE' });
+      if (!r.ok && r.status !== 204) {
+        alert('המחיקה נכשלה');
+        if (btn) { btn.disabled = false; btn.textContent = '🗑️'; }
+        return;
+      }
+      // If we just deleted the currently-open task, hide its panels
+      if (typeof currentTaskId !== 'undefined' && currentTaskId === taskId) {
+        currentTaskId = null;
+        const progress = document.getElementById('progress-card');
+        if (progress) progress.style.display = 'none';
+        const result = document.getElementById('result-card');
+        if (result) result.style.display = 'none';
+      }
+      await renderHistoryPage();
+    } catch (e) {
+      alert('שגיאת רשת בעת המחיקה');
+      if (btn) { btn.disabled = false; btn.textContent = '🗑️'; }
+    }
   }
 
   function onHistorySearch() {
@@ -2684,6 +2793,16 @@
           badge.className = `h-badge ${badgeClass}`;
           badge.textContent = badgeText;
           item.appendChild(badge);
+
+          const delBtn = document.createElement('button');
+          delBtn.className = 'h-delete';
+          delBtn.title = 'מחק משימה';
+          delBtn.textContent = '🗑️';
+          delBtn.addEventListener('click', e => {
+            e.stopPropagation();
+            deleteHistoryTask(t.id, delBtn);
+          });
+          item.appendChild(delBtn);
 
           if (cramSelectMode && isCompleted) {
             const cb = document.createElement('input');
@@ -2799,6 +2918,7 @@
     document.getElementById('chapters-section').style.display = 'block';
     document.getElementById('transcript-section').style.display = 'none';
     document.getElementById('flashcards-section').style.display = 'none';
+    document.getElementById('key-terms-section').style.display = 'none';
     flashcards = []; fcIndex = 0; fcKnew = 0; fcMissed = 0; fcSeen = new Set();
     hideError();
     switchTab('url');
@@ -3533,11 +3653,13 @@
     }
   }
   document.addEventListener('DOMContentLoaded', () => {
-    loadCapabilities();
     // If we're on a /share/{token} URL, load the shared lesson (no auth needed)
+    // and skip loadCapabilities() — that endpoint requires auth and would 401.
     const shareMatch = window.location.pathname.match(/^\/share\/([a-f0-9]{32})$/);
     if (shareMatch) {
       loadSharedLesson(shareMatch[1]);
+    } else {
+      loadCapabilities();
     }
   });
 

@@ -282,12 +282,20 @@ async def cancel_task(task_id: str, user_id: str = Depends(get_current_user)):
 async def delete_task(task_id: str, user_id: str = Depends(get_current_user)):
     """
     Delete a task record from the database (only the owning user may delete).
-    Also removes the persistent audio file on disk (Feature 7).
+    Works regardless of task state — completed, failed, cancelled, or still
+    running. In-flight tasks are cancelled first so the pipeline aborts on its
+    next checkpoint instead of writing to a deleted row. Also removes the
+    persistent audio file on disk.
     """
     task = await state.get_task_for_user(task_id, user_id)
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
-    # Remove the audio file first — even if the DB delete fails, we've freed the disk
+    # Signal the pipeline to abort if it's still running — checkpoint-based,
+    # so the running coroutine will exit at its next is_task_cancelled() poll.
+    await state.cancel_task(task_id)
+    # Remove the audio file — even if the DB delete fails, we've freed the disk.
+    # On Windows the file may be locked by the still-winding-down pipeline; the
+    # try/except keeps the delete idempotent.
     audio_path = await state.get_audio_path(task_id)
     if audio_path:
         try:
@@ -363,7 +371,7 @@ async def ask_question(task_id: str, body: AskRequest, user_id: str = Depends(ge
         return {"answer": answer}
     except Exception as exc:
         logger.error(f"Ask failed for task {task_id}: {exc}")
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="שגיאה בעיבוד השאלה. נסה שוב.")
 
 
 # ── Chat with recording (multi-turn, streaming) ───────────────────────────────────
@@ -422,7 +430,7 @@ async def chat_with_recording(
                 yield f"data: {json.dumps({'text': chunk}, ensure_ascii=False)}\n\n"
         except Exception as exc:
             logger.error(f"Chat stream failed for task {task_id}: {exc}")
-            yield f"data: {json.dumps({'error': str(exc)}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'error': 'שגיאה בשיחה. נסה שוב.'}, ensure_ascii=False)}\n\n"
         finally:
             if full_response:
                 await state.append_chat_message(task_id, "model", "".join(full_response))
@@ -733,7 +741,7 @@ async def create_share_link(
     user_id: str = Depends(get_current_user),
 ):
     """
-    Generate (or return existing) a permanent public share token for a completed task.
+    Generate (or return existing) a share token for a completed task (valid 90 days).
     The token is embedded in a share URL the caller can give to anyone.
     """
     task = await state.get_task_for_user(task_id, user_id)
@@ -742,9 +750,21 @@ async def create_share_link(
     if task.result is None:
         raise HTTPException(status_code=400, detail="Task is not complete yet")
 
-    token = await state.create_share_token(task_id)
+    token, expires_at = await state.create_share_token(task_id)
     base = str(request.base_url).rstrip("/")
-    return {"share_url": f"{base}/share/{token}"}
+    return {"share_url": f"{base}/share/{token}", "expires_at": expires_at}
+
+
+@router.delete("/tasks/{task_id}/share", status_code=204)
+async def revoke_share_link(
+    task_id: str,
+    user_id: str = Depends(get_current_user),
+):
+    """Revoke the share link for a task, immediately invalidating it."""
+    task = await state.get_task_for_user(task_id, user_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    await state.revoke_share_token(task_id)
 
 
 @router.get("/share/{token}")
@@ -773,9 +793,9 @@ def _available_modes_for(provider) -> list[str]:
 
 
 @router.get("/capabilities")
-async def get_capabilities() -> dict:
+async def get_capabilities(user_id: str = Depends(get_current_user)) -> dict:
     """
-    Public read-only endpoint describing the active LLM provider's capabilities.
+    Authenticated endpoint describing the active LLM provider's capabilities.
     Frontend calls this on page load to know which processing modes to offer.
     """
     p = get_provider()
@@ -864,6 +884,6 @@ async def create_study_guide(
         guide = await summarizer.generate_cram_guide(lessons)
     except Exception as exc:
         logger.error(f"Cram guide generation failed: {exc}")
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="שגיאה ביצירת מדריך הלמידה. נסה שוב.")
 
     return guide

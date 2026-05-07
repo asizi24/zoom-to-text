@@ -109,6 +109,69 @@ def test_share_token_does_not_expose_audio(authed_client, client):
     assert body["has_audio"] is False
 
 
+def test_share_response_includes_expires_at(authed_client):
+    """POST /share must return an expires_at ISO timestamp."""
+    _seed_completed_task("share-expiry-1")
+    body = authed_client.post("/api/tasks/share-expiry-1/share").json()
+    assert "expires_at" in body
+    assert "T" in body["expires_at"]  # ISO 8601 format
+
+
+def test_revoke_share_link(authed_client, client):
+    """DELETE /share revokes the token — subsequent GET returns 404."""
+    _seed_completed_task("share-revoke-1")
+    share_url = authed_client.post("/api/tasks/share-revoke-1/share").json()["share_url"]
+    token = share_url.rstrip("/").rsplit("/", 1)[-1]
+
+    # Token works before revocation
+    assert client.get(f"/api/share/{token}").status_code == 200
+
+    # Revoke
+    r = authed_client.delete("/api/tasks/share-revoke-1/share")
+    assert r.status_code == 204
+
+    # Token no longer works
+    assert client.get(f"/api/share/{token}").status_code == 404
+
+
+def test_revoke_share_unknown_task_returns_404(authed_client):
+    r = authed_client.delete("/api/tasks/does-not-exist/share")
+    assert r.status_code == 404
+
+
+def test_expired_share_token_returns_404(authed_client, client, monkeypatch):
+    """An expired share token must return 404."""
+    from datetime import datetime, timezone, timedelta
+    import app.state as s
+
+    _seed_completed_task("share-expired-1")
+    authed_client.post("/api/tasks/share-expired-1/share")
+
+    # Back-date the expiry directly in the DB
+    async def _expire():
+        db = await s._get_db()
+        past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        await db.execute(
+            "UPDATE tasks SET share_token_expires_at=? WHERE id=?",
+            [past, "share-expired-1"],
+        )
+        await db.commit()
+
+    asyncio.run(_expire())
+
+    # Must return the current (expired) token
+    async def _get_token():
+        db = await s._get_db()
+        async with db.execute(
+            "SELECT share_token FROM tasks WHERE id=?", ["share-expired-1"]
+        ) as cur:
+            row = await cur.fetchone()
+        return row["share_token"]
+
+    token = asyncio.run(_get_token())
+    assert client.get(f"/api/share/{token}").status_code == 404
+
+
 # ── GET /share/{token} — page route ───────────────────────────────────────────
 
 def test_share_page_route_serves_html(authed_client, client):
