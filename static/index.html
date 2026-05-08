@@ -815,9 +815,9 @@
     #results-card { display: none; }
     .section-title {
       position: relative;
-      font-size: 1.05rem; font-weight: 700; color: #e2e8f0;
+      font-size: 1.08rem; font-weight: 700; color: #f0e9ff;
       border-right: 3px solid #db2777;
-      padding: 8px 14px 8px 18px;
+      padding: 10px 16px 10px 18px;
       margin-bottom: 22px;
       border-radius: 8px 0 0 8px;
       background: linear-gradient(270deg,
@@ -833,6 +833,143 @@
       background: linear-gradient(180deg, transparent, rgba(196,181,253,.25), transparent);
       filter: blur(4px);
     }
+
+    /* ── Hero block — visual anchor at the top of the result page ── */
+    #hero-block {
+      position: relative;
+      margin: 8px 0 28px;
+      padding: 26px 28px 22px;
+      border-radius: 18px;
+      background:
+        radial-gradient(circle at 100% 0%, rgba(219,39,119,.20), transparent 55%),
+        radial-gradient(circle at 0% 100%, rgba(124,58,237,.20), transparent 55%),
+        linear-gradient(135deg, rgba(124,58,237,.12), rgba(219,39,119,.06));
+      border: 1px solid rgba(196,181,253,.22);
+      overflow: hidden;
+      box-shadow: 0 20px 50px -28px rgba(124,58,237,.45);
+      animation: heroReveal .6s cubic-bezier(.2,.8,.2,1) both;
+    }
+    /* Decorative diagonal stripe (tiny pixel grid) */
+    #hero-block::before {
+      content: '';
+      position: absolute; inset: 0;
+      background-image:
+        radial-gradient(rgba(255,255,255,.05) 1px, transparent 1px);
+      background-size: 18px 18px;
+      mask-image: linear-gradient(to top left, transparent 60%, #000);
+      -webkit-mask-image: linear-gradient(to top left, transparent 60%, #000);
+      pointer-events: none;
+      opacity: .7;
+    }
+    /* Glow accent in corner */
+    #hero-block::after {
+      content: '';
+      position: absolute; top: -50px; left: -50px;
+      width: 180px; height: 180px;
+      background: radial-gradient(circle, rgba(124,58,237,.45), transparent 65%);
+      filter: blur(30px);
+      pointer-events: none;
+    }
+    @keyframes heroReveal {
+      from { opacity: 0; transform: translateY(8px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .hero-eyebrow {
+      display: inline-flex; align-items: center; gap: 8px;
+      font-size: .72rem;
+      color: rgba(196,181,253,.95);
+      letter-spacing: .12em;
+      text-transform: uppercase;
+      font-weight: 600;
+      margin-bottom: 10px;
+      position: relative; z-index: 1;
+    }
+    .hero-eyebrow-dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: linear-gradient(135deg, #7c3aed, #db2777);
+      box-shadow: 0 0 8px rgba(219,39,119,.6);
+    }
+    .hero-eyebrow-sep {
+      opacity: .4;
+    }
+    .hero-title {
+      font-size: 1.65rem;
+      font-weight: 800;
+      color: #fff;
+      line-height: 1.25;
+      margin: 0 0 20px 0;
+      letter-spacing: -.015em;
+      max-width: 90%;
+      position: relative; z-index: 1;
+      background: linear-gradient(120deg, #fff 30%, #e9d5ff 80%);
+      -webkit-background-clip: text;
+      background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .hero-stats {
+      display: flex; gap: 0; flex-wrap: wrap;
+      position: relative; z-index: 1;
+    }
+    .hero-stat {
+      display: flex; flex-direction: column; align-items: flex-start;
+      padding: 0 22px;
+      border-right: 1px solid rgba(196,181,253,.22);
+      min-width: 78px;
+    }
+    .hero-stat:first-child { padding-right: 0; }
+    .hero-stat:last-child  { border-right: none; }
+    .hero-stat-icon {
+      font-size: .9rem;
+      opacity: .7;
+      margin-bottom: 2px;
+      filter: grayscale(.2);
+    }
+    .hero-stat-num {
+      font-size: 1.7rem;
+      font-weight: 800;
+      color: #f0e9ff;
+      line-height: 1;
+      letter-spacing: -.02em;
+      font-feature-settings: 'tnum';
+      margin-bottom: 4px;
+    }
+    .hero-stat-label {
+      font-size: .68rem;
+      color: rgba(196,181,253,.7);
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      font-weight: 500;
+    }
+
+    @media (max-width: 540px) {
+      #hero-block { padding: 20px 18px 16px; border-radius: 14px; }
+      .hero-title { font-size: 1.25rem; max-width: 100%; }
+      .hero-stats { gap: 0; }
+      .hero-stat { padding: 0 12px; min-width: 56px; }
+      .hero-stat-num { font-size: 1.25rem; }
+      .hero-stat-label { font-size: .6rem; }
+    }
+
+    /* Hero block must NOT print — print-header takes its place */
+    @media print {
+      #hero-block { display: none !important; }
+    }
+
+    /* ── Stagger reveal for sections ── */
+    @keyframes sectionFadeIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    #results-card .section-title,
+    #results-card .summary-text,
+    #results-card .chapters-list,
+    #results-card #quiz-list,
+    #results-card #key-terms-list {
+      animation: sectionFadeIn .5s cubic-bezier(.2,.8,.2,1) both;
+    }
+    #results-card .summary-text     { animation-delay: .08s; }
+    #results-card #chapters-section { animation: sectionFadeIn .5s cubic-bezier(.2,.8,.2,1) .15s both; }
+    #results-card .chapters-list    { animation-delay: .18s; }
 
     /* ── Results action bar ── */
     .results-actions {
@@ -883,21 +1020,40 @@
     .copy-btn:hover { border-color: rgba(124,58,237,.5); color: #c4b5fd; }
     .copy-btn.copied { border-color: var(--success); color: #6ee7b7; }
     .summary-text {
-      line-height: 1.95; color: var(--text); font-size: .95rem;
-      white-space: pre-wrap; padding: 14px 18px 14px 22px;
-      background: linear-gradient(135deg, rgba(255,255,255,.025), rgba(255,255,255,.01));
-      border: 1px solid rgba(255,255,255,.05);
-      border-radius: 12px;
+      line-height: 1.95; color: var(--text); font-size: .98rem;
+      white-space: pre-wrap; padding: 22px 26px 20px 26px;
+      background:
+        radial-gradient(circle at 100% 0%, rgba(124,58,237,.06), transparent 50%),
+        linear-gradient(135deg, rgba(255,255,255,.035), rgba(255,255,255,.01));
+      border: 1px solid rgba(255,255,255,.07);
+      border-right: 3px solid rgba(124,58,237,.55);
+      border-radius: 14px;
       position: relative;
+      overflow: hidden;
     }
     .summary-text::before {
       content: '“';
-      position: absolute; top: -6px; right: 12px;
+      position: absolute; top: 4px; right: 18px;
       font-family: 'Georgia', 'Times', serif;
-      font-size: 3rem; line-height: 1;
-      color: rgba(196,181,253,.18);
+      font-size: 3.6rem; line-height: 1;
+      color: rgba(196,181,253,.22);
       pointer-events: none;
       font-weight: 700;
+    }
+    /* Decorative diagonal accent on the bottom-left of the summary block */
+    .summary-text::after {
+      content: '';
+      position: absolute; bottom: -36px; left: -36px;
+      width: 110px; height: 110px;
+      background: radial-gradient(circle, rgba(219,39,119,.18), transparent 65%);
+      filter: blur(8px);
+      pointer-events: none;
+    }
+    /* Subtle gradient on the first line — gives the summary block a refined
+       opening without the layout headaches of drop-cap in RTL. */
+    .summary-text::first-line {
+      color: #f5eeff;
+      font-weight: 500;
     }
 
     /* ── Chapters ── */
@@ -3015,6 +3171,41 @@
     <div class="ap-hint">💡 לחץ על [MM:SS] בסיכום/צ'אט לקפיצה לנקודה — Space = נגן/השהה</div>
   </div>
 
+  <!-- Hero block — visual anchor that gives a sense of the lesson at a glance -->
+  <div id="hero-block">
+    <div class="hero-eyebrow">
+      <span class="hero-eyebrow-dot"></span>
+      <span>📚 סיכום שיעור</span>
+      <span class="hero-eyebrow-sep">·</span>
+      <span id="hero-date"></span>
+      <span class="hero-eyebrow-sep" id="hero-source-sep" style="display:none;">·</span>
+      <span id="hero-source"></span>
+    </div>
+    <h1 class="hero-title" id="hero-title">סיכום השיעור</h1>
+    <div class="hero-stats" id="hero-stats">
+      <div class="hero-stat" data-key="chapters">
+        <span class="hero-stat-icon">📚</span>
+        <span class="hero-stat-num" id="hero-stat-chapters">0</span>
+        <span class="hero-stat-label">פרקים</span>
+      </div>
+      <div class="hero-stat" data-key="quiz">
+        <span class="hero-stat-icon">🧠</span>
+        <span class="hero-stat-num" id="hero-stat-quiz">0</span>
+        <span class="hero-stat-label">שאלות</span>
+      </div>
+      <div class="hero-stat" data-key="terms">
+        <span class="hero-stat-icon">📖</span>
+        <span class="hero-stat-num" id="hero-stat-terms">0</span>
+        <span class="hero-stat-label">מונחים</span>
+      </div>
+      <div class="hero-stat" data-key="flashcards">
+        <span class="hero-stat-icon">🃏</span>
+        <span class="hero-stat-num" id="hero-stat-flashcards">0</span>
+        <span class="hero-stat-label">כרטיסיות</span>
+      </div>
+    </div>
+  </div>
+
   <!-- Action bar -->
   <div class="results-actions">
     <!-- Primary actions -->
@@ -3717,6 +3908,63 @@
   // ══════════════════════════════════════════════════════════════════════════
   // Results rendering
   // ══════════════════════════════════════════════════════════════════════════
+  // Populate the on-screen hero block at the top of the result card.
+  // Lightweight — just reads result counts; never makes a network call.
+  function populateHeroBlock(taskId, result) {
+    try {
+      const dateEl = document.getElementById('hero-date');
+      if (dateEl) {
+        dateEl.textContent = new Intl.DateTimeFormat('he-IL', {
+          day: '2-digit', month: 'short', year: 'numeric',
+        }).format(new Date());
+      }
+      const titleEl = document.getElementById('hero-title');
+      if (titleEl) {
+        const firstChapter = (result && result.chapters && result.chapters[0] && result.chapters[0].title) || '';
+        titleEl.textContent = firstChapter ? firstChapter : 'סיכום השיעור';
+      }
+      const set = (id, n) => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = String(n || 0);
+      };
+      set('hero-stat-chapters',   (result && result.chapters || []).length);
+      set('hero-stat-quiz',       (result && result.quiz || []).length);
+      set('hero-stat-terms',      (result && result.key_terms || []).length);
+      set('hero-stat-flashcards', (result && result.flashcards || []).length);
+
+      // Hide stats with zero count to keep the strip looking intentional
+      document.querySelectorAll('#hero-stats .hero-stat').forEach(stat => {
+        const num = stat.querySelector('.hero-stat-num');
+        const v = num ? parseInt(num.textContent, 10) : 0;
+        stat.style.display = v > 0 ? '' : 'none';
+      });
+
+      // Hide whole stats strip if literally nothing to show
+      const anyVisible = Array.from(document.querySelectorAll('#hero-stats .hero-stat'))
+        .some(el => el.style.display !== 'none');
+      const stripEl = document.getElementById('hero-stats');
+      if (stripEl) stripEl.style.display = anyVisible ? '' : 'none';
+
+      // Source label — fire-and-forget fetch (same as print header)
+      const srcSep = document.getElementById('hero-source-sep');
+      const srcEl  = document.getElementById('hero-source');
+      if (srcSep) srcSep.style.display = 'none';
+      if (srcEl)  srcEl.textContent = '';
+      if (taskId && srcEl) {
+        fetch(`/api/tasks/${taskId}`).then(r => r.ok ? r.json() : null).then(task => {
+          if (!task || !task.url) return;
+          let label = task.url;
+          if (label.startsWith('upload:')) label = 'העלאה';
+          else if (label.includes('zoom.us')) label = 'Zoom';
+          else if (label.includes('youtube.com') || label.includes('youtu.be')) label = 'YouTube';
+          else label = 'קישור חיצוני';
+          srcEl.textContent = label;
+          if (srcSep) srcSep.style.display = '';
+        }).catch(() => {});
+      }
+    } catch (e) { /* never break rendering over a header */ }
+  }
+
   // Populate the print-only header (used for the Print / PDF view).
   // Fire-and-forget — even if the source fetch fails, date+lang still render.
   function populatePrintHeader(taskId, result) {
@@ -3767,6 +4015,7 @@
     document.getElementById('input-card').style.display = 'none';
     document.querySelector('.brand').style.display = 'none';
     document.querySelector('.stats').style.display = 'none';
+    populateHeroBlock(taskId, result);
     populatePrintHeader(taskId, result);
 
     // Cache banner — shown when this task was served from a previous run's cache
