@@ -99,6 +99,25 @@ async def run_pipeline(
     """Full pipeline starting from a Zoom URL."""
     audio_path: str | None = None
     try:
+        # ── URL cache ────────────────────────────────────────────────────
+        # If this user already has a completed task for the same Zoom URL,
+        # skip the entire download → transcribe → LLM pipeline and clone
+        # the existing result_json into the new task. Saves time + LLM cost.
+        # Cross-user lookup is intentionally disabled — privacy: user A's
+        # summary of a private Zoom should never surface for user B.
+        owner_id = await state.get_task_user_id(task_id)
+        if owner_id:
+            cached = await state.find_cached_task(url, owner_id)
+            if cached is not None and cached.task_id != task_id:
+                cached_json = await state.get_result_json(cached.task_id)
+                if cached_json:
+                    await state.copy_result_from_cached(task_id, cached_json)
+                    logger.info(
+                        f"Task {task_id}: served from cache "
+                        f"(source={cached.task_id})"
+                    )
+                    return
+
         await state.update_task(
             task_id, TaskStatus.DOWNLOADING, 5, "⬇️ מוריד את ההקלטה מ-Zoom..."
         )

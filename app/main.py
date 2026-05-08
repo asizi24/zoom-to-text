@@ -49,6 +49,46 @@ async def _idle_watcher():
             logger.warning(f"Idle watcher error (non-fatal): {e}")
 
 
+# Failed-task TTL (hours). Failed tasks not retried within this window are
+# auto-deleted by _failed_task_cleanup() to free disk on the 10 GB volume.
+_FAILED_TTL_HOURS = 24
+_CLEANUP_INTERVAL_SECONDS = 60 * 60  # once an hour
+
+
+async def _failed_task_cleanup():
+    """
+    Hourly background task that deletes failed tasks older than _FAILED_TTL_HOURS,
+    along with their persisted audio file on disk. Logs the count and any
+    per-file removal errors but never raises — the loop must keep running.
+    """
+    # Run once shortly after startup so a long-down server cleans up legacy
+    # stragglers immediately instead of waiting an hour.
+    await asyncio.sleep(5)
+    while True:
+        try:
+            removed = await state.cleanup_stale_failed_tasks(_FAILED_TTL_HOURS)
+            if removed:
+                logger.info(
+                    f"Cleanup: removed {len(removed)} stale failed task(s) "
+                    f"older than {_FAILED_TTL_HOURS}h"
+                )
+                for entry in removed:
+                    audio = entry.get("audio_path")
+                    if not audio:
+                        continue
+                    try:
+                        p = Path(audio)
+                        if p.exists():
+                            p.unlink()
+                    except Exception as exc:
+                        logger.warning(
+                            f"Cleanup: could not remove audio for {entry['id']}: {exc}"
+                        )
+        except Exception as exc:
+            logger.warning(f"Failed-task cleanup error (non-fatal): {exc}")
+        await asyncio.sleep(_CLEANUP_INTERVAL_SECONDS)
+
+
 # ── Application lifespan ──────────────────────────────────────────────────────────
 
 @asynccontextmanager
@@ -81,6 +121,13 @@ async def lifespan(app: FastAPI):
         f"{settings.auto_shutdown_idle_minutes} idle minutes)"
     )
 
+    # Start failed-task cleanup task (auto-deletes failed tasks older than 24h)
+    cleanup = asyncio.create_task(_failed_task_cleanup())
+    logger.info(
+        f"Failed-task cleanup started (TTL: {_FAILED_TTL_HOURS}h, "
+        f"interval: {_CLEANUP_INTERVAL_SECONDS // 60}min)"
+    )
+
     logger.info("✅ Server ready — listening on port 8000")
     if settings.enable_docs:
         logger.info(f"   API docs: {settings.base_url}/docs")
@@ -91,6 +138,7 @@ async def lifespan(app: FastAPI):
 
     # ── Shutdown ──
     watcher.cancel()
+    cleanup.cancel()
     await state.close_db()
     logger.info("Server shutting down — goodbye")
 

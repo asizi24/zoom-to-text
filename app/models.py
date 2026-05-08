@@ -205,3 +205,7 @@ class TaskResponse(BaseModel):
     error_details: Optional[dict] = None
     # True iff the server has a playable audio file for this task (Feature 7)
     has_audio: bool = False
+    # ISO 8601 UTC timestamp of when the task entered status='failed'.
+    # Used by the auto-cleanup task (24h TTL) and the UI countdown.
+    # None for tasks that never failed.
+    failed_at: Optional[str] = None

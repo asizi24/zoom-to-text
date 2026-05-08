@@ -55,6 +55,10 @@ CREATE_TASKS_INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks (user_id)
 """
 
+CREATE_TASKS_URL_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_tasks_user_url_status ON tasks (user_id, url, status)
+"""
+
 CREATE_USERS_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS users (
     id         TEXT PRIMARY KEY,
@@ -168,9 +172,14 @@ async def init_db():
         await db.execute("ALTER TABLE tasks ADD COLUMN share_token_expires_at TEXT")
         await db.commit()
         logger.info("Migrated tasks table: added share_token_expires_at column")
+    if "failed_at" not in cols:
+        await db.execute("ALTER TABLE tasks ADD COLUMN failed_at TEXT")
+        await db.commit()
+        logger.info("Migrated tasks table: added failed_at column (auto-cleanup TTL)")
 
-    # Create index now that user_id column is guaranteed to exist
+    # Create indexes now that user_id column is guaranteed to exist
     await db.execute(CREATE_TASKS_INDEX_SQL)
+    await db.execute(CREATE_TASKS_URL_INDEX_SQL)
     await db.commit()
 
     # Migrate: add rate-limiting columns to users table if needed
@@ -254,8 +263,14 @@ async def _mark_interrupted_tasks_failed():
     placeholders = ",".join("?" * len(in_flight))
     db = await _get_db()
     result = await db.execute(
-        f"UPDATE tasks SET status=?, progress=0, message=?, error=? WHERE status IN ({placeholders})",
-        [TaskStatus.FAILED.value, "השרת הופעל מחדש — המשימה הופסקה", "השרת הופעל מחדש — נסה שוב"] + in_flight,
+        f"UPDATE tasks SET status=?, progress=0, message=?, error=?, failed_at=? "
+        f"WHERE status IN ({placeholders})",
+        [
+            TaskStatus.FAILED.value,
+            "השרת הופעל מחדש — המשימה הופסקה",
+            "השרת הופעל מחדש — נסה שוב",
+            _now().isoformat(),
+        ] + in_flight,
     )
     if result.rowcount:
         logger.warning(f"Marked {result.rowcount} interrupted task(s) as failed on startup")
@@ -327,10 +342,24 @@ async def fail_task(
             details_json = None
     db = await _get_db()
     await db.execute(
-        "UPDATE tasks SET status=?, message=?, error=?, error_details=? WHERE id=?",
-        [TaskStatus.FAILED.value, f"Failed: {short_error}", short_error, details_json, task_id],
+        "UPDATE tasks SET status=?, message=?, error=?, error_details=?, failed_at=? WHERE id=?",
+        [
+            TaskStatus.FAILED.value,
+            f"Failed: {short_error}",
+            short_error,
+            details_json,
+            _now().isoformat(),
+            task_id,
+        ],
     )
     await db.commit()
+
+
+def _row_failed_at(row) -> Optional[str]:
+    """Read failed_at from a row defensively (column may be absent on legacy DBs)."""
+    if "failed_at" not in row.keys():
+        return None
+    return row["failed_at"]
 
 
 async def get_task(task_id: str) -> Optional[TaskResponse]:
@@ -359,6 +388,7 @@ async def get_task(task_id: str) -> Optional[TaskResponse]:
         error=row["error"],
         error_details=_decode_error_details(row),
         has_audio=has_audio,
+        failed_at=_row_failed_at(row),
     )
 
 
@@ -396,6 +426,7 @@ async def get_task_for_user(task_id: str, user_id: str) -> Optional[TaskResponse
         error=row["error"],
         error_details=_decode_error_details(row),
         has_audio=has_audio,
+        failed_at=_row_failed_at(row),
     )
 
 
@@ -446,7 +477,7 @@ async def list_tasks(
     params.extend([limit, offset])
 
     async with db.execute(
-        f"SELECT id, status, progress, message, created_at, url FROM tasks "
+        f"SELECT id, status, progress, message, created_at, url, failed_at FROM tasks "
         f"{where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
         params,
     ) as cursor:
@@ -955,4 +986,261 @@ async def get_task_by_share_token(token: str) -> Optional[TaskResponse]:
         error=row["error"],
         error_details=_decode_error_details(row),
         has_audio=False,  # audio requires auth; not exposed in public share
+        failed_at=_row_failed_at(row),
     )
+
+
+# ── Bulk delete + Retry + URL cache + Speaker map + Auto-cleanup ─────────────
+
+async def bulk_delete_tasks(task_ids: list[str], user_id: str) -> dict:
+    """
+    Delete multiple tasks owned by user_id in one round-trip.
+
+    IDs not owned by the caller are silently skipped — same anti-enumeration
+    behavior as get_task_for_user. In-flight tasks are marked cancelled
+    first so any running pipeline coroutine aborts at its next checkpoint.
+
+    Returns:
+        {
+          "deleted": [task_id, ...]    — IDs actually removed,
+          "skipped": [task_id, ...]    — IDs not owned/found,
+          "audio_paths": [path, ...]   — disk paths to clean up (caller's job),
+        }
+    """
+    if not task_ids:
+        return {"deleted": [], "skipped": [], "audio_paths": []}
+
+    db = await _get_db()
+    placeholders = ",".join("?" * len(task_ids))
+    async with db.execute(
+        f"SELECT id, audio_path, status FROM tasks "
+        f"WHERE id IN ({placeholders}) AND (user_id=? OR user_id IS NULL)",
+        task_ids + [user_id],
+    ) as cursor:
+        rows = await cursor.fetchall()
+
+    owned_ids = [row["id"] for row in rows]
+    audio_paths = [row["audio_path"] for row in rows if row["audio_path"]]
+
+    if not owned_ids:
+        return {"deleted": [], "skipped": list(task_ids), "audio_paths": []}
+
+    in_flight = [
+        TaskStatus.PENDING.value,
+        TaskStatus.DOWNLOADING.value,
+        TaskStatus.TRANSCRIBING.value,
+        TaskStatus.SUMMARIZING.value,
+    ]
+    in_flight_ph = ",".join("?" * len(in_flight))
+    owned_ph = ",".join("?" * len(owned_ids))
+
+    # Cancel any in-flight tasks among owned_ids so their pipelines abort
+    await db.execute(
+        f"UPDATE tasks SET status=?, message=? "
+        f"WHERE id IN ({owned_ph}) AND status IN ({in_flight_ph})",
+        [TaskStatus.CANCELLED.value, "❌ נמחק (מחיקה מרובה)"]
+        + owned_ids
+        + in_flight,
+    )
+    await db.execute(
+        f"DELETE FROM tasks WHERE id IN ({owned_ph})",
+        owned_ids,
+    )
+    await db.commit()
+
+    owned_set = set(owned_ids)
+    skipped = [tid for tid in task_ids if tid not in owned_set]
+    return {"deleted": owned_ids, "skipped": skipped, "audio_paths": audio_paths}
+
+
+async def mark_task_for_retry(task_id: str, user_id: str) -> bool:
+    """
+    Reset a failed task back to 'pending' so the caller can re-run the pipeline.
+    Returns True iff the task was owned by user_id AND was in 'failed' status.
+    Clears error/error_details/failed_at and sets progress=0.
+    """
+    db = await _get_db()
+    result = await db.execute(
+        "UPDATE tasks SET status=?, progress=0, message=?, "
+        "error=NULL, error_details=NULL, failed_at=NULL "
+        "WHERE id=? AND user_id=? AND status=?",
+        [
+            TaskStatus.PENDING.value,
+            "🔁 ממתין להפעלה מחדש...",
+            task_id,
+            user_id,
+            TaskStatus.FAILED.value,
+        ],
+    )
+    await db.commit()
+    return result.rowcount > 0
+
+
+async def get_task_user_id(task_id: str) -> Optional[str]:
+    """Return the owning user_id for a task (None if task missing or unowned)."""
+    db = await _get_db()
+    async with db.execute(
+        "SELECT user_id FROM tasks WHERE id=?", [task_id]
+    ) as cursor:
+        row = await cursor.fetchone()
+    if row is None:
+        return None
+    return row["user_id"]
+
+
+async def find_cached_task(url: str, user_id: str) -> Optional[TaskResponse]:
+    """
+    Look up the most recent COMPLETED task with the same URL belonging to user_id.
+
+    Used by the pipeline for URL-based deduplication: if a user submits the same
+    Zoom recording twice, we surface the existing summary instead of redoing the
+    download + transcription + LLM calls.
+
+    Returns None if no completed task exists for this URL+user combination.
+    Empty/falsy URLs are not cached (file uploads use 'upload:filename' which
+    we don't dedupe — the file content can differ).
+    """
+    if not url or url.startswith("upload:"):
+        return None
+    db = await _get_db()
+    async with db.execute(
+        "SELECT * FROM tasks WHERE url=? AND user_id=? AND status=? "
+        "AND result_json IS NOT NULL ORDER BY created_at DESC LIMIT 1",
+        [url, user_id, TaskStatus.COMPLETED.value],
+    ) as cursor:
+        row = await cursor.fetchone()
+    if row is None:
+        return None
+
+    result = LessonResult.model_validate_json(row["result_json"])
+    audio_path = row["audio_path"] if "audio_path" in row.keys() else None
+    has_audio = bool(audio_path) and Path(audio_path).exists()
+    return TaskResponse(
+        task_id=row["id"],
+        status=TaskStatus(row["status"]),
+        progress=row["progress"],
+        message=row["message"],
+        created_at=row["created_at"],
+        url=row["url"],
+        result=result,
+        error=row["error"],
+        error_details=_decode_error_details(row),
+        has_audio=has_audio,
+        failed_at=_row_failed_at(row),
+    )
+
+
+async def copy_result_from_cached(task_id: str, source_result_json: str) -> None:
+    """
+    Mark a task complete by copying the result_json from a cached task.
+
+    Each task keeps its own row + its own copy of the JSON blob, so deleting
+    the cache source later does not cascade to the cloned tasks. We do NOT
+    copy the audio_path — only one task owns the persisted audio file, and
+    the playback button will be hidden for clones (has_audio=False).
+    """
+    db = await _get_db()
+    await db.execute(
+        "UPDATE tasks SET status=?, progress=100, message=?, "
+        "result_json=?, error=NULL, error_details=NULL, failed_at=NULL "
+        "WHERE id=?",
+        [
+            TaskStatus.COMPLETED.value,
+            "♻️ נטען מהמטמון (נחסכו זמן ועלות LLM)",
+            source_result_json,
+            task_id,
+        ],
+    )
+    await db.commit()
+
+
+async def get_result_json(task_id: str) -> Optional[str]:
+    """Return the raw result_json string for a task (used by the cache copier)."""
+    db = await _get_db()
+    async with db.execute(
+        "SELECT result_json FROM tasks WHERE id=?", [task_id]
+    ) as cursor:
+        row = await cursor.fetchone()
+    if row is None:
+        return None
+    return row["result_json"]
+
+
+async def cleanup_stale_failed_tasks(threshold_hours: int = 24) -> list[dict]:
+    """
+    Delete any failed task whose `failed_at` is older than the threshold.
+
+    Returns list of {"id": str, "audio_path": Optional[str]} for the rows that
+    were removed, so the caller can clean up disk artefacts. Tasks without
+    failed_at (legacy rows that failed before the column existed) are NOT
+    removed automatically — they need a manual delete.
+    """
+    db = await _get_db()
+    cutoff = (_now() - timedelta(hours=threshold_hours)).isoformat()
+    async with db.execute(
+        "SELECT id, audio_path FROM tasks "
+        "WHERE status=? AND failed_at IS NOT NULL AND failed_at < ?",
+        [TaskStatus.FAILED.value, cutoff],
+    ) as cursor:
+        rows = await cursor.fetchall()
+    if not rows:
+        return []
+    ids = [row["id"] for row in rows]
+    placeholders = ",".join("?" * len(ids))
+    await db.execute(
+        f"DELETE FROM tasks WHERE id IN ({placeholders})",
+        ids,
+    )
+    await db.commit()
+    return [{"id": r["id"], "audio_path": r["audio_path"]} for r in rows]
+
+
+async def update_speaker_map(
+    task_id: str,
+    user_id: str,
+    speaker_map: dict[str, str],
+) -> bool:
+    """
+    Update only the speaker_map field within result_json for a task.
+
+    The user provides corrected names ({"Speaker A": "Asaf", "Speaker B": "Lecturer"}),
+    which improves both the transcript display and the chat (the speaker_map is
+    embedded in the chat context so the LLM can answer "how many questions did
+    Asaf ask" using real names).
+
+    Returns False if task not owned/found, has no result yet, or result_json is
+    not valid JSON.
+    """
+    import json as _json
+
+    db = await _get_db()
+    async with db.execute(
+        "SELECT result_json FROM tasks WHERE id=? AND user_id=?",
+        [task_id, user_id],
+    ) as cursor:
+        row = await cursor.fetchone()
+    if row is None or not row["result_json"]:
+        return False
+    try:
+        data = _json.loads(row["result_json"])
+    except (TypeError, ValueError):
+        logger.warning(f"update_speaker_map: result_json for {task_id} is not valid JSON")
+        return False
+    # Filter the map: keep only string→string entries with non-empty values.
+    # Empty values mean "remove this speaker name" — we delete the key.
+    cleaned: dict[str, str] = {}
+    for k, v in (speaker_map or {}).items():
+        if not isinstance(k, str):
+            continue
+        if v is None or (isinstance(v, str) and not v.strip()):
+            continue
+        if isinstance(v, str):
+            cleaned[k] = v.strip()[:80]  # cap individual names at 80 chars
+    data["speaker_map"] = cleaned
+    new_json = _json.dumps(data, ensure_ascii=False)
+    await db.execute(
+        "UPDATE tasks SET result_json=? WHERE id=?",
+        [new_json, task_id],
+    )
+    await db.commit()
+    return True

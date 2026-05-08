@@ -44,6 +44,25 @@ def _task_rate_limit(request: Request) -> str:  # noqa: ARG001 — request requi
     return f"{n}/minute"
 
 
+# ── Request models used across endpoints ─────────────────────────────────────────
+
+class BulkDeleteRequest(BaseModel):
+    task_ids: list[str] = Field(..., min_length=1, max_length=100)
+
+
+class RetryRequest(BaseModel):
+    mode: ProcessingMode = ProcessingMode.GEMINI_DIRECT
+    cookies: str | None = None
+    language: str = "he"
+
+
+class SpeakerMapUpdate(BaseModel):
+    speaker_map: dict[str, str] = Field(
+        ...,
+        description='Mapping of speaker label → real name, e.g. {"Speaker A": "Asaf"}',
+    )
+
+
 # ── Start job from URL ────────────────────────────────────────────────────────────
 
 @router.post("/tasks", response_model=TaskResponse, status_code=202)
@@ -293,18 +312,122 @@ async def delete_task(task_id: str, user_id: str = Depends(get_current_user)):
     # Signal the pipeline to abort if it's still running — checkpoint-based,
     # so the running coroutine will exit at its next is_task_cancelled() poll.
     await state.cancel_task(task_id)
-    # Remove the audio file — even if the DB delete fails, we've freed the disk.
-    # On Windows the file may be locked by the still-winding-down pipeline; the
-    # try/except keeps the delete idempotent.
     audio_path = await state.get_audio_path(task_id)
-    if audio_path:
-        try:
-            p = Path(audio_path)
-            if p.exists() and _path_under_audio_root(p):
-                p.unlink()
-        except Exception as exc:
-            logger.warning(f"Could not remove audio for {task_id}: {exc}")
+    _remove_audio_safely(audio_path, task_id)
     await state.delete_task(task_id)
+
+
+# ── Bulk operations ───────────────────────────────────────────────────────────────
+
+@router.post("/tasks/bulk_delete")
+async def bulk_delete_tasks_endpoint(
+    body: BulkDeleteRequest,
+    user_id: str = Depends(get_current_user),
+):
+    """
+    Delete several tasks owned by the caller in one round-trip.
+
+    Accepts up to 100 task IDs. Tasks not owned by the caller are silently
+    listed under "skipped" — same anti-enumeration policy as DELETE per task.
+    Audio files on disk are best-effort removed.
+
+    Response:
+      {"deleted": [task_id, ...], "skipped": [task_id, ...]}
+    """
+    outcome = await state.bulk_delete_tasks(body.task_ids, user_id)
+    for path in outcome.get("audio_paths", []):
+        # Use the deleted task IDs collectively for log context — the audio_paths
+        # list is parallel-ish but we don't track which path → which id.
+        _remove_audio_safely(path, "bulk_delete")
+    return {"deleted": outcome["deleted"], "skipped": outcome["skipped"]}
+
+
+# ── Retry failed task ─────────────────────────────────────────────────────────────
+
+@router.post("/tasks/{task_id}/retry", response_model=TaskResponse, status_code=202)
+@limiter.limit(_task_rate_limit)
+async def retry_task(
+    request: Request,
+    task_id: str,
+    body: RetryRequest,
+    background_tasks: BackgroundTasks,
+    user_id: str = Depends(enforce_rate_limit),
+):
+    """
+    Re-run a failed task by spawning a NEW task with the same source URL.
+
+    Why a new task instead of in-place reset?
+      - We don't store the original mode/language/cookies in the DB row, so
+        an honest retry needs the caller to re-supply them (defaults: gemini_direct + he).
+      - Keeping the new run as a fresh row preserves history and avoids racy
+        UI updates on the old "failed" card.
+
+    The old failed row is deleted (along with its audio file). Returns the
+    fresh task record so the UI can switch to polling its progress.
+
+    Returns 400 when the source was an upload (`upload:filename`) — those
+    files are gone after the original processor cleanup; the user must
+    upload the file again.
+    """
+    old = await state.get_task_for_user(task_id, user_id)
+    if old is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if old.status != TaskStatus.FAILED:
+        raise HTTPException(
+            status_code=400,
+            detail="Only failed tasks can be retried",
+        )
+    if not old.url or old.url.startswith("upload:"):
+        raise HTTPException(
+            status_code=400,
+            detail="הקובץ המקורי אינו זמין יותר — נא להעלות שוב",
+        )
+
+    # Spawn a fresh row, then delete the old one + its audio
+    new_id = str(uuid.uuid4())
+    new_task = await state.create_task(new_id, old.url, user_id=user_id)
+    old_audio = await state.get_audio_path(task_id)
+    _remove_audio_safely(old_audio, task_id)
+    await state.delete_task(task_id)
+
+    background_tasks.add_task(
+        processor.run_pipeline,
+        task_id=new_id,
+        url=old.url,
+        mode=body.mode,
+        cookies=body.cookies,
+        language=body.language,
+    )
+    return new_task
+
+
+# ── Speaker map editing ───────────────────────────────────────────────────────────
+
+@router.patch("/tasks/{task_id}/speakers", response_model=TaskResponse)
+async def update_speakers(
+    task_id: str,
+    body: SpeakerMapUpdate,
+    user_id: str = Depends(get_current_user),
+):
+    """
+    Replace the `speaker_map` field within a completed task's result.
+
+    The map is sanitized server-side: empty values drop the key, names are
+    trimmed and capped at 80 characters. The chat endpoints embed the
+    resulting map into their context so future questions can reference real
+    names ("how many questions did Asaf ask?") instead of "Speaker A/B/C".
+    """
+    task = await state.get_task_for_user(task_id, user_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.result is None:
+        raise HTTPException(status_code=400, detail="Task has no result yet")
+
+    ok = await state.update_speaker_map(task_id, user_id, body.speaker_map)
+    if not ok:
+        raise HTTPException(status_code=400, detail="Could not update speaker map")
+    updated = await state.get_task_for_user(task_id, user_id)
+    return updated
 
 
 # ── Live transcript preview ───────────────────────────────────────────────────────
@@ -352,19 +475,7 @@ async def ask_question(task_id: str, body: AskRequest, user_id: str = Depends(ge
     if task.result is None:
         raise HTTPException(status_code=400, detail="Task has no result yet — wait for processing to complete")
 
-    # Build context from the stored result
-    context_parts = []
-    if task.result.summary:
-        context_parts.append(f"סיכום:\n{task.result.summary}")
-    for ch in task.result.chapters:
-        context_parts.append(f"\nפרק: {ch.title}\n{ch.content}")
-        if ch.key_points:
-            context_parts.append("נקודות מרכזיות: " + ", ".join(ch.key_points))
-    if task.result.transcript:
-        # Include up to 30k chars of transcript for richer answers
-        context_parts.append(f"\nתמלול:\n{task.result.transcript[:30000]}")
-
-    context = "\n".join(context_parts)
+    context = _build_lesson_context(task.result)
 
     try:
         answer = await summarizer.ask_about_lesson(context, body.question)
@@ -377,7 +488,15 @@ async def ask_question(task_id: str, body: AskRequest, user_id: str = Depends(ge
 # ── Chat with recording (multi-turn, streaming) ───────────────────────────────────
 
 def _build_lesson_context(result) -> str:
-    """Build a rich context string from a completed lesson result."""
+    """
+    Build a rich context string from a completed lesson result.
+
+    Prefers `diarized_transcript` over the raw `transcript` so the LLM can
+    answer per-speaker questions ("how many questions did Asaf ask?",
+    "did the lecturer answer X?"). When `speaker_map` is populated,
+    embed the mapping so the model substitutes real names for the
+    "Speaker A/B/C" anchors.
+    """
     parts = []
     if result.summary:
         parts.append(f"סיכום:\n{result.summary}")
@@ -385,9 +504,16 @@ def _build_lesson_context(result) -> str:
         parts.append(f"\nפרק: {ch.title}\n{ch.content}")
         if ch.key_points:
             parts.append("נקודות מרכזיות: " + ", ".join(ch.key_points))
-    if result.transcript:
-        # Include up to 30 k chars of transcript for richer answers
-        parts.append(f"\nתמלול:\n{result.transcript[:30_000]}")
+
+    speaker_map = getattr(result, "speaker_map", None) or {}
+    if speaker_map:
+        mapping_str = ", ".join(f"{k}={v}" for k, v in speaker_map.items())
+        parts.append(f"\nמיפוי דוברים: {mapping_str}")
+
+    transcript = getattr(result, "diarized_transcript", None) or result.transcript or ""
+    if transcript:
+        label = "תמלול לפי דוברים" if getattr(result, "diarized_transcript", None) else "תמלול"
+        parts.append(f"\n{label}:\n{transcript[:30_000]}")
     return "\n".join(parts)
 
 
@@ -489,6 +615,25 @@ def _path_under_audio_root(p: Path) -> bool:
         return p.resolve().is_relative_to(_AUDIO_ROOT)
     except Exception:
         return False
+
+
+def _remove_audio_safely(audio_path: str | None, task_id: str) -> None:
+    """
+    Best-effort delete of a per-task audio file. Used by delete_task and
+    bulk_delete to free disk space on the 10 GB Fly.io volume.
+
+    Idempotent — no-ops on missing path or missing file. On Windows the file
+    may be locked by an in-flight pipeline; the try/except keeps the caller
+    from failing because of that.
+    """
+    if not audio_path:
+        return
+    try:
+        p = Path(audio_path)
+        if p.exists() and _path_under_audio_root(p):
+            p.unlink()
+    except Exception as exc:
+        logger.warning(f"Could not remove audio for {task_id}: {exc}")
 
 
 # Content-type map: keep small, known-safe list (no arbitrary mimetypes.guess_type)
