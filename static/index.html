@@ -1540,108 +1540,298 @@
     }
 
     /* ════════════════════════════════════════
-       PRINT STYLES
+       PRINT-ONLY HEADER (hidden on screen)
+       ════════════════════════════════════════ */
+    #print-header { display: none; }
+
+    /* ════════════════════════════════════════
+       PRINT STYLES — polished document layout
+       Conservative palette + intentional indigo/pink accents.
        ════════════════════════════════════════ */
     @media print {
-      /* Reset to white, readable page */
-      * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+      @page {
+        size: A4;
+        margin: 1.6cm 1.8cm 2cm 1.8cm;
+      }
+
+      * {
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+      }
 
       body {
         background: #fff !important;
         color: #1a1a2e !important;
         padding: 0 !important;
-        font-family: 'Rubik', Arial, sans-serif !important;
+        margin: 0 !important;
+        font-family: 'Rubik', 'Inter', Arial, sans-serif !important;
+        line-height: 1.65 !important;
+        font-size: 10.5pt !important;
       }
 
-      /* Hide everything not needed for print */
+      /* ── Hide UI chrome and anything not relevant on paper ── */
       .bg-orbs,
       .brand,
       .stats,
       #input-card,
       #progress-card,
       #history-card,
+      #live-tasks-card,
+      #cram-card,
+      #chat-card,
       .history-toggle-btn,
       .results-actions,
       .copy-btn,
       .transcript-toggle,
       .reset-btn,
-      #score-badge { display: none !important; }
+      #score-badge,
+      #audio-player-bar,
+      #cache-banner,
+      #share-banner,
+      #content-search-section,
+      #flashcards-section,
+      #transcript-section,
+      .transcript-box,
+      .speaker-toggle-row,
+      .speaker-list,
+      .fc-toolbar,
+      .fc-export-row,
+      .ts-link,
+      .chapter-ts,
+      .footer-credit { display: none !important; }
 
-      /* Show results even if JS set display:none */
+      /* Always show results card (overrides JS display:none on edge cases) */
       #results-card { display: block !important; }
 
-      /* Solid white card, no glass */
+      /* Drop glass effects */
       .card {
         background: #fff !important;
         backdrop-filter: none !important;
         -webkit-backdrop-filter: none !important;
-        border: 1px solid #e0e0e0 !important;
+        border: none !important;
         box-shadow: none !important;
-        border-radius: 8px !important;
+        border-radius: 0 !important;
         padding: 0 !important;
         margin: 0 !important;
       }
 
       .wrapper { max-width: 100% !important; padding: 0 !important; }
 
-      /* Typography */
+      /* ── Print Header (rendered only in print) ── */
+      #print-header {
+        display: block !important;
+        position: relative;
+        margin: 0 0 26px 0;
+        padding: 0 0 18px 0;
+        border-bottom: 2px solid #4F46E5;
+      }
+      #print-header::after {
+        content: '';
+        position: absolute;
+        right: 0;
+        bottom: -2px;
+        width: 96px;
+        height: 2px;
+        background: #EC4899;
+      }
+      .print-brand {
+        font-size: 8.5pt;
+        color: #6b7280;
+        letter-spacing: .22em;
+        text-transform: uppercase;
+        margin-bottom: 8px;
+        font-weight: 700;
+      }
+      .print-brand-dot {
+        display: inline-block;
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: #EC4899;
+        margin-left: 8px;
+        vertical-align: middle;
+      }
+      .print-title {
+        font-size: 24pt;
+        font-weight: 800;
+        color: #1a1a2e;
+        line-height: 1.15;
+        margin: 0 0 10px 0;
+        letter-spacing: -.01em;
+      }
+      .print-meta {
+        font-size: 9.5pt;
+        color: #6b7280;
+        display: flex;
+        gap: 18px;
+        flex-wrap: wrap;
+      }
+      .print-meta-item strong {
+        color: #4F46E5;
+        font-weight: 600;
+        margin-left: 4px;
+      }
+
+      /* ── Section titles ── */
       .section-title {
+        display: block !important;
         color: #4F46E5 !important;
-        border-right-color: #EC4899 !important;
-        font-size: 1.1rem !important;
-        margin-top: 24px;
+        background: linear-gradient(to left, transparent 60%, rgba(79,70,229,.06)) !important;
+        border: none !important;
+        border-right: 4px solid #EC4899 !important;
+        padding: 7px 14px 7px 0 !important;
+        font-size: 14pt !important;
+        font-weight: 700 !important;
+        margin: 28px 0 14px 0 !important;
         page-break-after: avoid;
       }
 
+      /* ── Summary block ── */
       .summary-text {
         color: #1a1a2e !important;
-        font-size: .92rem !important;
-        line-height: 1.8 !important;
+        font-size: 11pt !important;
+        line-height: 1.85 !important;
+        text-align: justify;
+        background: #fafafe !important;
+        border-right: 3px solid rgba(79,70,229,.35) !important;
+        padding: 16px 20px !important;
+        border-radius: 6px !important;
+        margin: 0 !important;
       }
 
-      /* Chapters */
+      /* ── Chapters ── */
       .chapter {
-        background: #f8f8ff !important;
-        border-right-color: #4F46E5 !important;
-        border-color: #e0e0e0 !important;
+        background: #fafafe !important;
+        border: 1px solid #ece9f7 !important;
+        border-right: 4px solid #4F46E5 !important;
+        border-radius: 6px !important;
+        padding: 14px 18px !important;
         page-break-inside: avoid;
-        margin-bottom: 10px;
+        margin-bottom: 12px !important;
       }
-      .chapter-title { color: #1a1a2e !important; }
-      .chapter-content { color: #444 !important; }
-      .key-points li { color: #1a1a2e !important; }
+      .chapter-title {
+        color: #1a1a2e !important;
+        font-size: 12pt !important;
+        font-weight: 700 !important;
+        margin-bottom: 8px !important;
+        page-break-after: avoid;
+      }
+      .chapter-content {
+        color: #3f3f55 !important;
+        font-size: 10.5pt !important;
+        line-height: 1.75 !important;
+      }
+      .key-points {
+        margin-top: 10px !important;
+        padding-right: 6px !important;
+      }
+      .key-points li {
+        color: #1a1a2e !important;
+        font-size: 10pt !important;
+        line-height: 1.7 !important;
+        margin-bottom: 4px !important;
+      }
       .key-points li::before { color: #EC4899 !important; }
 
-      /* Quiz */
+      /* ── Quiz ── */
       .q-card {
         background: #fff !important;
-        border-color: #ddd !important;
+        border: 1px solid #e5e7eb !important;
+        border-radius: 6px !important;
+        padding: 14px 16px !important;
         page-break-inside: avoid;
+        margin-bottom: 10px !important;
       }
-      .q-num { color: #888 !important; }
-      .q-text { color: #1a1a2e !important; }
-      .opt-btn {
-        background: #f5f5f5 !important;
-        border-color: #ddd !important;
+      .q-num {
+        color: #4F46E5 !important;
+        font-size: 8.5pt !important;
+        font-weight: 700 !important;
+        text-transform: uppercase;
+        letter-spacing: .12em;
+        margin-bottom: 6px !important;
+      }
+      .q-text {
         color: #1a1a2e !important;
-        text-align: right;
+        font-size: 11pt !important;
+        font-weight: 600 !important;
+        margin-bottom: 10px !important;
+        page-break-after: avoid;
       }
-      .opt-btn.correct { background: #d1fae5 !important; border-color: #10b981 !important; color: #065f46 !important; }
-      .opt-btn.wrong   { background: #fee2e2 !important; border-color: #ef4444 !important; color: #7f1d1d !important; }
+      .opt-btn {
+        background: #f9fafb !important;
+        border: 1px solid #e5e7eb !important;
+        border-radius: 4px !important;
+        color: #1a1a2e !important;
+        text-align: right !important;
+        padding: 7px 12px !important;
+        font-size: 10pt !important;
+        margin-bottom: 4px !important;
+        display: block !important;
+        width: 100% !important;
+      }
+      .opt-btn.correct {
+        background: #ecfdf5 !important;
+        border-color: #10b981 !important;
+        color: #065f46 !important;
+        font-weight: 600 !important;
+      }
+      .opt-btn.wrong {
+        background: #fef2f2 !important;
+        border-color: #ef4444 !important;
+        color: #7f1d1d !important;
+      }
       .explanation {
         display: block !important;
         background: #fffbeb !important;
         color: #92400e !important;
-        border-right-color: #f59e0b !important;
+        border: 1px solid #fde68a !important;
+        border-right: 3px solid #f59e0b !important;
+        padding: 10px 14px !important;
+        font-size: 9.5pt !important;
+        margin-top: 10px !important;
+        border-radius: 4px !important;
+        line-height: 1.65 !important;
       }
 
-      /* Transcript — excluded from print/PDF (raw text adds length without value) */
-      #transcript-section,
-      .transcript-box { display: none !important; }
+      /* ── Key Terms ── */
+      #key-terms-section { page-break-before: auto; }
+      #key-terms-list > * {
+        background: #fafafe !important;
+        border: 1px solid #ece9f7 !important;
+        border-right: 3px solid #EC4899 !important;
+        border-radius: 4px !important;
+        padding: 10px 14px !important;
+        margin-bottom: 8px !important;
+        font-size: 10.5pt !important;
+        page-break-inside: avoid;
+      }
+      #key-terms-list strong {
+        color: #4F46E5 !important;
+        font-weight: 700 !important;
+      }
 
-      /* Page breaks */
-      #chapters-section { page-break-before: always; }
-      #quiz-list > .q-card { page-break-inside: avoid; }
+      /* ── Page-break hygiene ── */
+      h1, h2, h3, .section-title, .chapter-title, .q-text { page-break-after: avoid; }
+      p, .summary-text, .chapter-content { orphans: 3; widows: 3; }
+
+    }
+
+    /* ── Print page footer (declared at top level so margin boxes merge with @page in @media print) ── */
+    @media print {
+      @page {
+        @bottom-right {
+          content: "עמוד " counter(page) " מתוך " counter(pages);
+          font-size: 8.5pt;
+          color: #9ca3af;
+          font-family: 'Rubik', Arial, sans-serif;
+        }
+        @bottom-left {
+          content: "עוזר לימודי חכם · zoom-to-text";
+          font-size: 8pt;
+          color: #9ca3af;
+          font-family: 'Rubik', Arial, sans-serif;
+        }
+      }
     }
 
     /* ── Chat panel ── */
@@ -2793,6 +2983,17 @@
 <!-- ═══════════════ RESULTS CARD ═══════════════ -->
 <div class="card" id="results-card" style="margin-top:16px;">
 
+  <!-- Print-only header (visible only in print/PDF; populated by renderResult) -->
+  <div id="print-header" aria-hidden="true">
+    <div class="print-brand">עוזר לימודי חכם<span class="print-brand-dot"></span></div>
+    <div class="print-title" id="print-title">סיכום שיעור</div>
+    <div class="print-meta">
+      <span class="print-meta-item">תאריך:<strong id="print-date"></strong></span>
+      <span class="print-meta-item" id="print-source-wrap" style="display:none;">מקור:<strong id="print-source"></strong></span>
+      <span class="print-meta-item" id="print-lang-wrap" style="display:none;">שפה:<strong id="print-lang"></strong></span>
+    </div>
+  </div>
+
   <!-- Cache hit banner (shown when result was cloned from a previous summary) -->
   <div id="cache-banner" class="cache-banner" style="display:none;">
     <span class="cache-icon">📦</span>
@@ -3516,6 +3717,46 @@
   // ══════════════════════════════════════════════════════════════════════════
   // Results rendering
   // ══════════════════════════════════════════════════════════════════════════
+  // Populate the print-only header (used for the Print / PDF view).
+  // Fire-and-forget — even if the source fetch fails, date+lang still render.
+  function populatePrintHeader(taskId, result) {
+    try {
+      const dateEl = document.getElementById('print-date');
+      if (dateEl) {
+        dateEl.textContent = new Intl.DateTimeFormat('he-IL', {
+          day: '2-digit', month: '2-digit', year: 'numeric',
+        }).format(new Date());
+      }
+      const langWrap = document.getElementById('print-lang-wrap');
+      const langEl = document.getElementById('print-lang');
+      if (langEl && langWrap) {
+        const langLabel = ({ he: 'עברית', en: 'אנגלית' })[(result && result.language) || ''] || (result && result.language) || '';
+        if (langLabel) { langEl.textContent = langLabel; langWrap.style.display = ''; }
+        else langWrap.style.display = 'none';
+      }
+      const titleEl = document.getElementById('print-title');
+      if (titleEl) {
+        const firstChapter = (result && result.chapters && result.chapters[0] && result.chapters[0].title) || '';
+        titleEl.textContent = firstChapter ? firstChapter : 'סיכום שיעור';
+      }
+      const srcWrap = document.getElementById('print-source-wrap');
+      const srcEl = document.getElementById('print-source');
+      if (srcWrap) srcWrap.style.display = 'none';
+      if (taskId && srcEl) {
+        fetch(`/api/tasks/${taskId}`).then(r => r.ok ? r.json() : null).then(task => {
+          if (!task || !task.url) return;
+          let label = task.url;
+          if (label.startsWith('upload:')) label = 'העלאה ידנית';
+          else if (label.includes('zoom.us')) label = 'Zoom';
+          else if (label.includes('youtube.com') || label.includes('youtu.be')) label = 'YouTube';
+          else if (label.length > 60) label = label.slice(0, 57) + '…';
+          srcEl.textContent = label;
+          if (srcWrap) srcWrap.style.display = '';
+        }).catch(() => {});
+      }
+    } catch (e) { /* never break rendering over a header */ }
+  }
+
   function showResults(result, taskId, hasAudio, taskMessage) {
     hideLiveTranscript();
     hideProgress();
@@ -3526,6 +3767,7 @@
     document.getElementById('input-card').style.display = 'none';
     document.querySelector('.brand').style.display = 'none';
     document.querySelector('.stats').style.display = 'none';
+    populatePrintHeader(taskId, result);
 
     // Cache banner — shown when this task was served from a previous run's cache
     const cacheBanner = document.getElementById('cache-banner');
