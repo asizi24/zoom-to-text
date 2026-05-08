@@ -949,6 +949,7 @@ async def get_capabilities(user_id: str = Depends(get_current_user)) -> dict:
         "supports_audio_upload": p.supports_audio_upload,
         "supports_streaming": p.supports_streaming,
         "available_modes": _available_modes_for(p),
+        "is_admin": await state.is_admin_user(user_id),
     }
 
 

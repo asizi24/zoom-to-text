@@ -25,6 +25,11 @@ class _InMemoryLimiter:
         Decorator factory.  `limit_spec` is either a "N/minute" string or a
         callable(request) -> str.  Resolved at *request time* so tests can
         monkeypatch settings.rate_limit_per_minute freely.
+
+        Admin users (settings.admin_emails) bypass the IP rate limit entirely.
+        Detection is via the `user_id` kwarg, which FastAPI populates from the
+        upstream `Depends(enforce_rate_limit)` / `Depends(get_current_user)`
+        before this wrapper executes.
         """
         def decorator(func):
             @wraps(func)
@@ -32,7 +37,7 @@ class _InMemoryLimiter:
                 spec = limit_spec(request) if callable(limit_spec) else limit_spec
                 max_calls, window_seconds = self._parse_spec(spec)
 
-                if max_calls > 0:
+                if max_calls > 0 and not await _is_admin_kwarg(kwargs):
                     key = request.client.host if request.client else "unknown"
                     now = time.monotonic()
                     cutoff = now - window_seconds
@@ -60,6 +65,18 @@ class _InMemoryLimiter:
         unit = parts[1].lower() if len(parts) > 1 else "minute"
         seconds = {"second": 1.0, "minute": 60.0, "hour": 3600.0}
         return n, seconds.get(unit, 60.0)
+
+
+async def _is_admin_kwarg(kwargs: dict) -> bool:
+    """Look up admin status from the user_id kwarg passed in by FastAPI deps."""
+    user_id = kwargs.get("user_id")
+    if not user_id:
+        return False
+    from app import state
+    try:
+        return await state.is_admin_user(user_id)
+    except Exception:
+        return False
 
 
 limiter = _InMemoryLimiter()

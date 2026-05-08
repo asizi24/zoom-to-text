@@ -79,6 +79,10 @@ class Settings(BaseSettings):
     # Comma-separated list of emails allowed to log in
     # Example: "alice@example.com,bob@example.com"
     allowed_emails: str = ""
+    # Comma-separated list of admin emails. Admins bypass per-user 24h quotas
+    # and per-IP rate limits, and have block_until/is_banned auto-cleared on
+    # startup. Override with ADMIN_EMAILS env var.
+    admin_emails: str = "asaf.zitun@gmail.com"
     resend_api_key: str = ""
     # Allowed CORS origin — set to your Fly.io domain in production
     cors_origin: str = "http://localhost:8000"

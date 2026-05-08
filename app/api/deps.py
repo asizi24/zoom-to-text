@@ -30,12 +30,15 @@ async def enforce_rate_limit(user_id: str = Depends(get_current_user)) -> str:
 
     Use as a dependency on task-creation endpoints in place of get_current_user.
 
+    - Admins (settings.admin_emails) bypass the quota entirely.
     - Returns user_id when the request is within quota.
     - Raises 429 on the 3rd request within 24 h; applies a 24-hour block and
       dispatches a warning email.
     - Raises 403 when a blocked user makes any request (permanent ban applied),
       or when the account is already permanently banned.
     """
+    if await state.is_admin_user(user_id):
+        return user_id
     action = await state.check_and_record_request(user_id)
     if action == "allow":
         return user_id

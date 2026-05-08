@@ -593,6 +593,43 @@ async def get_user_email(user_id: str) -> Optional[str]:
     return row["email"] if row else None
 
 
+def _admin_emails_set() -> set[str]:
+    """Parse settings.admin_emails into a normalized lowercase set."""
+    return {
+        e.strip().lower()
+        for e in settings.admin_emails.split(",")
+        if e.strip()
+    }
+
+
+async def is_admin_user(user_id: str) -> bool:
+    """True iff the user's email is listed in settings.admin_emails."""
+    email = await get_user_email(user_id)
+    if not email:
+        return False
+    return email.lower() in _admin_emails_set()
+
+
+async def reset_admin_flags() -> int:
+    """
+    Clear block_until and is_banned for every admin email at startup.
+    Idempotent — safe to call on every boot. Returns rowcount of affected
+    users (0 when no admin row exists yet, which is normal pre-first-login).
+    """
+    admins = _admin_emails_set()
+    if not admins:
+        return 0
+    db = await _get_db()
+    placeholders = ",".join("?" * len(admins))
+    result = await db.execute(
+        f"UPDATE users SET block_until=NULL, is_banned=0, request_timestamps='[]' "
+        f"WHERE LOWER(email) IN ({placeholders})",
+        list(admins),
+    )
+    await db.commit()
+    return result.rowcount or 0
+
+
 async def check_and_record_request(user_id: str) -> str:
     """
     Atomically check rate-limit status and record a new request.

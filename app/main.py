@@ -101,6 +101,12 @@ async def lifespan(app: FastAPI):
     # Initialize SQLite (creates tables + marks interrupted tasks as failed)
     await state.init_db()
 
+    # Reset block_until / is_banned for any admin email so admins are never
+    # locked out by stale rate-limit state from before the admin bypass landed.
+    cleared = await state.reset_admin_flags()
+    if cleared:
+        logger.info(f"Admin flag reset: cleared rate-limit state for {cleared} admin user(s)")
+
     # Configure GCP credentials for Vertex AI / Gemini
     creds_path = settings.google_application_credentials
     if not os.getenv("GOOGLE_APPLICATION_CREDENTIALS") and Path(creds_path).exists():
