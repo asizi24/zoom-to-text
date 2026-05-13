@@ -239,3 +239,19 @@ class TaskResponse(BaseModel):
     # Used by the auto-cleanup task (24h TTL) and the UI countdown.
     # None for tasks that never failed.
     failed_at: Optional[str] = None
+    # User-editable plain-text notes attached to this task.
+    # Empty string when never edited; capped at NOTES_MAX_LEN chars on PUT.
+    notes: str = ""
+
+
+class NotesUpdate(BaseModel):
+    """Request body for PUT /api/tasks/{id}/notes."""
+
+    notes: str = Field("", max_length=50_000)
+
+
+class AskAcrossRequest(BaseModel):
+    """Request body for POST /api/ask — Ask-Across-Lectures."""
+
+    question: str = Field(..., min_length=1, max_length=2000)
+    limit: int = Field(20, ge=1, le=50)

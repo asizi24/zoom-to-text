@@ -54,6 +54,7 @@ from app.models import (
     PerSpeakerSentiment,
     QuizQuestion,
     SentimentAnalysis,
+    TaskResponse,
     ToneShift,
 )
 from app.services.llm_providers import get_provider
@@ -2417,3 +2418,122 @@ async def generate_mindmap(lesson: LessonResult) -> "MindMap | None":
     if not root:
         return None
     return MindMap(root=root)
+
+
+# ── Ask Across Lectures (Batch B2) ──────────────────────────────────────────
+
+_CROSS_LECTURE_TIMEOUT = 90.0  # seconds
+
+_CROSS_LECTURE_PROMPT = """\
+אתה עוזר ללמידה. למשתמש יש ספריית הקלטות שכבר תומללו וסוכמו.
+ענה על השאלה הבאה תוך התבססות אך ורק על ההקלטות בהמשך.
+
+חוקים:
+  • אם התשובה נמצאת במקור אחד או יותר — סכם בקצרה (2–5 משפטים) בעברית.
+  • כשאתה משתמש בעובדה מהקלטה מסוימת, סמן בסוף המשפט את מזהה ההקלטה
+    בתוך סוגריים מרובעים, למשל: [src:abc12345].
+  • אם השאלה לא נענית מתוך אף הקלטה, ענה בכנות:
+    "לא מצאתי תשובה בהקלטות שלך."
+  • אל תמציא מקורות. אל תצטט הקלטות שלא הופיעו בהמשך.
+
+שאלת המשתמש:
+{question}
+
+הקלטות זמינות (כל פסקה היא הקלטה אחת):
+{lectures}
+"""
+
+
+def _format_lecture_for_cross_search(task: TaskResponse, idx: int) -> str:
+    """Render one task as a short, citable paragraph for the cross-lecture prompt."""
+    short_id = (task.task_id or "")[:8]
+    parts: list[str] = []
+    parts.append(f"--- הקלטה #{idx + 1}  [src:{short_id}] ---")
+    created = (task.created_at or "")[:10]
+    if created:
+        parts.append(f"תאריך: {created}")
+    if task.url and not task.url.startswith("upload:"):
+        parts.append(f"מקור: {task.url}")
+    if task.result and task.result.summary:
+        parts.append(f"סיכום: {task.result.summary.strip()[:1500]}")
+    if task.result and task.result.chapters:
+        titles = [
+            (ch.title or "").strip()
+            for ch in task.result.chapters
+            if ch and (ch.title or "").strip()
+        ]
+        if titles:
+            parts.append("פרקים: " + ", ".join(titles[:12]))
+    if task.result and task.result.key_terms:
+        terms = [
+            (kt.term or "").strip()
+            for kt in task.result.key_terms
+            if kt and (kt.term or "").strip()
+        ]
+        if terms:
+            parts.append("מונחי מפתח: " + ", ".join(terms[:10]))
+    return "\n".join(parts)
+
+
+def _extract_sources_from_answer(answer: str) -> list[str]:
+    """Pull out [src:xxxx] citations the model emitted. Order preserved, deduped."""
+    import re as _re
+
+    seen: list[str] = []
+    for m in _re.finditer(r"\[src:([a-f0-9]{4,})\]", answer):
+        sid = m.group(1)
+        if sid not in seen:
+            seen.append(sid)
+    return seen
+
+
+async def answer_across_lectures(
+    question: str, tasks: list[TaskResponse]
+) -> dict:
+    """Ask one question across a set of the user's completed lectures.
+
+    Returns {"answer": str, "sources": [task_id_prefix, ...]}. Sources are the
+    short prefixes the LLM cited; the caller can map them back to full task_ids.
+    """
+    question = (question or "").strip()
+    if not question:
+        return {"answer": "אנא הקלד שאלה.", "sources": []}
+
+    usable = [t for t in tasks if t.result and (t.result.summary or "").strip()]
+    if not usable:
+        return {
+            "answer": "אין הקלטות מסוכמות עדיין — סכם הקלטה ראשונה ואחר כך נסה שוב.",
+            "sources": [],
+        }
+
+    # Cap at 20 most recent lectures to keep the prompt under provider limits.
+    usable = usable[:20]
+    rendered = "\n\n".join(
+        _format_lecture_for_cross_search(t, i) for i, t in enumerate(usable)
+    )
+    prompt = _CROSS_LECTURE_PROMPT.replace("{question}", question[:2000]).replace(
+        "{lectures}", rendered[:60_000]
+    )
+
+    provider = get_provider()
+    try:
+        raw = await asyncio.wait_for(
+            provider.generate_text(prompt), timeout=_CROSS_LECTURE_TIMEOUT
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Cross-lecture answer timed out")
+        return {"answer": "התשובה לקחה יותר מדי זמן — נסה שוב.", "sources": []}
+    except Exception as exc:
+        logger.warning(f"Cross-lecture LLM call failed: {exc}")
+        return {"answer": "שגיאה בשליפת התשובה — נסה שוב בעוד רגע.", "sources": []}
+
+    answer = (raw or "").strip()
+    source_prefixes = _extract_sources_from_answer(answer)
+    # Map short prefix back to full task_id
+    full_sources: list[str] = []
+    for pref in source_prefixes:
+        for t in usable:
+            if (t.task_id or "").startswith(pref) and t.task_id not in full_sources:
+                full_sources.append(t.task_id)
+                break
+    return {"answer": answer, "sources": full_sources}

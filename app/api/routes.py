@@ -13,6 +13,7 @@ import re
 import uuid
 import logging
 from pathlib import Path
+from typing import Optional
 
 import aiofiles
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Request, UploadFile
@@ -22,7 +23,15 @@ from pydantic import BaseModel, Field
 from app import state
 from app.api.deps import get_current_user, enforce_rate_limit
 from app.config import settings
-from app.models import CramGuideRequest, ProcessingMode, TaskCreate, TaskResponse, TaskStatus
+from app.models import (
+    AskAcrossRequest,
+    CramGuideRequest,
+    NotesUpdate,
+    ProcessingMode,
+    TaskCreate,
+    TaskResponse,
+    TaskStatus,
+)
 from app.services import anki_export, processor, summarizer, text_extractor
 from app.services.exporters.markdown import build_obsidian_markdown
 from app.services.task_service import prepare_supplementary_context
@@ -781,6 +790,23 @@ async def generate_mindmap_endpoint(
     return {"mindmap": mindmap.model_dump(), "cached": False}
 
 
+@router.put("/tasks/{task_id}/notes")
+async def update_task_notes(
+    task_id: str,
+    body: NotesUpdate,
+    user_id: str = Depends(get_current_user),
+):
+    """Replace the user's notes for a task.
+
+    Notes are a single free-form text blob per task. The frontend posts the
+    whole string on every save (debounced); we don't model diffs.
+    """
+    updated = await state.update_notes(task_id, user_id, body.notes)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return {"ok": True}
+
+
 @router.get("/tasks/{task_id}/flashcards")
 async def get_flashcards(
     task_id: str,
@@ -1065,3 +1091,62 @@ async def create_study_guide(
         raise HTTPException(status_code=500, detail="שגיאה ביצירת מדריך הלמידה. נסה שוב.")
 
     return guide
+
+
+# ── User preferences (Batch B2 — weekly digest opt-in) ───────────────────────
+
+class PreferencesUpdate(BaseModel):
+    email_digest_opt_in: Optional[bool] = None
+
+
+@router.get("/auth/me/preferences")
+async def get_my_preferences(user_id: str = Depends(get_current_user)):
+    """Return the current user's preference flags."""
+    return await state.get_user_preferences(user_id)
+
+
+@router.put("/auth/me/preferences")
+async def update_my_preferences(
+    body: PreferencesUpdate,
+    user_id: str = Depends(get_current_user),
+):
+    """Update the user's preference flags. Only sent keys are applied."""
+    if body.email_digest_opt_in is not None:
+        await state.set_email_digest_opt_in(user_id, body.email_digest_opt_in)
+    return await state.get_user_preferences(user_id)
+
+
+# ── Ask Across Lectures (Batch B2) ────────────────────────────────────────────
+
+@router.post("/ask")
+async def ask_across_lectures(
+    body: AskAcrossRequest,
+    user_id: str = Depends(get_current_user),
+):
+    """Ask a single question across the user's completed lectures.
+
+    The LLM is given each lecture's summary + chapter titles + key terms
+    (compact, citable) and must cite which lecture(s) it drew on via
+    [src:<task-prefix>] tokens. Sources are then mapped back to full
+    task IDs for the UI to render as clickable links.
+    """
+    tasks = await state.list_completed_tasks_with_results(user_id, limit=body.limit)
+    result = await summarizer.answer_across_lectures(body.question, tasks)
+    # Lightweight metadata so the UI can render rich source links
+    source_meta = []
+    src_set = set(result.get("sources") or [])
+    for t in tasks:
+        if t.task_id in src_set:
+            source_meta.append({
+                "task_id": t.task_id,
+                "url": t.url,
+                "created_at": t.created_at,
+                "title": (t.result.summary or "").strip().split("\n", 1)[0][:120]
+                if t.result and t.result.summary else "",
+            })
+    return {
+        "answer": result.get("answer", ""),
+        "sources": result.get("sources", []),
+        "source_meta": source_meta,
+        "considered": len(tasks),
+    }

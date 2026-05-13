@@ -176,6 +176,10 @@ async def init_db():
         await db.execute("ALTER TABLE tasks ADD COLUMN failed_at TEXT")
         await db.commit()
         logger.info("Migrated tasks table: added failed_at column (auto-cleanup TTL)")
+    if "notes" not in cols:
+        await db.execute("ALTER TABLE tasks ADD COLUMN notes TEXT NOT NULL DEFAULT ''")
+        await db.commit()
+        logger.info("Migrated tasks table: added notes column (Live Notepad)")
 
     # Create indexes now that user_id column is guaranteed to exist
     await db.execute(CREATE_TASKS_INDEX_SQL)
@@ -197,6 +201,16 @@ async def init_db():
         await db.execute("ALTER TABLE users ADD COLUMN is_banned INTEGER NOT NULL DEFAULT 0")
         await db.commit()
         logger.info("Migrated users table: added is_banned column")
+    if "email_digest_opt_in" not in user_cols:
+        await db.execute(
+            "ALTER TABLE users ADD COLUMN email_digest_opt_in INTEGER NOT NULL DEFAULT 0"
+        )
+        await db.commit()
+        logger.info("Migrated users table: added email_digest_opt_in column (weekly digest)")
+    if "last_digest_at" not in user_cols:
+        await db.execute("ALTER TABLE users ADD COLUMN last_digest_at TEXT")
+        await db.commit()
+        logger.info("Migrated users table: added last_digest_at column (weekly digest)")
 
     await _mark_interrupted_tasks_failed()
     await _purge_expired_lti_state()
@@ -376,6 +390,29 @@ def _row_failed_at(row) -> Optional[str]:
     return row["failed_at"]
 
 
+def _row_notes(row) -> str:
+    """Read notes from a row defensively (column may be absent on legacy DBs)."""
+    if "notes" not in row.keys():
+        return ""
+    return row["notes"] or ""
+
+
+async def update_notes(task_id: str, user_id: str, notes: str) -> bool:
+    """Update the user's notes for a task. Returns True if the row was updated.
+
+    Scoped to user_id so one user can't overwrite another user's notes via task
+    ID enumeration. Legacy NULL-owned tasks remain writeable by any logged-in
+    user (matches get_task_for_user semantics).
+    """
+    db = await _get_db()
+    result = await db.execute(
+        "UPDATE tasks SET notes=? WHERE id=? AND (user_id=? OR user_id IS NULL)",
+        [notes, task_id, user_id],
+    )
+    await db.commit()
+    return result.rowcount > 0
+
+
 async def get_task(task_id: str) -> Optional[TaskResponse]:
     db = await _get_db()
     async with db.execute("SELECT * FROM tasks WHERE id=?", [task_id]) as cursor:
@@ -403,6 +440,7 @@ async def get_task(task_id: str) -> Optional[TaskResponse]:
         error_details=_decode_error_details(row),
         has_audio=has_audio,
         failed_at=_row_failed_at(row),
+        notes=_row_notes(row),
     )
 
 
@@ -441,6 +479,7 @@ async def get_task_for_user(task_id: str, user_id: str) -> Optional[TaskResponse
         error_details=_decode_error_details(row),
         has_audio=has_audio,
         failed_at=_row_failed_at(row),
+        notes=_row_notes(row),
     )
 
 
@@ -506,7 +545,134 @@ async def delete_task(task_id: str):
     await db.commit()
 
 
+async def list_completed_tasks_with_results(
+    user_id: str, limit: int = 20
+) -> list[TaskResponse]:
+    """Return completed tasks for a user, ordered newest-first, with full result.
+
+    Used by the Ask-Across-Lectures endpoint to build a cross-lecture prompt.
+    """
+    db = await _get_db()
+    async with db.execute(
+        "SELECT * FROM tasks WHERE status=? AND (user_id=? OR user_id IS NULL) "
+        "ORDER BY created_at DESC LIMIT ?",
+        [TaskStatus.COMPLETED.value, user_id, limit],
+    ) as cursor:
+        rows = await cursor.fetchall()
+
+    out: list[TaskResponse] = []
+    for row in rows:
+        if not row["result_json"]:
+            continue
+        try:
+            result = LessonResult.model_validate_json(row["result_json"])
+        except Exception:
+            continue
+        out.append(
+            TaskResponse(
+                task_id=row["id"],
+                status=TaskStatus(row["status"]),
+                progress=row["progress"],
+                message=row["message"],
+                created_at=row["created_at"],
+                url=row["url"],
+                result=result,
+                error=row["error"],
+                error_details=_decode_error_details(row),
+                has_audio=False,
+                failed_at=_row_failed_at(row),
+                notes=_row_notes(row),
+            )
+        )
+    return out
+
+
 # ── Auth CRUD ─────────────────────────────────────────────────────────────────────
+
+async def get_user_preferences(user_id: str) -> dict:
+    """Return user preference flags. New users default to all-off."""
+    db = await _get_db()
+    async with db.execute(
+        "SELECT email_digest_opt_in, last_digest_at, email FROM users WHERE id=?",
+        [user_id],
+    ) as cursor:
+        row = await cursor.fetchone()
+    if not row:
+        return {"email_digest_opt_in": False, "last_digest_at": None, "email": ""}
+    return {
+        "email_digest_opt_in": bool(row["email_digest_opt_in"]),
+        "last_digest_at": row["last_digest_at"],
+        "email": row["email"],
+    }
+
+
+async def set_email_digest_opt_in(user_id: str, opt_in: bool) -> bool:
+    """Toggle the weekly-digest opt-in flag. Returns True iff the row was updated."""
+    db = await _get_db()
+    result = await db.execute(
+        "UPDATE users SET email_digest_opt_in=? WHERE id=?",
+        [1 if opt_in else 0, user_id],
+    )
+    await db.commit()
+    return result.rowcount > 0
+
+
+async def mark_digest_sent(user_id: str) -> None:
+    """Record that a digest was successfully sent now (UTC ISO)."""
+    db = await _get_db()
+    await db.execute(
+        "UPDATE users SET last_digest_at=? WHERE id=?",
+        [datetime.now(timezone.utc).isoformat(), user_id],
+    )
+    await db.commit()
+
+
+async def list_digest_subscribers() -> list[dict]:
+    """Return users who opted into the weekly digest. Each row: id, email, last_digest_at."""
+    db = await _get_db()
+    async with db.execute(
+        "SELECT id, email, last_digest_at FROM users WHERE email_digest_opt_in=1"
+    ) as cursor:
+        rows = await cursor.fetchall()
+    return [dict(r) for r in rows]
+
+
+async def list_tasks_completed_since(user_id: str, since_iso: str) -> list[TaskResponse]:
+    """Return completed tasks for the user with created_at >= since_iso."""
+    db = await _get_db()
+    async with db.execute(
+        "SELECT * FROM tasks WHERE status=? AND (user_id=? OR user_id IS NULL) "
+        "AND created_at >= ? ORDER BY created_at DESC",
+        [TaskStatus.COMPLETED.value, user_id, since_iso],
+    ) as cursor:
+        rows = await cursor.fetchall()
+
+    out: list[TaskResponse] = []
+    for row in rows:
+        if not row["result_json"]:
+            continue
+        try:
+            result = LessonResult.model_validate_json(row["result_json"])
+        except Exception:
+            continue
+        out.append(
+            TaskResponse(
+                task_id=row["id"],
+                status=TaskStatus(row["status"]),
+                progress=row["progress"],
+                message=row["message"],
+                created_at=row["created_at"],
+                url=row["url"],
+                result=result,
+                error=row["error"],
+                error_details=_decode_error_details(row),
+                has_audio=False,
+                failed_at=_row_failed_at(row),
+                notes=_row_notes(row),
+            )
+        )
+    return out
+
 
 async def get_or_create_user(email: str) -> str:
     """Return user_id for the email, creating the user row if this is their first login."""

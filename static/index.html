@@ -1144,6 +1144,101 @@
     .key-term-def  { color: var(--muted); font-size: .88rem; line-height: 1.65; margin-top: 5px; }
     .key-term-ctx  { color: rgba(148,163,184,.55); font-size: .78rem; margin-top: 6px; font-style: italic; padding-inline-start: 12px; border-inline-start: 2px solid rgba(255,255,255,.06); }
 
+    /* ── Ask Across Lectures ── */
+    .ask-across-wrap {
+      margin-top: 14px;
+      padding: 14px 16px;
+      background: linear-gradient(180deg, rgba(99,102,241,.07), rgba(99,102,241,.02));
+      border: 1px solid rgba(99,102,241,.25);
+      border-radius: 12px;
+    }
+    .ask-across-header {
+      display: flex; align-items: center; gap: 8px;
+      font-size: .92rem; color: var(--text); margin-bottom: 10px;
+    }
+    .ask-across-row {
+      display: flex; gap: 8px; align-items: stretch;
+    }
+    .ask-across-input {
+      flex: 1; padding: 10px 12px;
+      background: rgba(15,23,42,.6);
+      border: 1px solid rgba(148,163,184,.25);
+      border-radius: 10px;
+      color: var(--text); font-size: .95rem;
+      outline: none;
+      direction: rtl;
+    }
+    .ask-across-input:focus { border-color: rgba(99,102,241,.55); }
+    .ask-across-btn {
+      padding: 10px 18px;
+      background: linear-gradient(180deg, #6366f1, #4f46e5);
+      color: white; border: none; border-radius: 10px;
+      cursor: pointer; font-weight: 600; font-size: .92rem;
+      white-space: nowrap;
+    }
+    .ask-across-btn:hover { filter: brightness(1.08); }
+    .ask-across-btn:disabled { opacity: .55; cursor: not-allowed; }
+    .ask-across-answer {
+      margin-top: 12px;
+      padding: 12px 14px;
+      background: rgba(15,23,42,.45);
+      border-radius: 10px;
+      color: var(--text); line-height: 1.7; font-size: .95rem;
+      white-space: pre-wrap;
+      display: none;
+    }
+    .ask-across-answer.show { display: block; }
+    .ask-across-sources {
+      margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px;
+    }
+    .ask-across-source {
+      font-size: .8rem; color: #c7d2fe;
+      background: rgba(99,102,241,.18);
+      border: 1px solid rgba(99,102,241,.4);
+      padding: 3px 9px; border-radius: 999px;
+      cursor: pointer;
+    }
+    .ask-across-source:hover { background: rgba(99,102,241,.3); }
+    .ask-across-status { font-size: .82rem; color: var(--muted); margin-top: 8px; }
+
+    /* ── Live Notepad ── */
+    #notepad-section { margin-top: 36px; }
+    .notepad-card {
+      position: relative;
+      background: linear-gradient(180deg, rgba(250,204,21,.04), rgba(250,204,21,.02));
+      border: 1px solid rgba(250,204,21,.18);
+      border-radius: 14px;
+      padding: 18px 20px 14px;
+    }
+    .notepad-card textarea {
+      width: 100%;
+      min-height: 160px;
+      background: transparent;
+      border: none;
+      outline: none;
+      resize: vertical;
+      color: var(--text);
+      font-family: inherit;
+      font-size: .98rem;
+      line-height: 1.65;
+      direction: rtl;
+    }
+    .notepad-card textarea::placeholder { color: rgba(148,163,184,.5); }
+    .notepad-meta {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 8px;
+      font-size: .78rem;
+      color: var(--muted);
+      min-height: 22px;
+    }
+    .notepad-status { transition: opacity .25s ease; }
+    .notepad-status.idle { opacity: .55; }
+    .notepad-status.saving { color: #fbbf24; }
+    .notepad-status.saved { color: #4ade80; }
+    .notepad-status.error { color: #f87171; }
+
     /* ── Mind Map ── */
     #mindmap-section { margin-top: 36px; }
     .mindmap-empty {
@@ -3348,6 +3443,20 @@
     <div class="chapters-list" id="chapters-list"></div>
   </div>
 
+  <!-- Live Notepad -->
+  <div id="notepad-section" style="display:none;">
+    <div class="section-title">📝 הפנקס שלי</div>
+    <div class="notepad-card">
+      <textarea id="notepad-textarea"
+                placeholder="כתוב כאן הערות אישיות, מחשבות, שאלות לזכור... ההערות נשמרות אוטומטית."
+                oninput="onNotepadInput()"></textarea>
+      <div class="notepad-meta">
+        <span id="notepad-status" class="notepad-status idle">ההערות נשמרות אוטומטית</span>
+        <span id="notepad-counter"></span>
+      </div>
+    </div>
+  </div>
+
   <!-- Transcript (collapsible) -->
   <div id="transcript-section" style="display:none; margin-top:24px;">
     <div class="speaker-toggle-row" id="speaker-toggle-row" style="display:none;">
@@ -3470,6 +3579,30 @@
     </div>
     <button class="cram-select-btn" id="cram-select-btn" onclick="toggleCramSelect()">📚 בחר לתרגול משותף</button>
     <button class="history-bulk-btn" id="history-bulk-btn" onclick="toggleBulkSelect()">🗂️ בחירה מרובה</button>
+  </div>
+
+  <!-- Email Digest Preference Toggle -->
+  <div id="prefs-row" style="margin-top:10px; display:flex; align-items:center; gap:10px; font-size:.9rem; color:var(--muted);">
+    <label style="display:inline-flex; align-items:center; gap:8px; cursor:pointer;">
+      <input type="checkbox" id="pref-digest" onchange="onDigestToggle(this)" />
+      <span>📬 שלח לי סיכום שבועי במייל</span>
+    </label>
+    <span id="prefs-status" style="font-size:.8rem;"></span>
+  </div>
+
+  <!-- Ask Across Lectures -->
+  <div class="ask-across-wrap" id="ask-across-wrap">
+    <div class="ask-across-header">
+      <span>💬 שאל את כל הספרייה</span>
+      <span class="ask-across-status">ה-AI מחפש בסיכומי כל ההקלטות שלך</span>
+    </div>
+    <div class="ask-across-row">
+      <input type="text" id="ask-across-input" class="ask-across-input"
+             placeholder="לדוגמה: מה הוחלט בפגישה האחרונה לגבי תקציב? איפה דיברנו על אומגה 3?"
+             onkeydown="onAskAcrossKey(event)" />
+      <button id="ask-across-btn" class="ask-across-btn" onclick="askAcrossLectures()">שאל</button>
+    </div>
+    <div id="ask-across-answer" class="ask-across-answer"></div>
   </div>
   <div class="cram-bar" id="cram-bar">
     <span class="cram-count" id="cram-count">0 שיעורים נבחרו</span>
@@ -4337,8 +4470,122 @@
 
     renderFlashcards(result.flashcards || [], taskId);
     renderMindMap(result.mindmap || null, taskId);
+    renderNotepad(taskId, lessonResultFromTask(taskId));
     if (taskId) showChatPanel(taskId);
   }
+
+  // ── Live Notepad ────────────────────────────────────────────────────────
+  // Loads + autosaves user notes attached to a task.
+  // Notes are a single free-form string in tasks.notes (see app/state.py).
+  let notepadTaskId   = null;
+  let notepadSaveTimer = null;
+  let notepadInitial   = '';
+
+  function lessonResultFromTask(taskId) {
+    // Tries to find the cached task on window.__tasksById; the hook just exists
+    // so we don't refetch when we already have notes loaded in displayResult.
+    if (!taskId || !window.__tasksById) return null;
+    return window.__tasksById[taskId] || null;
+  }
+
+  function renderNotepad(taskId, cachedTask) {
+    const section = document.getElementById('notepad-section');
+    const ta      = document.getElementById('notepad-textarea');
+    const status  = document.getElementById('notepad-status');
+    if (!section || !ta) return;
+
+    if (!taskId) {
+      // No persistence target — hide entirely (e.g. share/print preview).
+      section.style.display = 'none';
+      ta.value = '';
+      notepadTaskId = null;
+      return;
+    }
+
+    notepadTaskId = taskId;
+    section.style.display = 'block';
+    status.className = 'notepad-status idle';
+    status.textContent = 'ההערות נשמרות אוטומטית';
+
+    // If the caller already has the task object, use its notes directly.
+    if (cachedTask && typeof cachedTask.notes === 'string') {
+      ta.value = cachedTask.notes;
+      notepadInitial = cachedTask.notes;
+      updateNotepadCounter();
+      return;
+    }
+
+    // Otherwise fetch it once.
+    fetch('/api/tasks/' + encodeURIComponent(taskId))
+      .then(r => r.ok ? r.json() : null)
+      .then(t => {
+        if (!t || notepadTaskId !== taskId) return;
+        ta.value = (t.notes || '');
+        notepadInitial = ta.value;
+        updateNotepadCounter();
+      })
+      .catch(() => {});
+  }
+
+  function updateNotepadCounter() {
+    const ta = document.getElementById('notepad-textarea');
+    const c  = document.getElementById('notepad-counter');
+    if (!ta || !c) return;
+    const n = ta.value.length;
+    c.textContent = n ? (n + ' תווים') : '';
+  }
+
+  window.onNotepadInput = function() {
+    updateNotepadCounter();
+    const status = document.getElementById('notepad-status');
+    status.className = 'notepad-status saving';
+    status.textContent = '⏳ שומר…';
+    if (notepadSaveTimer) clearTimeout(notepadSaveTimer);
+    notepadSaveTimer = setTimeout(saveNotepad, 800);
+  };
+
+  async function saveNotepad() {
+    const ta = document.getElementById('notepad-textarea');
+    const status = document.getElementById('notepad-status');
+    if (!ta || !notepadTaskId) return;
+    const body = JSON.stringify({ notes: ta.value });
+    try {
+      const r = await fetch('/api/tasks/' + encodeURIComponent(notepadTaskId) + '/notes', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+      });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      notepadInitial = ta.value;
+      status.className = 'notepad-status saved';
+      status.textContent = '✓ נשמר';
+      setTimeout(() => {
+        if (status.classList.contains('saved')) {
+          status.className = 'notepad-status idle';
+          status.textContent = 'ההערות נשמרות אוטומטית';
+        }
+      }, 1800);
+    } catch (e) {
+      status.className = 'notepad-status error';
+      status.textContent = '⚠️ שמירה נכשלה — נסה שוב';
+    }
+  }
+
+  // Flush on page hide so we never lose the last few keystrokes.
+  // Uses fetch keepalive (sendBeacon would force POST, but our endpoint is PUT).
+  window.addEventListener('beforeunload', () => {
+    const ta = document.getElementById('notepad-textarea');
+    if (!ta || !notepadTaskId) return;
+    if (ta.value === notepadInitial) return;
+    try {
+      fetch('/api/tasks/' + encodeURIComponent(notepadTaskId) + '/notes', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ notes: ta.value }),
+        keepalive: true,
+      });
+    } catch (_) {}
+  });
 
   function renderMindMapNode(node, depth, ul) {
     if (!node || !node.label) return;
@@ -4677,8 +4924,38 @@
       historyOffset = 0;
       document.getElementById('history-search').value = '';
       await renderHistoryPage();
+      loadDigestPreference();
     }
   }
+
+  async function loadDigestPreference() {
+    const cb = document.getElementById('pref-digest');
+    if (!cb) return;
+    try {
+      const r = await fetch('/api/auth/me/preferences');
+      if (!r.ok) return;
+      const data = await r.json();
+      cb.checked = !!data.email_digest_opt_in;
+    } catch (_) {}
+  }
+
+  window.onDigestToggle = async function(cb) {
+    const status = document.getElementById('prefs-status');
+    status.textContent = '⏳';
+    try {
+      const r = await fetch('/api/auth/me/preferences', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email_digest_opt_in: !!cb.checked }),
+      });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      status.textContent = cb.checked ? '✓ נרשמת לתפוצה' : '✓ הוסרת מהתפוצה';
+      setTimeout(() => { status.textContent = ''; }, 1800);
+    } catch (e) {
+      cb.checked = !cb.checked;  // revert
+      status.textContent = '⚠️ שגיאה';
+    }
+  };
 
   // Kept for backward-compat (called from existing code paths)
   async function loadHistory() {
@@ -4938,6 +5215,7 @@
     document.getElementById('key-terms-section').style.display = 'none';
     document.getElementById('highlights-section').style.display = 'none';
     document.getElementById('mindmap-section').style.display = 'none';
+    document.getElementById('notepad-section').style.display = 'none';
     flashcards = []; fcIndex = 0; fcKnew = 0; fcMissed = 0; fcSeen = new Set();
     hideError();
     switchTab('url');
@@ -5570,6 +5848,91 @@
     if (!input) return;
     input.value = btn.textContent.trim();
     input.focus();
+  }
+
+  // ── Ask Across Lectures ────────────────────────────────────────────────
+  // Posts a single question to /api/ask which searches the user's full
+  // library of completed recordings and returns an LLM-grounded answer
+  // with [src:...] citations resolved to clickable lecture links.
+  window.onAskAcrossKey = function(ev) {
+    if (ev.key === 'Enter' && !ev.shiftKey) {
+      ev.preventDefault();
+      askAcrossLectures();
+    }
+  };
+
+  window.askAcrossLectures = async function() {
+    const input  = document.getElementById('ask-across-input');
+    const btn    = document.getElementById('ask-across-btn');
+    const answer = document.getElementById('ask-across-answer');
+    const q = (input.value || '').trim();
+    if (!q) return;
+
+    btn.disabled = true;
+    btn.textContent = '⏳';
+    answer.classList.add('show');
+    answer.textContent = 'מחפש בכל ההקלטות שלך…';
+
+    try {
+      const r = await fetch('/api/ask', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: q, limit: 20 }),
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        answer.textContent = 'שגיאה: ' + (err.detail || r.status);
+        return;
+      }
+      const data = await r.json();
+      renderAskAcrossAnswer(data);
+    } catch (e) {
+      answer.textContent = 'שגיאה: ' + e.message;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'שאל';
+    }
+  };
+
+  function renderAskAcrossAnswer(data) {
+    const answer = document.getElementById('ask-across-answer');
+    answer.textContent = '';
+    answer.classList.add('show');
+
+    const text = document.createElement('div');
+    // Strip the raw [src:xxxx] tokens from the visible text — they live in
+    // the source pills below.
+    text.textContent = (data.answer || '').replace(/\[src:[a-f0-9]+\]/g, '').trim();
+    answer.appendChild(text);
+
+    if (Array.isArray(data.source_meta) && data.source_meta.length > 0) {
+      const sources = document.createElement('div');
+      sources.className = 'ask-across-sources';
+      const heading = document.createElement('span');
+      heading.style.fontSize = '.8rem';
+      heading.style.color = 'var(--muted)';
+      heading.style.marginInlineEnd = '4px';
+      heading.textContent = 'מקורות:';
+      sources.appendChild(heading);
+
+      data.source_meta.forEach(src => {
+        const pill = document.createElement('span');
+        pill.className = 'ask-across-source';
+        const created = (src.created_at || '').slice(0, 10);
+        pill.textContent = (src.title || src.url || src.task_id).slice(0, 50)
+                         + (created ? '  •  ' + created : '');
+        pill.title = src.url || '';
+        pill.onclick = () => loadHistoryTask(src.task_id);
+        sources.appendChild(pill);
+      });
+      answer.appendChild(sources);
+    }
+
+    const meta = document.createElement('div');
+    meta.className = 'ask-across-status';
+    meta.style.marginTop = '8px';
+    meta.textContent = 'נבדקו ' + (data.considered || 0) + ' הקלטות';
+    answer.appendChild(meta);
   }
 
   async function generateCramGuide() {

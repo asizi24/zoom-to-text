@@ -24,7 +24,7 @@ from app.api.lti import router as lti_router
 from app.api.streaming import router as streaming_router
 from app.config import settings
 from app.rate_limit import limiter
-from app.services import transcriber
+from app.services import email_digest, transcriber
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,6 +53,29 @@ async def _idle_watcher():
 # auto-deleted by _failed_task_cleanup() to free disk on the 10 GB volume.
 _FAILED_TTL_HOURS = 24
 _CLEANUP_INTERVAL_SECONDS = 60 * 60  # once an hour
+
+
+# Weekly digest cadence — the loop wakes once an hour and per-user gating
+# (last_digest_at >= 7d) decides whether to actually send.
+_DIGEST_INTERVAL_SECONDS = 60 * 60  # hourly tick
+
+
+async def _weekly_digest_scheduler():
+    """Hourly background task that dispatches weekly digest emails.
+
+    Per-user gating lives in `email_digest.run_digest_cycle` — this loop only
+    has to wake regularly. It never raises; logs and continues on errors.
+    """
+    # Initial delay so a freshly-deployed server doesn't immediately blast emails.
+    await asyncio.sleep(120)
+    while True:
+        try:
+            sent = await email_digest.run_digest_cycle()
+            if sent:
+                logger.info(f"Weekly digest cycle: sent {sent} email(s)")
+        except Exception as exc:
+            logger.warning(f"Weekly digest scheduler error (non-fatal): {exc}")
+        await asyncio.sleep(_DIGEST_INTERVAL_SECONDS)
 
 
 async def _failed_task_cleanup():
@@ -134,6 +157,12 @@ async def lifespan(app: FastAPI):
         f"interval: {_CLEANUP_INTERVAL_SECONDS // 60}min)"
     )
 
+    # Start weekly email digest scheduler (per-user 7d cadence enforced inside)
+    digest = asyncio.create_task(_weekly_digest_scheduler())
+    logger.info(
+        f"Weekly digest scheduler started (tick: {_DIGEST_INTERVAL_SECONDS // 60}min)"
+    )
+
     logger.info("✅ Server ready — listening on port 8000")
     if settings.enable_docs:
         logger.info(f"   API docs: {settings.base_url}/docs")
@@ -145,6 +174,7 @@ async def lifespan(app: FastAPI):
     # ── Shutdown ──
     watcher.cancel()
     cleanup.cancel()
+    digest.cancel()
     await state.close_db()
     logger.info("Server shutting down — goodbye")
 
