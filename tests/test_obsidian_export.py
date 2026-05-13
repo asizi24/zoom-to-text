@@ -291,9 +291,8 @@ def test_minimal_old_result_renders_without_errors():
 
 # ── Endpoint integration ─────────────────────────────────────────────────────
 
-def test_endpoint_returns_markdown_attachment(client, monkeypatch):
+async def test_endpoint_returns_markdown_attachment(client, monkeypatch):
     """GET /api/tasks/{id}/export/obsidian returns markdown with download headers."""
-    import asyncio
     from app import state
     from app.api import deps
 
@@ -305,15 +304,12 @@ def test_endpoint_returns_markdown_attachment(client, monkeypatch):
     app.dependency_overrides[deps.get_current_user] = _user
 
     try:
-        async def _seed():
-            await state.create_task("task-abc", "https://zoom.us/rec/x", user_id="test-user")
-            r = LessonResult(
-                summary="סיכום קצר",
-                action_items=[ActionItem(owner="Asaf", task="ship")],
-            )
-            await state.complete_task("task-abc", r)
-
-        asyncio.get_event_loop().run_until_complete(_seed())
+        await state.create_task("task-abc", "https://zoom.us/rec/x", user_id="test-user")
+        r = LessonResult(
+            summary="סיכום קצר",
+            action_items=[ActionItem(owner="Asaf", task="ship")],
+        )
+        await state.complete_task("task-abc", r)
 
         resp = client.get("/api/tasks/task-abc/export/obsidian")
         assert resp.status_code == 200
@@ -343,9 +339,8 @@ def test_endpoint_404_on_missing_task(client):
         app.dependency_overrides.pop(deps.get_current_user, None)
 
 
-def test_endpoint_400_when_no_result(client):
+async def test_endpoint_400_when_no_result(client):
     """A task that hasn't completed yet has no result — must 400, not 500."""
-    import asyncio
     from app import state
     from app.api import deps
     from app.main import app
@@ -355,10 +350,7 @@ def test_endpoint_400_when_no_result(client):
 
     app.dependency_overrides[deps.get_current_user] = _user
     try:
-        async def _seed():
-            await state.create_task("pending-task", "https://zoom.us/rec/y", user_id="test-user")
-
-        asyncio.get_event_loop().run_until_complete(_seed())
+        await state.create_task("pending-task", "https://zoom.us/rec/y", user_id="test-user")
         resp = client.get("/api/tasks/pending-task/export/obsidian")
         assert resp.status_code == 400
     finally:

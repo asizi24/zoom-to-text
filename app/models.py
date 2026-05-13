@@ -255,3 +255,15 @@ class AskAcrossRequest(BaseModel):
 
     question: str = Field(..., min_length=1, max_length=2000)
     limit: int = Field(20, ge=1, le=50)
+
+
+class FlashcardReview(BaseModel):
+    """Request body for POST /api/tasks/{id}/flashcards/{idx}/review."""
+
+    grade: str = Field(..., pattern="^(again|hard|good|easy)$")
+
+
+class TutorRequest(BaseModel):
+    """Request body for POST /api/tasks/{id}/tutor — Socratic AI tutor."""
+
+    question: str = Field(..., min_length=1, max_length=2000)

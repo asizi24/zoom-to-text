@@ -4,9 +4,11 @@ Tests for GET /api/tasks/{task_id}/export/pdf (Task 5 — PDF export).
 WeasyPrint requires system libs (Pango, Cairo) that are not present on all
 dev/CI machines. Every test patches weasyprint into sys.modules so the suite
 runs anywhere without those system dependencies.
-"""
-import asyncio
 
+Async functions are used (asyncio_mode=auto) for robust event-loop handling
+under Python 3.13 — the older `asyncio.get_event_loop().run_until_complete()`
+pattern is brittle in full-suite runs.
+"""
 import pytest
 
 
@@ -17,28 +19,22 @@ FAKE_PDF = b"%PDF-1.4 fake-pdf-content-for-testing"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _seed_completed(task_id: str, user_id: str = "test-user") -> None:
+async def _seed_completed(task_id: str, user_id: str = "test-user") -> None:
     from app import state
     from app.models import LessonResult, Chapter
 
-    async def _run():
-        await state.create_task(task_id, "https://zoom.us/rec/test", user_id=user_id)
-        result = LessonResult(
-            summary="סיכום קצר לבדיקת ייצוא PDF",
-            chapters=[Chapter(title="נושא ראשון", content="תוכן הנושא")],
-        )
-        await state.complete_task(task_id, result)
-
-    asyncio.get_event_loop().run_until_complete(_run())
+    await state.create_task(task_id, "https://zoom.us/rec/test", user_id=user_id)
+    result = LessonResult(
+        summary="סיכום קצר לבדיקת ייצוא PDF",
+        chapters=[Chapter(title="נושא ראשון", content="תוכן הנושא")],
+    )
+    await state.complete_task(task_id, result)
 
 
-def _seed_pending(task_id: str, user_id: str = "test-user") -> None:
+async def _seed_pending(task_id: str, user_id: str = "test-user") -> None:
     from app import state
 
-    async def _run():
-        await state.create_task(task_id, "https://zoom.us/rec/pending", user_id=user_id)
-
-    asyncio.get_event_loop().run_until_complete(_run())
+    await state.create_task(task_id, "https://zoom.us/rec/pending", user_id=user_id)
 
 
 # ── Module-level fixtures ─────────────────────────────────────────────────────
@@ -75,23 +71,23 @@ def _mock_build_pdf(monkeypatch):
 
 # ── Happy-path tests ──────────────────────────────────────────────────────────
 
-def test_pdf_export_returns_200(client):
+async def test_pdf_export_returns_200(client):
     """Completed task → HTTP 200."""
-    _seed_completed("pdf-ok-1")
+    await _seed_completed("pdf-ok-1")
     assert client.get("/api/tasks/pdf-ok-1/export/pdf").status_code == 200
 
 
-def test_pdf_export_content_type_is_application_pdf(client):
+async def test_pdf_export_content_type_is_application_pdf(client):
     """Content-Type header must be application/pdf."""
-    _seed_completed("pdf-ok-2")
+    await _seed_completed("pdf-ok-2")
     resp = client.get("/api/tasks/pdf-ok-2/export/pdf")
     assert resp.status_code == 200
     assert "application/pdf" in resp.headers["content-type"]
 
 
-def test_pdf_export_has_attachment_content_disposition(client):
+async def test_pdf_export_has_attachment_content_disposition(client):
     """Content-Disposition must signal an attachment download with a .pdf name."""
-    _seed_completed("pdf-ok-3")
+    await _seed_completed("pdf-ok-3")
     resp = client.get("/api/tasks/pdf-ok-3/export/pdf")
     assert resp.status_code == 200
     cd = resp.headers.get("content-disposition", "")
@@ -99,9 +95,9 @@ def test_pdf_export_has_attachment_content_disposition(client):
     assert ".pdf" in cd
 
 
-def test_pdf_export_body_equals_weasyprint_output(client):
+async def test_pdf_export_body_equals_weasyprint_output(client):
     """Response body must be exactly what weasyprint.HTML(...).write_pdf() returned."""
-    _seed_completed("pdf-ok-4")
+    await _seed_completed("pdf-ok-4")
     resp = client.get("/api/tasks/pdf-ok-4/export/pdf")
     assert resp.status_code == 200
     assert resp.content == FAKE_PDF
@@ -115,8 +111,8 @@ def test_pdf_export_404_on_missing_task(client):
     assert resp.status_code == 404
 
 
-def test_pdf_export_400_on_pending_task(client):
+async def test_pdf_export_400_on_pending_task(client):
     """Task exists but has no result yet (still processing) → 400."""
-    _seed_pending("pdf-pending-1")
+    await _seed_pending("pdf-pending-1")
     resp = client.get("/api/tasks/pdf-pending-1/export/pdf")
     assert resp.status_code == 400

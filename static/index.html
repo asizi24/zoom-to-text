@@ -2260,6 +2260,26 @@
       cursor: pointer;
     }
     .chat-clear-btn:hover { border-color: #ef4444; color: #ef4444; }
+    .tutor-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: .8rem;
+      color: #4338ca;
+      background: rgba(99,102,241,.08);
+      border: 1px solid rgba(99,102,241,.25);
+      padding: 4px 10px;
+      border-radius: 999px;
+      cursor: pointer;
+      user-select: none;
+    }
+    .tutor-toggle input { accent-color: #6366f1; cursor: pointer; }
+    .tutor-toggle.active {
+      background: rgba(99,102,241,.18);
+      border-color: rgba(99,102,241,.5);
+    }
+    #chat-card.tutor-on { box-shadow: 0 0 0 2px rgba(99,102,241,.25); }
+    #chat-card.tutor-on #chat-title::after { content: ' — מצב מורה'; color: #4338ca; font-weight:600; }
 
     /* ── Content Search ── */
     .result-search-row {
@@ -2676,6 +2696,37 @@
     }
     .fc-mark-btn.knew { background: #10b981; }
     .fc-mark-btn.missed { background: #ef4444; }
+    .fc-sm2-row {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 10px;
+      margin-top: 14px;
+    }
+    .fc-sm2-btn {
+      border-radius: 10px;
+      padding: 10px 8px;
+      font-size: .85rem;
+      cursor: pointer;
+      border: 1.5px solid transparent;
+      color: #fff;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      align-items: center;
+      transition: transform .12s, box-shadow .12s, filter .12s;
+    }
+    .fc-sm2-btn:hover {
+      transform: translateY(-1px);
+      filter: brightness(1.07);
+      box-shadow: 0 4px 14px rgba(0,0,0,.10);
+    }
+    .fc-sm2-btn:disabled { opacity: .45; cursor: not-allowed; transform: none; }
+    .fc-sm2-btn.again { background: #ef4444; }
+    .fc-sm2-btn.hard  { background: #f59e0b; }
+    .fc-sm2-btn.good  { background: #10b981; }
+    .fc-sm2-btn.easy  { background: #6366f1; }
+    .fc-sm2-label { font-weight: 700; font-size: .95rem; }
+    .fc-sm2-hint  { font-size: .7rem; opacity: .85; }
     .fc-score {
       margin-top: 14px;
       text-align: center;
@@ -3528,9 +3579,25 @@
     </div>
     <div class="fc-controls">
       <button class="fc-nav-btn" id="fc-prev-btn" onclick="prevFlashcard()">◀ הקודם</button>
-      <button class="fc-mark-btn missed" onclick="markFlashcard(false)">✗ לא ידעתי</button>
-      <button class="fc-mark-btn knew" onclick="markFlashcard(true)">✓ ידעתי</button>
       <button class="fc-nav-btn" id="fc-next-btn" onclick="nextFlashcard()">הבא ▶</button>
+    </div>
+    <div class="fc-sm2-row" id="fc-sm2-row">
+      <button class="fc-sm2-btn again" onclick="gradeFlashcard('again')" title="לא זוכר — אאמן שוב">
+        <span class="fc-sm2-label">שוב</span>
+        <span class="fc-sm2-hint">&lt;1d</span>
+      </button>
+      <button class="fc-sm2-btn hard" onclick="gradeFlashcard('hard')" title="ידעתי בקושי">
+        <span class="fc-sm2-label">קשה</span>
+        <span class="fc-sm2-hint" id="fc-sm2-hint-hard">~1d</span>
+      </button>
+      <button class="fc-sm2-btn good" onclick="gradeFlashcard('good')" title="ידעתי טוב">
+        <span class="fc-sm2-label">טוב</span>
+        <span class="fc-sm2-hint" id="fc-sm2-hint-good">~1d</span>
+      </button>
+      <button class="fc-sm2-btn easy" onclick="gradeFlashcard('easy')" title="קל מדי">
+        <span class="fc-sm2-label">קל</span>
+        <span class="fc-sm2-hint" id="fc-sm2-hint-easy">~4d</span>
+      </button>
     </div>
     <div class="fc-score" id="fc-score"></div>
   </div>
@@ -3540,9 +3607,15 @@
 
 <!-- ═══════════════ CHAT CARD ═══════════════ -->
 <div class="card" id="chat-card" style="display:none;">
-  <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;">
-    <span class="section-title" style="margin-bottom:0; font-size:.95rem; border-right-color:#4f46e5;">💬 שאל על השיעור</span>
-    <button class="chat-clear-btn" onclick="clearChat()" id="chat-clear-btn" style="display:none;">נקה שיחה</button>
+  <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; gap:10px; flex-wrap:wrap;">
+    <span class="section-title" id="chat-title" style="margin-bottom:0; font-size:.95rem; border-right-color:#4f46e5;">💬 שאל על השיעור</span>
+    <div style="display:flex; gap:8px;">
+      <label class="tutor-toggle" id="tutor-toggle-wrap" title="במצב מורה הצ'אט מנחה אותך עם שאלות במקום לתת תשובה ישירה">
+        <input type="checkbox" id="tutor-toggle" onchange="onTutorToggle()">
+        <span>🎓 מצב מורה (סוקרטי)</span>
+      </label>
+      <button class="chat-clear-btn" onclick="clearChat()" id="chat-clear-btn" style="display:none;">נקה שיחה</button>
+    </div>
   </div>
   <div class="chat-messages" id="chat-messages"></div>
   <div class="chat-quick-prompts" id="chat-quick-prompts">
@@ -5216,7 +5289,7 @@
     document.getElementById('highlights-section').style.display = 'none';
     document.getElementById('mindmap-section').style.display = 'none';
     document.getElementById('notepad-section').style.display = 'none';
-    flashcards = []; fcIndex = 0; fcKnew = 0; fcMissed = 0; fcSeen = new Set();
+    flashcards = []; fcIndex = 0; fcKnew = 0; fcMissed = 0; fcSeen = new Set(); fcTaskId = null;
     hideError();
     switchTab('url');
     // Don't push a new home state if we're already there (avoids double entries)
@@ -5341,6 +5414,18 @@
     return div;
   }
 
+  function onTutorToggle() {
+    const on = document.getElementById('tutor-toggle').checked;
+    document.getElementById('chat-card').classList.toggle('tutor-on', on);
+    document.getElementById('tutor-toggle-wrap').classList.toggle('active', on);
+    const input = document.getElementById('chat-input');
+    if (input) {
+      input.placeholder = on
+        ? 'שאל את המורה — הוא ינחה אותך עם שאלות במקום לתת תשובה...'
+        : 'שאל שאלה על השיעור...';
+    }
+  }
+
   async function sendChat() {
     if (chatStreaming || !currentChatTaskId) return;
     const input = document.getElementById('chat-input');
@@ -5355,6 +5440,33 @@
 
     const modelBubble = appendChatBubble('model', '', true);
     let fullText = '';
+
+    const tutorMode = document.getElementById('tutor-toggle') &&
+                      document.getElementById('tutor-toggle').checked;
+
+    if (tutorMode) {
+      // Tutor endpoint is non-streaming — single JSON response with Socratic answer.
+      try {
+        const r = await fetch(`/api/tasks/${currentChatTaskId}/tutor`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({question}),
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const body = await r.json();
+        fullText = body.answer || '';
+        modelBubble.textContent = fullText;
+      } catch (err) {
+        modelBubble.textContent = `שגיאה: ${err.message}`;
+      } finally {
+        modelBubble.classList.remove('streaming');
+        linkifyTimestamps(modelBubble);
+        chatStreaming = false;
+        document.getElementById('chat-send-btn').disabled = false;
+        document.getElementById('chat-clear-btn').style.display = '';
+      }
+      return;
+    }
 
     try {
       const r = await fetch(`/api/tasks/${currentChatTaskId}/chat`, {
@@ -6104,6 +6216,7 @@
   let fcKnew = 0;
   let fcMissed = 0;
   let fcSeen = new Set();
+  let fcTaskId = null;  // current task whose flashcards we're showing
 
   function renderFlashcards(cards, taskId) {
     flashcards = cards || [];
@@ -6111,6 +6224,7 @@
     fcKnew = 0;
     fcMissed = 0;
     fcSeen = new Set();
+    fcTaskId = taskId || null;
     const section = document.getElementById('flashcards-section');
     if (!flashcards.length) {
       section.style.display = 'none';
@@ -6124,6 +6238,44 @@
         `/api/tasks/${taskId}/flashcards/export.csv`;
     }
     showFlashcard();
+  }
+
+  async function gradeFlashcard(grade) {
+    if (!flashcards.length || !fcTaskId) return;
+    const row = document.getElementById('fc-sm2-row');
+    Array.from(row.querySelectorAll('button')).forEach(b => b.disabled = true);
+    try {
+      const idx = fcIndex;
+      const resp = await fetch(`/api/tasks/${fcTaskId}/flashcards/${idx}/review`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({grade}),
+      });
+      if (resp.ok) {
+        const body = await resp.json();
+        // Quick visual confirmation: bump the score line with the next interval
+        const el = document.getElementById('fc-score');
+        if (el && body.state) {
+          const days = body.state.interval;
+          el.textContent = `נשמר — נחזור על הכרטיס הזה בעוד ~${days} ימים`;
+        }
+        if (!fcSeen.has(idx)) {
+          fcSeen.add(idx);
+          if (grade === 'again' || grade === 'hard') fcMissed++; else fcKnew++;
+        }
+        if (idx < flashcards.length - 1) {
+          fcIndex++;
+          showFlashcard();
+        } else {
+          document.getElementById('fc-card').classList.remove('flipped');
+        }
+      } else {
+        Array.from(row.querySelectorAll('button')).forEach(b => b.disabled = false);
+      }
+    } catch (err) {
+      console.error('grade review failed', err);
+      Array.from(row.querySelectorAll('button')).forEach(b => b.disabled = false);
+    }
   }
 
   function showFlashcard() {
@@ -6145,6 +6297,8 @@
       `${fcIndex + 1} מתוך ${flashcards.length}`;
     document.getElementById('fc-prev-btn').disabled = fcIndex === 0;
     document.getElementById('fc-next-btn').disabled = fcIndex === flashcards.length - 1;
+    const sm2Row = document.getElementById('fc-sm2-row');
+    if (sm2Row) Array.from(sm2Row.querySelectorAll('button')).forEach(b => b.disabled = false);
     updateFcScore();
   }
 

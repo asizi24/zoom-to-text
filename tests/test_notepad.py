@@ -2,9 +2,11 @@
 
 Notes are a single free-form string column on tasks. The PUT endpoint replaces
 the whole string; GETting the task returns it on `TaskResponse.notes`.
-"""
-import asyncio
 
+Async functions are used (asyncio_mode=auto) for robust event-loop handling
+under Python 3.13 — the older `asyncio.get_event_loop().run_until_complete()`
+pattern is brittle in full-suite runs.
+"""
 import pytest
 
 from app import state
@@ -29,14 +31,10 @@ async def _seed_task(task_id: str, user_id: str, *, with_result: bool = True) ->
         await state.complete_task(task_id, LessonResult(summary="hello"))
 
 
-# ── New tasks have empty notes ─────────────────────────────────────────────
-
-def test_new_task_has_empty_notes(client):
+async def test_new_task_has_empty_notes(client):
     _override_user("user-1")
     try:
-        asyncio.get_event_loop().run_until_complete(
-            _seed_task("notepad-task-1", "user-1")
-        )
+        await _seed_task("notepad-task-1", "user-1")
         resp = client.get("/api/tasks/notepad-task-1")
         assert resp.status_code == 200
         assert resp.json()["notes"] == ""
@@ -44,14 +42,10 @@ def test_new_task_has_empty_notes(client):
         _clear_override()
 
 
-# ── PUT updates the notes, GET returns them ────────────────────────────────
-
-def test_put_notes_persists_and_round_trips(client):
+async def test_put_notes_persists_and_round_trips(client):
     _override_user("user-1")
     try:
-        asyncio.get_event_loop().run_until_complete(
-            _seed_task("notepad-task-2", "user-1")
-        )
+        await _seed_task("notepad-task-2", "user-1")
 
         put = client.put(
             "/api/tasks/notepad-task-2/notes",
@@ -67,14 +61,10 @@ def test_put_notes_persists_and_round_trips(client):
         _clear_override()
 
 
-# ── Notes can be cleared with empty string ────────────────────────────────
-
-def test_put_notes_can_clear(client):
+async def test_put_notes_can_clear(client):
     _override_user("user-1")
     try:
-        asyncio.get_event_loop().run_until_complete(
-            _seed_task("notepad-task-3", "user-1")
-        )
+        await _seed_task("notepad-task-3", "user-1")
         client.put("/api/tasks/notepad-task-3/notes", json={"notes": "draft"})
         client.put("/api/tasks/notepad-task-3/notes", json={"notes": ""})
 
@@ -83,8 +73,6 @@ def test_put_notes_can_clear(client):
     finally:
         _clear_override()
 
-
-# ── 404 for unknown task ───────────────────────────────────────────────────
 
 def test_put_notes_404_on_unknown_task(client):
     _override_user("user-1")
@@ -95,26 +83,17 @@ def test_put_notes_404_on_unknown_task(client):
         _clear_override()
 
 
-# ── Cross-user isolation: user-B can't write to user-A's task ──────────────
+async def test_put_notes_cross_user_isolation(client):
+    await state.create_task("notepad-task-4", "https://example.com/x", user_id="user-A")
+    await state.complete_task("notepad-task-4", LessonResult(summary="x"))
 
-def test_put_notes_cross_user_isolation(client):
-    # Seed under user-A
-    async def _seed():
-        await state.create_task("notepad-task-4", "https://example.com/x", user_id="user-A")
-        await state.complete_task("notepad-task-4", LessonResult(summary="x"))
-
-    asyncio.get_event_loop().run_until_complete(_seed())
-
-    # Try writing as user-B
     _override_user("user-B")
     try:
         resp = client.put("/api/tasks/notepad-task-4/notes", json={"notes": "evil"})
-        # Foreign task → 404 (we hide existence to prevent enumeration)
         assert resp.status_code == 404
     finally:
         _clear_override()
 
-    # Confirm user-A's task is still empty
     _override_user("user-A")
     try:
         got = client.get("/api/tasks/notepad-task-4").json()
@@ -122,8 +101,6 @@ def test_put_notes_cross_user_isolation(client):
     finally:
         _clear_override()
 
-
-# ── Notes field is Optional/default for backward-compat (no-key on old DB) ─
 
 def test_lesson_response_default_notes_empty_string():
     """If the DB lacks the column (legacy row), notes defaults to ''."""

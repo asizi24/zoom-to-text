@@ -6,8 +6,6 @@ real LLM. We're verifying:
   • only the calling user's completed tasks are sent into the prompt
   • source [src:<prefix>] citations are mapped back to full task_ids + metadata
 """
-import asyncio
-
 import pytest
 
 from app import state
@@ -35,11 +33,9 @@ async def _seed_completed(task_id: str, user_id: str, summary: str = "hello",
     )
 
 
-def test_ask_endpoint_returns_answer_and_sources(client, monkeypatch):
+async def test_ask_endpoint_returns_answer_and_sources(client, monkeypatch):
     """Happy path: one completed task, model cites it."""
-    asyncio.get_event_loop().run_until_complete(
-        _seed_completed("ask-task-1234aaaa", "user-1", summary="באומגה 3 יש יתרון בריאותי")
-    )
+    await _seed_completed("ask-task-1234aaaa", "user-1", summary="באומגה 3 יש יתרון בריאותי")
 
     async def _fake_answer(question, tasks):
         # `answer_across_lectures` is responsible for mapping [src:prefix]
@@ -69,13 +65,10 @@ def test_ask_endpoint_returns_answer_and_sources(client, monkeypatch):
         _clear_override()
 
 
-def test_ask_endpoint_isolates_users(client, monkeypatch):
+async def test_ask_endpoint_isolates_users(client, monkeypatch):
     """User-B must not see User-A's tasks in the prompt."""
-    async def _seed_both():
-        await _seed_completed("user-a-task-aa", "user-A", summary="private to A")
-        await _seed_completed("user-b-task-bb", "user-B", summary="public to B")
-
-    asyncio.get_event_loop().run_until_complete(_seed_both())
+    await _seed_completed("user-a-task-aa", "user-A", summary="private to A")
+    await _seed_completed("user-b-task-bb", "user-B", summary="public to B")
 
     captured: dict = {}
 

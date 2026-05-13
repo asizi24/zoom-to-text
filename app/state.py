@@ -96,6 +96,25 @@ CREATE TABLE IF NOT EXISTS lti_oidc_state (
 )
 """
 
+CREATE_FLASHCARD_REVIEWS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS flashcard_reviews (
+    user_id          TEXT NOT NULL REFERENCES users(id),
+    task_id          TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    card_index       INTEGER NOT NULL,
+    easiness         REAL    NOT NULL DEFAULT 2.5,
+    interval         INTEGER NOT NULL DEFAULT 0,
+    repetitions      INTEGER NOT NULL DEFAULT 0,
+    last_reviewed_at TEXT    NOT NULL,
+    due_at           TEXT    NOT NULL,
+    PRIMARY KEY (user_id, task_id, card_index)
+)
+"""
+
+CREATE_FLASHCARD_REVIEWS_DUE_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_flashcard_reviews_user_due
+ON flashcard_reviews (user_id, due_at)
+"""
+
 
 # ── Lifecycle ─────────────────────────────────────────────────────────────────────
 
@@ -135,6 +154,8 @@ async def init_db():
     await db.execute(CREATE_MAGIC_TOKENS_TABLE_SQL)
     await db.execute(CREATE_SESSIONS_TABLE_SQL)
     await db.execute(CREATE_LTI_OIDC_STATE_TABLE_SQL)
+    await db.execute(CREATE_FLASHCARD_REVIEWS_TABLE_SQL)
+    await db.execute(CREATE_FLASHCARD_REVIEWS_DUE_INDEX_SQL)
     await db.commit()
 
     # Add index on user_id for fast per-user task listings
@@ -625,6 +646,92 @@ async def mark_digest_sent(user_id: str) -> None:
         [datetime.now(timezone.utc).isoformat(), user_id],
     )
     await db.commit()
+
+
+# ── Flashcard reviews (SM-2 spaced repetition) ───────────────────────────────
+
+async def get_card_review_state(
+    user_id: str, task_id: str, card_index: int
+) -> Optional[dict]:
+    """Return the SM-2 state for one card, or None if never reviewed."""
+    db = await _get_db()
+    async with db.execute(
+        "SELECT easiness, interval, repetitions, last_reviewed_at, due_at "
+        "FROM flashcard_reviews WHERE user_id=? AND task_id=? AND card_index=?",
+        [user_id, task_id, card_index],
+    ) as cursor:
+        row = await cursor.fetchone()
+    if row is None:
+        return None
+    return {
+        "easiness": row["easiness"],
+        "interval": row["interval"],
+        "repetitions": row["repetitions"],
+        "last_reviewed_at": row["last_reviewed_at"],
+        "due_at": row["due_at"],
+    }
+
+
+async def save_card_review(
+    user_id: str,
+    task_id: str,
+    card_index: int,
+    easiness: float,
+    interval: int,
+    repetitions: int,
+    last_reviewed_at: str,
+    due_at: str,
+) -> None:
+    """Upsert a card's SM-2 state after a review."""
+    db = await _get_db()
+    await db.execute(
+        """
+        INSERT INTO flashcard_reviews
+            (user_id, task_id, card_index, easiness, interval, repetitions,
+             last_reviewed_at, due_at)
+        VALUES (?,?,?,?,?,?,?,?)
+        ON CONFLICT(user_id, task_id, card_index) DO UPDATE SET
+            easiness=excluded.easiness,
+            interval=excluded.interval,
+            repetitions=excluded.repetitions,
+            last_reviewed_at=excluded.last_reviewed_at,
+            due_at=excluded.due_at
+        """,
+        [
+            user_id, task_id, card_index, easiness, interval, repetitions,
+            last_reviewed_at, due_at,
+        ],
+    )
+    await db.commit()
+
+
+async def list_due_card_states(user_id: str, *, now_iso: str) -> list[dict]:
+    """Return every (task_id, card_index) the user has reviewed that is due now.
+
+    Newly-generated, never-reviewed cards are NOT in this table — the route
+    layer surfaces those separately (every fresh card is implicitly due).
+    """
+    db = await _get_db()
+    async with db.execute(
+        "SELECT task_id, card_index, easiness, interval, repetitions, "
+        "       last_reviewed_at, due_at "
+        "FROM flashcard_reviews WHERE user_id=? AND due_at <= ? "
+        "ORDER BY due_at ASC",
+        [user_id, now_iso],
+    ) as cursor:
+        rows = await cursor.fetchall()
+    return [dict(r) for r in rows]
+
+
+async def list_reviewed_card_indices(user_id: str, task_id: str) -> set[int]:
+    """Return the set of card indices the user has ever reviewed for this task."""
+    db = await _get_db()
+    async with db.execute(
+        "SELECT card_index FROM flashcard_reviews WHERE user_id=? AND task_id=?",
+        [user_id, task_id],
+    ) as cursor:
+        rows = await cursor.fetchall()
+    return {row["card_index"] for row in rows}
 
 
 async def list_digest_subscribers() -> list[dict]:

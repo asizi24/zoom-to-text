@@ -1944,6 +1944,63 @@ async def ask_about_lesson(context: str, question: str) -> str:
         raise TimeoutError("⏱️ Gemini לא הגיב תוך 2 דקות — נסה שוב")
 
 
+# ── AI Tutor (Socratic mode) ──────────────────────────────────────────────────
+
+_TUTOR_SYSTEM_PROMPT = """\
+אתה מורה פרטי סוקרטי. המטרה שלך אינה לתת לתלמיד את התשובה ישירות,
+אלא להוביל אותו להבנה דרך שאלות מנחות, רמזים הדרגתיים, ודוגמאות מתוך
+תוכן השיעור.
+
+כללים:
+- כשהתלמיד שואל "מה זה X?" — אל תגדיר ישר. שאל קודם מה הוא חושב, או הצע
+  דוגמה מתוך השיעור והוסף שאלה מנחה.
+- אם התלמיד נראה תקוע אחרי 2 ניסיונות, תן רמז יותר ברור.
+- אם התלמיד מציג תשובה — שקף לו אם היא נכונה/חלקית/שגויה, ותסביר *למה*
+  בקצרה תוך הצבעה על המקור הרלוונטי בשיעור.
+- אם התלמיד שואל על נושא שאינו בשיעור — אמור זאת בכנות והצע לחזור לנושא
+  מתוך החומר.
+- ענה בעברית, בטון תומך וסבלני, בלי לקטל אם התלמיד טועה.
+- שמור על תשובות קצרות (לרוב 2-4 משפטים), בלי להציף.
+- כשאתה מצטט מהשיעור — השתמש ב-״...״ קצרות.
+"""
+
+
+_TUTOR_TIMEOUT = 120.0
+
+
+async def tutor_about_lesson(context: str, question: str) -> str:
+    """Socratic-mode answer: pushes the learner to think, doesn't hand over the answer.
+
+    Uses the active LLM provider. Mirrors `ask_about_lesson` in shape so the
+    route layer can swap them based on a `mode` query param.
+    """
+    if not _is_gemini_provider():
+        provider = get_provider()
+        prompt = (
+            f"{_TUTOR_SYSTEM_PROMPT}\n\nתוכן השיעור:\n{context}\n\n"
+            f"שאלת התלמיד: {question}"
+        )
+        return await provider.generate_text(prompt, timeout=_TUTOR_TIMEOUT)
+
+    def _sync() -> str:
+        client = _get_client()
+        prompt = (
+            f"{_TUTOR_SYSTEM_PROMPT}\n\nתוכן השיעור:\n{context}\n\n"
+            f"שאלת התלמיד: {question}"
+        )
+        response = _generate_with_retry(client, prompt)
+        return response.text
+
+    loop = asyncio.get_running_loop()
+    try:
+        return await asyncio.wait_for(
+            loop.run_in_executor(None, _sync),
+            timeout=_TUTOR_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        raise TimeoutError("⏱️ Gemini לא הגיב תוך 2 דקות — נסה שוב")
+
+
 # ── Streaming multi-turn chat ─────────────────────────────────────────────────────
 
 _CHAT_SYSTEM_PROMPT = """\

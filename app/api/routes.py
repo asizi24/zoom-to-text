@@ -26,12 +26,15 @@ from app.config import settings
 from app.models import (
     AskAcrossRequest,
     CramGuideRequest,
+    FlashcardReview,
     NotesUpdate,
     ProcessingMode,
     TaskCreate,
     TaskResponse,
     TaskStatus,
+    TutorRequest,
 )
+from app.services import sm2
 from app.services import anki_export, processor, summarizer, text_extractor
 from app.services.exporters.markdown import build_obsidian_markdown
 from app.services.task_service import prepare_supplementary_context
@@ -819,6 +822,166 @@ async def get_flashcards(
     if task.result is None:
         raise HTTPException(status_code=400, detail="Task has no result yet")
     return {"flashcards": [c.model_dump() for c in task.result.flashcards]}
+
+
+@router.get("/flashcards/due")
+async def list_due_flashcards(
+    limit: int = Query(50, ge=1, le=200),
+    user_id: str = Depends(get_current_user),
+):
+    """Return cards across all the user's lectures that are due for review.
+
+    Cards never reviewed before are implicitly due (an SM-2 "new" card).
+    Reviewed cards become due when their stored `due_at` is in the past.
+    Result is capped at `limit`, ordered: never-reviewed first, then by
+    oldest `due_at`.
+    """
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+
+    # 1) Pull state rows that are due (already-reviewed cards).
+    due_states = await state.list_due_card_states(user_id, now_iso=now_iso)
+
+    # 2) Walk completed tasks and surface their flashcards. For each card,
+    #    check if a state exists; emit due rows accordingly.
+    tasks = await state.list_completed_tasks_with_results(user_id, limit=100)
+
+    state_by_key = {
+        (s["task_id"], s["card_index"]): s for s in due_states
+    }
+
+    new_cards: list[dict] = []
+    review_cards: list[dict] = []
+
+    for task in tasks:
+        if not task.result or not task.result.flashcards:
+            continue
+        reviewed = await state.list_reviewed_card_indices(user_id, task.task_id)
+        title = (task.result.summary or "").split("\n", 1)[0][:80] or task.url or task.task_id
+        for idx, card in enumerate(task.result.flashcards):
+            entry = {
+                "task_id": task.task_id,
+                "task_title": title,
+                "card_index": idx,
+                "front": card.front,
+                "back": card.back,
+                "tags": card.tags,
+            }
+            if idx not in reviewed:
+                new_cards.append({**entry, "status": "new", "due_at": None})
+            else:
+                key = (task.task_id, idx)
+                if key in state_by_key:
+                    s = state_by_key[key]
+                    review_cards.append({
+                        **entry,
+                        "status": "due",
+                        "due_at": s["due_at"],
+                        "easiness": s["easiness"],
+                        "interval": s["interval"],
+                        "repetitions": s["repetitions"],
+                    })
+        if len(new_cards) + len(review_cards) >= limit * 4:
+            break  # plenty of candidates collected
+
+    # Newest cards first (more likely to be wanted), then oldest-due review cards
+    review_cards.sort(key=lambda c: c["due_at"])
+    combined = (new_cards + review_cards)[:limit]
+    return {
+        "due": combined,
+        "counts": {
+            "new": len(new_cards),
+            "review": len(review_cards),
+            "returned": len(combined),
+        },
+    }
+
+
+@router.post("/tasks/{task_id}/flashcards/{card_index}/review")
+async def review_flashcard(
+    task_id: str,
+    card_index: int,
+    body: FlashcardReview,
+    user_id: str = Depends(get_current_user),
+):
+    """Apply SM-2 with the given grade and persist the new state."""
+    task = await state.get_task_for_user(task_id, user_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.result is None or not task.result.flashcards:
+        raise HTTPException(status_code=400, detail="Task has no flashcards")
+    if card_index < 0 or card_index >= len(task.result.flashcards):
+        raise HTTPException(status_code=404, detail="Card index out of range")
+
+    existing = await state.get_card_review_state(user_id, task_id, card_index)
+    if existing is None:
+        prev = sm2.ReviewState()
+    else:
+        prev = sm2.ReviewState(
+            easiness=existing["easiness"],
+            interval=existing["interval"],
+            repetitions=existing["repetitions"],
+            last_reviewed_at=existing["last_reviewed_at"],
+            due_at=existing["due_at"],
+        )
+
+    new_state = sm2.apply_review(prev, body.grade)
+    await state.save_card_review(
+        user_id, task_id, card_index,
+        easiness=new_state.easiness,
+        interval=new_state.interval,
+        repetitions=new_state.repetitions,
+        last_reviewed_at=new_state.last_reviewed_at,
+        due_at=new_state.due_at,
+    )
+    return {
+        "ok": True,
+        "state": {
+            "easiness": new_state.easiness,
+            "interval": new_state.interval,
+            "repetitions": new_state.repetitions,
+            "due_at": new_state.due_at,
+            "last_reviewed_at": new_state.last_reviewed_at,
+        },
+    }
+
+
+@router.post("/tasks/{task_id}/tutor")
+async def tutor_endpoint(
+    task_id: str,
+    body: TutorRequest,
+    user_id: str = Depends(get_current_user),
+):
+    """Ask the Socratic AI tutor a question about this lesson.
+
+    Unlike /ask (which gives a direct answer), the tutor probes the learner's
+    understanding and gives hints rather than handing over the answer.
+    """
+    task = await state.get_task_for_user(task_id, user_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.result is None:
+        raise HTTPException(status_code=400, detail="Task has no result yet")
+
+    context_parts: list[str] = []
+    if task.result.summary:
+        context_parts.append(f"סיכום:\n{task.result.summary}")
+    if task.result.chapters:
+        ch_text = "\n".join(
+            f"- {ch.title}: {ch.content}" for ch in task.result.chapters
+        )
+        context_parts.append(f"פרקים:\n{ch_text}")
+    transcript = task.result.diarized_transcript or task.result.transcript or ""
+    if transcript:
+        context_parts.append(f"תמלול:\n{transcript[:30000]}")
+    context = "\n\n".join(context_parts)
+
+    try:
+        answer = await summarizer.tutor_about_lesson(context, body.question)
+    except TimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc))
+    return {"answer": answer}
 
 
 @router.get("/tasks/{task_id}/flashcards/export.apkg")
