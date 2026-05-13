@@ -141,6 +141,37 @@ CREATE TABLE IF NOT EXISTS user_glossaries (
 )
 """
 
+# ── B5: outgoing webhooks + task sharing (cohort) ────────────────────────────
+
+CREATE_USER_WEBHOOKS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS user_webhooks (
+    id         TEXT PRIMARY KEY,
+    user_id    TEXT NOT NULL REFERENCES users(id),
+    kind       TEXT NOT NULL,
+    url        TEXT NOT NULL,
+    enabled    INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL
+)
+"""
+
+CREATE_USER_WEBHOOKS_USER_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_user_webhooks_user ON user_webhooks (user_id)
+"""
+
+CREATE_TASK_SHARES_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS task_shares (
+    task_id            TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    user_id            TEXT NOT NULL REFERENCES users(id),
+    granted_by_user_id TEXT NOT NULL REFERENCES users(id),
+    granted_at         TEXT NOT NULL,
+    PRIMARY KEY (task_id, user_id)
+)
+"""
+
+CREATE_TASK_SHARES_USER_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_task_shares_user ON task_shares (user_id)
+"""
+
 
 # ── Lifecycle ─────────────────────────────────────────────────────────────────────
 
@@ -185,6 +216,10 @@ async def init_db():
     await db.execute(CREATE_AUDIO_CLIPS_TABLE_SQL)
     await db.execute(CREATE_AUDIO_CLIPS_TASK_INDEX_SQL)
     await db.execute(CREATE_USER_GLOSSARIES_TABLE_SQL)
+    await db.execute(CREATE_USER_WEBHOOKS_TABLE_SQL)
+    await db.execute(CREATE_USER_WEBHOOKS_USER_INDEX_SQL)
+    await db.execute(CREATE_TASK_SHARES_TABLE_SQL)
+    await db.execute(CREATE_TASK_SHARES_USER_INDEX_SQL)
     await db.commit()
 
     # Add index on user_id for fast per-user task listings
@@ -1701,3 +1736,223 @@ async def set_user_glossary(user_id: str, terms: list[dict]) -> str:
     )
     await db.commit()
     return now
+
+
+# ── B5: Outgoing webhooks (Slack / Discord) ─────────────────────────────────
+
+async def create_webhook(user_id: str, kind: str, url: str) -> dict:
+    """Insert a new webhook config for a user. Returns the inserted row as dict."""
+    db = await _get_db()
+    wid = uuid.uuid4().hex
+    now = _now().isoformat()
+    await db.execute(
+        "INSERT INTO user_webhooks (id, user_id, kind, url, enabled, created_at) "
+        "VALUES (?, ?, ?, ?, 1, ?)",
+        [wid, user_id, kind, url, now],
+    )
+    await db.commit()
+    return {
+        "id": wid,
+        "user_id": user_id,
+        "kind": kind,
+        "url": url,
+        "enabled": True,
+        "created_at": now,
+    }
+
+
+async def list_webhooks(user_id: str) -> list[dict]:
+    """Return all webhook configs for a user, newest first."""
+    db = await _get_db()
+    async with db.execute(
+        "SELECT id, kind, url, enabled, created_at FROM user_webhooks "
+        "WHERE user_id = ? ORDER BY created_at DESC",
+        [user_id],
+    ) as cur:
+        rows = await cur.fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["enabled"] = bool(d["enabled"])
+        out.append(d)
+    return out
+
+
+async def list_enabled_webhooks(user_id: str) -> list[dict]:
+    """Subset used by the post-completion fire-and-forget notifier."""
+    db = await _get_db()
+    async with db.execute(
+        "SELECT id, kind, url FROM user_webhooks WHERE user_id = ? AND enabled = 1",
+        [user_id],
+    ) as cur:
+        rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+async def set_webhook_enabled(webhook_id: str, user_id: str, enabled: bool) -> bool:
+    """Toggle a webhook's enabled flag. Returns True if a row was updated."""
+    db = await _get_db()
+    result = await db.execute(
+        "UPDATE user_webhooks SET enabled = ? WHERE id = ? AND user_id = ?",
+        [1 if enabled else 0, webhook_id, user_id],
+    )
+    await db.commit()
+    return result.rowcount > 0
+
+
+async def delete_webhook(webhook_id: str, user_id: str) -> bool:
+    """Delete a webhook config. Returns True if a row was removed."""
+    db = await _get_db()
+    result = await db.execute(
+        "DELETE FROM user_webhooks WHERE id = ? AND user_id = ?",
+        [webhook_id, user_id],
+    )
+    await db.commit()
+    return result.rowcount > 0
+
+
+async def get_webhook(webhook_id: str, user_id: str) -> Optional[dict]:
+    """Owner-gated read — used to check before PATCH/DELETE."""
+    db = await _get_db()
+    async with db.execute(
+        "SELECT id, kind, url, enabled, created_at FROM user_webhooks "
+        "WHERE id = ? AND user_id = ?",
+        [webhook_id, user_id],
+    ) as cur:
+        row = await cur.fetchone()
+    if row is None:
+        return None
+    d = dict(row)
+    d["enabled"] = bool(d["enabled"])
+    return d
+
+
+async def get_task_owner(task_id: str) -> Optional[str]:
+    """Return the user_id that owns this task, or None if the task doesn't exist."""
+    db = await _get_db()
+    async with db.execute(
+        "SELECT user_id FROM tasks WHERE id = ?", [task_id]
+    ) as cur:
+        row = await cur.fetchone()
+    return row["user_id"] if row else None
+
+
+# ── B5: Task sharing (cohort read-access) ────────────────────────────────────
+
+async def get_user_by_email(email: str) -> Optional[str]:
+    """Look up a user_id by email. Returns None if no such user."""
+    db = await _get_db()
+    async with db.execute(
+        "SELECT id FROM users WHERE email = ?", [email.lower()]
+    ) as cur:
+        row = await cur.fetchone()
+    return row["id"] if row else None
+
+
+async def share_task(task_id: str, target_user_id: str, granted_by_user_id: str) -> dict:
+    """Grant another user read-access to a task. Upserts if already shared."""
+    db = await _get_db()
+    now = _now().isoformat()
+    await db.execute(
+        "INSERT INTO task_shares (task_id, user_id, granted_by_user_id, granted_at) "
+        "VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(task_id, user_id) DO UPDATE SET "
+        "granted_by_user_id = excluded.granted_by_user_id, granted_at = excluded.granted_at",
+        [task_id, target_user_id, granted_by_user_id, now],
+    )
+    await db.commit()
+    return {
+        "task_id": task_id,
+        "user_id": target_user_id,
+        "granted_by_user_id": granted_by_user_id,
+        "granted_at": now,
+    }
+
+
+async def revoke_task_share(task_id: str, target_user_id: str) -> bool:
+    """Remove a single user's access to a task. Returns True if a row was removed."""
+    db = await _get_db()
+    result = await db.execute(
+        "DELETE FROM task_shares WHERE task_id = ? AND user_id = ?",
+        [task_id, target_user_id],
+    )
+    await db.commit()
+    return result.rowcount > 0
+
+
+async def list_task_collaborators(task_id: str) -> list[dict]:
+    """List every user with shared access to a task (excluding the owner)."""
+    db = await _get_db()
+    async with db.execute(
+        "SELECT ts.user_id, u.email, ts.granted_at "
+        "FROM task_shares ts JOIN users u ON u.id = ts.user_id "
+        "WHERE ts.task_id = ? ORDER BY ts.granted_at",
+        [task_id],
+    ) as cur:
+        rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+async def list_tasks_shared_with_user(user_id: str, limit: int = 50) -> list[dict]:
+    """Return tasks shared *with* this user (i.e. owned by someone else).
+    Mirrors `list_tasks` columns so the History tab can show a "Shared with me" list.
+    """
+    db = await _get_db()
+    async with db.execute(
+        "SELECT t.id, t.status, t.progress, t.message, t.created_at, t.url, t.failed_at, "
+        "       u.email AS owner_email "
+        "FROM task_shares ts "
+        "JOIN tasks t ON t.id = ts.task_id "
+        "JOIN users u ON u.id = t.user_id "
+        "WHERE ts.user_id = ? "
+        "ORDER BY t.created_at DESC LIMIT ?",
+        [user_id, limit],
+    ) as cur:
+        rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+async def user_can_read_task(task_id: str, user_id: str) -> bool:
+    """Return True if user_id owns the task OR has been granted a share."""
+    db = await _get_db()
+    async with db.execute(
+        "SELECT 1 FROM tasks WHERE id = ? AND user_id = ?", [task_id, user_id]
+    ) as cur:
+        if await cur.fetchone():
+            return True
+    async with db.execute(
+        "SELECT 1 FROM task_shares WHERE task_id = ? AND user_id = ?",
+        [task_id, user_id],
+    ) as cur:
+        return await cur.fetchone() is not None
+
+
+async def get_task_readable_by_user(task_id: str, user_id: str) -> Optional[TaskResponse]:
+    """Like get_task_for_user but also allows users with shared access."""
+    if not await user_can_read_task(task_id, user_id):
+        return None
+    # Re-fetch by id only — we've already cleared the gate.
+    db = await _get_db()
+    async with db.execute("SELECT * FROM tasks WHERE id = ?", [task_id]) as cur:
+        row = await cur.fetchone()
+    if row is None:
+        return None
+    result = None
+    if row["result_json"]:
+        result = LessonResult.model_validate_json(row["result_json"])
+    audio_path = row["audio_path"] if "audio_path" in row.keys() else None
+    has_audio = bool(audio_path) and Path(audio_path).exists()
+    return TaskResponse(
+        task_id=row["id"],
+        status=TaskStatus(row["status"]),
+        progress=row["progress"],
+        message=row["message"],
+        created_at=row["created_at"],
+        url=row["url"],
+        result=result,
+        error=row["error"],
+        error_details=_decode_error_details(row),
+        has_audio=has_audio,
+        failed_at=_row_failed_at(row),
+        notes=_row_notes(row),
+    )

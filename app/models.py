@@ -275,3 +275,22 @@ class AudioClipCreate(BaseModel):
     start_sec: float = Field(..., ge=0)
     end_sec: float = Field(..., gt=0)
     label: str = Field("", max_length=200)
+
+
+class WebhookCreate(BaseModel):
+    """Request body for POST /api/webhooks — B5 outgoing notifications."""
+
+    kind: str = Field(..., pattern=r"^(slack|discord)$")
+    url: str = Field(..., min_length=10, max_length=2000)
+
+
+class WebhookUpdate(BaseModel):
+    """Request body for PATCH /api/webhooks/{id}."""
+
+    enabled: bool
+
+
+class TaskShareCreate(BaseModel):
+    """Request body for POST /api/tasks/{id}/shares — B5 cohort sharing."""
+
+    email: str = Field(..., min_length=3, max_length=320)

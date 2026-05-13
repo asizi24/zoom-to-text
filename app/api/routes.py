@@ -32,12 +32,16 @@ from app.models import (
     ProcessingMode,
     TaskCreate,
     TaskResponse,
+    TaskShareCreate,
     TaskStatus,
     TutorRequest,
+    WebhookCreate,
+    WebhookUpdate,
 )
 from app.services import sm2
 from app.services import anki_export, glossary, processor, summarizer, text_extractor
 from app.services.clip_extractor import ClipExtractionError, extract_clip_bytes
+from app.services.exporters.ics import build_ics
 from app.services.exporters.markdown import build_obsidian_markdown
 from app.services.task_service import prepare_supplementary_context
 from app.services.llm_providers import get_provider
@@ -1469,3 +1473,152 @@ async def ask_across_lectures(
         "source_meta": source_meta,
         "considered": len(tasks),
     }
+
+
+# ── B5: Outgoing webhooks (Slack/Discord) ─────────────────────────────────
+
+@router.get("/webhooks")
+async def list_my_webhooks(user_id: str = Depends(get_current_user)):
+    """List the calling user's configured webhooks."""
+    return {"webhooks": await state.list_webhooks(user_id)}
+
+
+@router.post("/webhooks", status_code=201)
+async def create_my_webhook(
+    body: WebhookCreate,
+    user_id: str = Depends(get_current_user),
+):
+    """Register a new Slack or Discord incoming webhook for task-completion alerts.
+
+    URL must be https:// — we never transmit lesson previews over plain http.
+    """
+    url = body.url.strip()
+    if not url.startswith("https://"):
+        raise HTTPException(status_code=400, detail="Webhook URL must be https")
+    return await state.create_webhook(user_id, body.kind, url)
+
+
+@router.patch("/webhooks/{webhook_id}")
+async def update_my_webhook(
+    webhook_id: str,
+    body: WebhookUpdate,
+    user_id: str = Depends(get_current_user),
+):
+    """Enable or disable a webhook without deleting it."""
+    ok = await state.set_webhook_enabled(webhook_id, user_id, body.enabled)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+    return await state.get_webhook(webhook_id, user_id)
+
+
+@router.delete("/webhooks/{webhook_id}", status_code=204)
+async def delete_my_webhook(
+    webhook_id: str,
+    user_id: str = Depends(get_current_user),
+):
+    """Permanently remove a webhook config."""
+    ok = await state.delete_webhook(webhook_id, user_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+
+
+# ── B5: ICS calendar export ───────────────────────────────────────────────
+
+@router.get("/tasks/{task_id}/export/ics")
+async def export_task_ics(
+    task_id: str,
+    user_id: str = Depends(get_current_user),
+):
+    """Download the task as a single-event .ics file ("Add to Calendar")."""
+    task = await state.get_task_readable_by_user(task_id, user_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.result is None:
+        raise HTTPException(status_code=400, detail="Task has no result yet")
+    ics_text = build_ics(task)
+    filename = f"lesson-{task_id[:8]}.ics"
+    return Response(
+        content=ics_text,
+        media_type="text/calendar; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ── B5: Task sharing (cohort read-access) ─────────────────────────────────
+
+@router.get("/tasks/{task_id}/shares")
+async def list_my_task_shares(
+    task_id: str,
+    user_id: str = Depends(get_current_user),
+):
+    """Owner-only: list every user who has been granted read access."""
+    task = await state.get_task_for_user(task_id, user_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return {"shares": await state.list_task_collaborators(task_id)}
+
+
+@router.post("/tasks/{task_id}/shares", status_code=201)
+async def grant_task_share(
+    task_id: str,
+    body: TaskShareCreate,
+    user_id: str = Depends(get_current_user),
+):
+    """Owner-only: grant another user (by email) read access to this task.
+
+    The target email must belong to an existing user (i.e. someone who has
+    logged in at least once and is in ALLOWED_EMAILS).
+    """
+    task = await state.get_task_for_user(task_id, user_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    target_email = body.email.strip().lower()
+    target_user_id = await state.get_user_by_email(target_email)
+    if target_user_id is None:
+        raise HTTPException(
+            status_code=400, detail="User with that email has not logged in yet"
+        )
+    if target_user_id == user_id:
+        raise HTTPException(
+            status_code=400, detail="You already own this task"
+        )
+    return await state.share_task(task_id, target_user_id, user_id)
+
+
+@router.delete("/tasks/{task_id}/shares/{target_user_id}", status_code=204)
+async def revoke_task_share_endpoint(
+    task_id: str,
+    target_user_id: str,
+    user_id: str = Depends(get_current_user),
+):
+    """Owner-only: revoke a user's read access."""
+    task = await state.get_task_for_user(task_id, user_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    await state.revoke_task_share(task_id, target_user_id)
+
+
+@router.get("/shared-tasks")
+async def list_tasks_shared_with_me(user_id: str = Depends(get_current_user)):
+    """List tasks that other users have shared with the current user.
+
+    Path is `/shared-tasks` (not `/tasks/shared`) to avoid colliding with the
+    existing `/tasks/{task_id}` route, which is declared earlier.
+    """
+    return {"tasks": await state.list_tasks_shared_with_user(user_id)}
+
+
+@router.get("/tasks/{task_id}/readable")
+async def get_readable_task(
+    task_id: str,
+    user_id: str = Depends(get_current_user),
+):
+    """Fetch a task the user owns OR has been granted read access to.
+
+    Separate from `GET /api/tasks/{id}` so the original owner-gated path is
+    unchanged for clients that don't yet understand shared tasks.
+    """
+    task = await state.get_task_readable_by_user(task_id, user_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return task

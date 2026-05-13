@@ -41,6 +41,26 @@ from app.services import summarizer, transcriber, zoom_downloader
 logger = logging.getLogger(__name__)
 
 
+async def _fire_completion_webhooks(task_id: str) -> None:
+    """Fire-and-forget outgoing webhooks for a completed task.
+
+    Imported lazily so a circular import via app.services.webhooks → state
+    can never bite us during test setup. Failures are logged but never
+    propagated — webhooks must not fail the pipeline.
+    """
+    try:
+        from app.services import webhooks  # local import — avoids top-level cycle
+        owner_id = await state.get_task_owner(task_id)
+        if not owner_id:
+            return
+        task = await state.get_task_for_user(task_id, owner_id)
+        if task is None:
+            return
+        await webhooks.notify_task_completed(owner_id, task)
+    except Exception as exc:  # noqa: BLE001 — best-effort notifier
+        logger.warning(f"webhook fan-out for task {task_id} failed: {exc}")
+
+
 class TaskCancelledError(Exception):
     """Raised when a pipeline detects the task was cancelled mid-flight."""
 
@@ -144,6 +164,7 @@ async def run_pipeline(
         # can stream it back. Replaces the old "cleanup in finally" pattern.
         audio_path = await _persist_audio_for_task(task_id, audio_path)
         await state.complete_task(task_id, result)
+        asyncio.create_task(_fire_completion_webhooks(task_id))
         logger.info(f"Task {task_id} completed ✅")
 
     except TaskCancelledError:
@@ -177,6 +198,7 @@ async def run_pipeline_from_file(
         result = await _generate_flashcards_step(task_id, result)
         file_path = await _persist_audio_for_task(task_id, file_path)
         await state.complete_task(task_id, result)
+        asyncio.create_task(_fire_completion_webhooks(task_id))
         logger.info(f"Task {task_id} (upload) completed ✅")
 
     except TaskCancelledError:
