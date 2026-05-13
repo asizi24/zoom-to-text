@@ -127,6 +127,32 @@ class KeyTerm(BaseModel):
     context: Optional[str] = None
 
 
+class Highlight(BaseModel):
+    """A memorable / quotable / 'aha' moment extracted from the recording."""
+
+    quote: str  # verbatim quote, ≤200 chars
+    why: str  # 1-sentence explanation of why this matters
+    timestamp: Optional[str] = None  # [MM:SS] or "0:34:12" when available
+    speaker: Optional[str] = None  # "Speaker A" or named when known
+
+
+class MindMapNode(BaseModel):
+    """One node in a hierarchical mind-map (recursive)."""
+
+    label: str  # short text (≤80 chars)
+    children: list["MindMapNode"] = []
+
+
+class MindMap(BaseModel):
+    """A hierarchical mind-map rooted at a single topic."""
+
+    root: MindMapNode
+
+
+# Pydantic v2 needs an explicit rebuild for self-referencing list["MindMapNode"]
+MindMapNode.model_rebuild()
+
+
 class LessonResult(BaseModel):
     transcript: Optional[str] = None  # Raw transcript (only in WHISPER_LOCAL mode)
     summary: str = ""
@@ -151,6 +177,10 @@ class LessonResult(BaseModel):
     )
     # ── Key Terms Glossary — important vocabulary extracted from the recording ──
     key_terms: list[KeyTerm] = []
+    # ── Smart Highlights — quotable / memorable moments (Batch B1) ──
+    highlights: list[Highlight] = []
+    # ── Mind Map — hierarchical topic structure (Batch B1, lazy-generated) ──
+    mindmap: Optional[MindMap] = None
 
 
 # ── Cram Guide schemas (Multi-Lecture Study Guide) ──────────────────────────────

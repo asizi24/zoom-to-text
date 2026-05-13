@@ -46,6 +46,7 @@ from app.models import (
     CramGuideResult,
     Decision,
     Flashcard,
+    Highlight,
     KeyTerm,
     LessonResult,
     Objection,
@@ -867,6 +868,15 @@ null when a category is irrelevant):
                          as used in this recording (1–2 sentences), "context"
                          is an optional note on where/why the term appears.
                          Return [] if no noteworthy terms are introduced.
+  - highlights:          [{quote, why, timestamp?, speaker?}]
+                         3-7 of the MOST memorable, quotable, or "aha" moments
+                         in the recording. Pick lines worth screenshotting:
+                         strong opinions, surprising facts, punchy summaries,
+                         decisive statements. NOT every important fact — only
+                         the ones that would survive as a quote on a slide.
+                         "quote" is verbatim (≤200 chars), "why" is a single
+                         sentence saying why this line stands out. Use [MM:SS]
+                         for timestamps when available; omit otherwise.
 
 Hard rules:
   • DO NOT wrap your output in markdown code fences. Bare JSON only.
@@ -908,7 +918,12 @@ Few-shot example 1 — Hebrew product meeting (excerpt):
     "shifts_in_tone": []
   },
   "objections_tracked": [],
-  "key_terms": []
+  "key_terms": [],
+  "highlights": [
+    {"quote": "צריך להחליט עד יום חמישי על המודל החדש",
+     "why": "deadline אופרטיבי שמסגר את כל הפגישה",
+     "speaker": "דן"}
+  ]
 }
 
 ══════════════════════════════════════════════════
@@ -935,6 +950,12 @@ Few-shot example 2 — English physics lecture (excerpt):
     {"term": "non-locality",
      "definition": "The phenomenon where quantum correlations between distant particles cannot be explained by local influences.",
      "context": "Still debated whether Bell inequality violations prove it"}
+  ],
+  "highlights": [
+    {"quote": "The experiments by Aspect in 1982 violated this inequality decisively.",
+     "why": "Crisp factual hook — names the experiment, year, and result in one sentence."},
+    {"quote": "Does this prove non-locality? That's still debated.",
+     "why": "Frames the open question that anchors the rest of the lecture."}
   ]
 }
 
@@ -957,6 +978,12 @@ Few-shot example 3 — Hebrew biology lecture (excerpt):
     {"term": "זרחון חמצוני",
      "definition": "תהליך ביולוגי שבו מיטוכונדריה מייצרת ATP באמצעות חמצן.",
      "context": "מנגנון ייצור האנרגיה המרכזי בתא"}
+  ],
+  "highlights": [
+    {"quote": "המיטוכונדריה — האורגנלה שאחראית על ייצור האנרגיה בתא",
+     "why": "פתיחה שמסכמת בשורה אחת את כל נושא השיעור"},
+    {"quote": "בלעדיה, התא לא יכול לתפקד",
+     "why": "אמירה חדה שמדגישה את מרכזיות הנושא"}
   ]
 }
 
@@ -1062,6 +1089,16 @@ def _parse_extraction_response(text: str) -> dict:
                 context=k.get("context"),
             )
             for k in data.get("key_terms", [])
+        ],
+        "highlights": [
+            Highlight(
+                quote=h.get("quote", "")[:200],
+                why=h.get("why", ""),
+                timestamp=h.get("timestamp"),
+                speaker=h.get("speaker"),
+            )
+            for h in data.get("highlights", [])
+            if h.get("quote")
         ],
     }
 
@@ -1641,6 +1678,7 @@ def _merge_results(
         synthesis.sentiment_analysis = extraction.get("sentiment_analysis")
         synthesis.objections_tracked = extraction.get("objections_tracked", [])
         synthesis.key_terms = extraction.get("key_terms", [])
+        synthesis.highlights = extraction.get("highlights", [])
 
     if settings.llm_debug_raw_responses:
         from app.models import RawLLMResponse
@@ -2257,3 +2295,125 @@ async def generate_cram_guide(lessons: list[dict]) -> CramGuideResult:
     except asyncio.TimeoutError:
         logger.warning("Cram guide generation timed out")
         return CramGuideResult()
+
+
+# ── Mind Map (Batch B1) ───────────────────────────────────────────────────────────
+
+_MINDMAP_TIMEOUT = 60
+
+_MINDMAP_PROMPT = """\
+You are building a mind map for a recording. Use the summary and chapter
+list below to produce a hierarchical tree.
+
+Output rules:
+  • Return STRICT JSON only — no markdown fences, no commentary.
+  • Use the source language of the recording (Hebrew for Hebrew, English for English).
+  • Tree depth: root → 4-8 main branches → each with 2-5 sub-branches.
+    Optionally a third level (sub-sub) when a sub-branch has clear children.
+  • Each "label" must be ≤80 characters, ideally 2-6 words.
+  • The root label is the SINGLE central topic of the recording.
+
+Required JSON shape:
+{
+  "root": {
+    "label": "central topic",
+    "children": [
+      {
+        "label": "main branch",
+        "children": [
+          {"label": "sub point", "children": []},
+          {"label": "sub point", "children": []}
+        ]
+      }
+    ]
+  }
+}
+
+Recording summary:
+{summary}
+
+Chapters:
+{chapters}
+"""
+
+
+def _parse_mindmap_node(data: dict, depth: int = 0) -> "MindMapNode | None":
+    """Recursively parse one node, capping depth at 4 to prevent runaway trees."""
+    from app.models import MindMapNode
+
+    if not isinstance(data, dict):
+        return None
+    label = (data.get("label") or "").strip()
+    if not label:
+        return None
+    children: list[MindMapNode] = []
+    if depth < 4:
+        for child in data.get("children") or []:
+            parsed = _parse_mindmap_node(child, depth + 1)
+            if parsed:
+                children.append(parsed)
+    return MindMapNode(label=label[:120], children=children)
+
+
+async def generate_mindmap(lesson: LessonResult) -> "MindMap | None":
+    """Async: generate a hierarchical mind map from a completed LessonResult.
+
+    Uses summary + chapter titles/content as the textual input — does NOT
+    re-process the audio. Single provider-agnostic LLM call.
+    Returns None on failure (graceful skip; UI shows a 'try again' hint).
+    """
+    from app.models import MindMap
+
+    summary = (lesson.summary or "").strip()
+    if not summary:
+        return None
+
+    chapters_text = ""
+    for ch in lesson.chapters or []:
+        title = (ch.title or "").strip()
+        content = (ch.content or "").strip()[:400]
+        if title:
+            chapters_text += f"  • {title}"
+            if content:
+                chapters_text += f": {content}"
+            chapters_text += "\n"
+    if not chapters_text:
+        chapters_text = "(no chapters extracted)"
+
+    prompt = _MINDMAP_PROMPT.replace("{summary}", summary[:8000]).replace(
+        "{chapters}", chapters_text[:6000]
+    )
+
+    provider = get_provider()
+    try:
+        raw = await asyncio.wait_for(
+            provider.generate_text(prompt), timeout=_MINDMAP_TIMEOUT
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Mind-map generation timed out")
+        return None
+    except Exception as exc:
+        logger.warning(f"Mind-map LLM call failed: {exc}")
+        return None
+
+    stripped = (raw or "").strip()
+    if stripped.startswith("```"):
+        lines = stripped.split("\n")
+        stripped = "\n".join(lines[1:]).rsplit("```", 1)[0].strip()
+    json_start = stripped.find("{")
+    json_end = stripped.rfind("}")
+    if json_start == -1 or json_end <= json_start:
+        logger.warning("Mind-map response had no JSON object")
+        return None
+    stripped = stripped[json_start : json_end + 1]
+
+    try:
+        data = json.loads(stripped)
+    except json.JSONDecodeError as exc:
+        logger.warning(f"Mind-map JSON parse failed: {exc}")
+        return None
+
+    root = _parse_mindmap_node(data.get("root") or {})
+    if not root:
+        return None
+    return MindMap(root=root)

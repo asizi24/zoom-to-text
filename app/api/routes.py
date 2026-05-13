@@ -749,6 +749,38 @@ def _sanitize_deck_name(task_id: str, url: str | None) -> str:
     return f"ZoomToText — {base or task_id[:8]}"
 
 
+@router.post("/tasks/{task_id}/mindmap")
+async def generate_mindmap_endpoint(
+    task_id: str,
+    user_id: str = Depends(get_current_user),
+):
+    """Generate (or return cached) mind map for a completed task.
+
+    Lazy-generated on first request — uses the existing summary + chapters as
+    input, no audio re-processing. Result is cached inside the task's
+    result_json so subsequent calls are instant.
+    """
+    task = await state.get_task_for_user(task_id, user_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.result is None:
+        raise HTTPException(status_code=400, detail="Task has no result yet")
+
+    if task.result.mindmap is not None:
+        return {"mindmap": task.result.mindmap.model_dump(), "cached": True}
+
+    mindmap = await summarizer.generate_mindmap(task.result)
+    if mindmap is None:
+        raise HTTPException(
+            status_code=502,
+            detail="Mind-map generation failed — try again in a moment.",
+        )
+
+    task.result.mindmap = mindmap
+    await state.update_result(task_id, task.result)
+    return {"mindmap": mindmap.model_dump(), "cached": False}
+
+
 @router.get("/tasks/{task_id}/flashcards")
 async def get_flashcards(
     task_id: str,

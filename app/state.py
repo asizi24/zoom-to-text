@@ -318,6 +318,20 @@ async def complete_task(task_id: str, result: LessonResult):
     await db.commit()
 
 
+async def update_result(task_id: str, result: LessonResult) -> None:
+    """Overwrite result_json without touching status/progress/message.
+
+    Used for lazy enrichments (e.g. on-demand mind-map generation) that mutate
+    a completed task's LessonResult after the fact.
+    """
+    db = await _get_db()
+    await db.execute(
+        "UPDATE tasks SET result_json=? WHERE id=?",
+        [result.model_dump_json(), task_id],
+    )
+    await db.commit()
+
+
 async def fail_task(
     task_id: str,
     error: str,

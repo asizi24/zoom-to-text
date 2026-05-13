@@ -1144,6 +1144,105 @@
     .key-term-def  { color: var(--muted); font-size: .88rem; line-height: 1.65; margin-top: 5px; }
     .key-term-ctx  { color: rgba(148,163,184,.55); font-size: .78rem; margin-top: 6px; font-style: italic; padding-inline-start: 12px; border-inline-start: 2px solid rgba(255,255,255,.06); }
 
+    /* ── Mind Map ── */
+    #mindmap-section { margin-top: 36px; }
+    .mindmap-empty {
+      padding: 18px 22px;
+      background: rgba(99,102,241,.06);
+      border: 1px dashed rgba(99,102,241,.35);
+      border-radius: 12px;
+      color: var(--muted);
+      font-size: .9rem;
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 12px; flex-wrap: wrap;
+    }
+    .mindmap-cta {
+      background: linear-gradient(135deg, #6366f1, #8b5cf6);
+      color: #fff; border: none; padding: 8px 18px; border-radius: 10px;
+      font-weight: 600; font-size: .85rem; cursor: pointer;
+      transition: transform .2s ease, box-shadow .2s ease;
+    }
+    .mindmap-cta:hover { transform: translateY(-1px); box-shadow: 0 6px 20px -8px rgba(99,102,241,.6); }
+    .mindmap-cta:disabled { opacity: .55; cursor: wait; }
+
+    .mindmap-tree {
+      padding: 18px 22px 22px;
+      background: linear-gradient(135deg, rgba(99,102,241,.05), rgba(139,92,246,.02));
+      border: 1px solid rgba(99,102,241,.18);
+      border-radius: 14px;
+      overflow-x: auto;
+    }
+    .mindmap-tree ul { list-style: none; padding-inline-start: 22px; margin: 0; position: relative; }
+    .mindmap-tree > ul { padding-inline-start: 0; }
+    .mindmap-tree li {
+      position: relative;
+      padding: 4px 0 4px 0;
+      font-size: .92rem;
+      line-height: 1.55;
+    }
+    .mindmap-tree ul ul li::before {
+      content: '';
+      position: absolute;
+      inset-inline-start: -14px;
+      top: 14px;
+      width: 12px; height: 1px;
+      background: rgba(167,139,250,.3);
+    }
+    .mindmap-tree ul ul {
+      border-inline-start: 1px solid rgba(167,139,250,.25);
+    }
+    .mindmap-node {
+      display: inline-block;
+      padding: 4px 12px;
+      border-radius: 8px;
+      background: rgba(255,255,255,.04);
+      border: 1px solid rgba(255,255,255,.08);
+      color: #e2e8f0;
+    }
+    .mindmap-node.depth-0 {
+      background: linear-gradient(135deg, #6366f1, #8b5cf6);
+      color: #fff; font-weight: 700; font-size: 1rem;
+      border-color: transparent;
+      padding: 8px 18px;
+    }
+    .mindmap-node.depth-1 {
+      background: rgba(167,139,250,.14);
+      border-color: rgba(167,139,250,.32);
+      color: #c4b5fd; font-weight: 600;
+    }
+    .mindmap-node.depth-2 {
+      background: rgba(251,191,36,.07);
+      border-color: rgba(251,191,36,.22);
+      color: #fcd34d;
+    }
+    .mindmap-error {
+      color: #f87171; font-size: .85rem; padding: 6px 0;
+    }
+
+    /* ── Smart Highlights ── */
+    .highlight-card {
+      position: relative;
+      background: linear-gradient(135deg, rgba(251,191,36,.07), rgba(251,191,36,.015));
+      border-radius: 14px; padding: 16px 22px 16px 26px;
+      border: 1px solid rgba(251,191,36,.22);
+      border-inline-start: 3px solid #fbbf24;
+      margin-bottom: 12px;
+      transition: border-color .2s ease, transform .2s ease;
+    }
+    .highlight-card:hover {
+      border-color: rgba(251,191,36,.45);
+      transform: translateX(-2px);
+    }
+    .highlight-quote {
+      font-size: 1.02rem; color: #f8fafc; line-height: 1.55;
+      font-weight: 500; font-style: italic;
+    }
+    .highlight-quote::before { content: '“'; color: #fbbf24; font-size: 1.4rem; margin-inline-end: 4px; }
+    .highlight-quote::after  { content: '”'; color: #fbbf24; font-size: 1.4rem; margin-inline-start: 4px; }
+    .highlight-meta { display:flex; gap:10px; align-items:center; margin-top:8px; flex-wrap:wrap; font-size:.78rem; color: rgba(251,191,36,.85); }
+    .highlight-meta-pill { background: rgba(251,191,36,.12); border-radius: 999px; padding: 2px 10px; }
+    .highlight-why { color: var(--muted); font-size: .85rem; line-height: 1.6; margin-top: 8px; }
+
     /* ── Quiz ── */
     .quiz-list { display: flex; flex-direction: column; gap: 16px; }
     .q-card {
@@ -2924,7 +3023,7 @@
   <div class="brand">
     <div class="brand-badge">✨ גרסה חדשה — כרטיסיות + נגן timestamps</div>
     <div class="brand-title">עוזר לימודי חכם</div>
-    <div class="brand-sub">הדבק קישור Zoom או העלה קובץ אודיו<br>וקבל סיכום מפורט, מבחן אמריקאי וכרטיסיות תרגול תוך דקות 🚀</div>
+    <div class="brand-sub">הדבק קישור הקלטה (Zoom / YouTube / Drive) או העלה קובץ אודיו<br>וקבל סיכום מפורט, מבחן אמריקאי וכרטיסיות תרגול תוך דקות 🚀</div>
   </div>
 
 <!-- ═══════════════ INPUT CARD ═══════════════ -->
@@ -2932,7 +3031,7 @@
 
   <!-- Tabs -->
   <div class="tabs">
-    <button class="tab active" onclick="switchTab('url')">🔗 קישור Zoom</button>
+    <button class="tab active" onclick="switchTab('url')">🔗 קישור הקלטה</button>
     <button class="tab"        onclick="switchTab('file')">📁 העלאת קובץ</button>
   </div>
 
@@ -2940,9 +3039,9 @@
   <div class="tab-pane active" id="tab-url">
     <div class="url-wrap">
       <input type="text" class="url-input" id="url-input"
-             placeholder="https://admin-ort-org-il.zoom.us/rec/share/..." />
+             placeholder="קישור Zoom / YouTube / Google Drive / …" />
     </div>
-    <p class="url-hint">💡 לקישורי Zoom פרטיים — השתמש בתוסף Chrome לשליחה אוטומטית</p>
+    <p class="url-hint">💡 תומך ב-Zoom, YouTube וכל קישור ש-yt-dlp יודע לפתוח. להקלטות Zoom פרטיות — השתמש בתוסף Chrome.</p>
     <div class="supp-section" id="linkSuppPanel">
       <div class="supp-head">
         <div class="supp-head-icon" aria-hidden="true">📎</div>
@@ -3275,6 +3374,18 @@
     <div class="section-title">🧠 מבחן — בחן את עצמך</div>
     <div class="score-badge" id="score-badge" style="display:none">ציון: 0 / 0</div>
     <div class="quiz-list" id="quiz-list"></div>
+  </div>
+
+  <!-- Smart Highlights -->
+  <div id="highlights-section" style="display:none; margin-top:36px;">
+    <div class="section-title">✨ ציטוטים בולטים</div>
+    <div id="highlights-list"></div>
+  </div>
+
+  <!-- Mind Map -->
+  <div id="mindmap-section" style="display:none;">
+    <div class="section-title">🧠 מפת חשיבה</div>
+    <div id="mindmap-body"></div>
   </div>
 
   <!-- Key Terms Glossary -->
@@ -4143,6 +4254,53 @@
     document.getElementById('search-results-panel').style.display = 'none';
     window.scrollTo({ top: 0, behavior: 'smooth' });
 
+    // Smart Highlights — DOM-only rendering (no innerHTML), XSS-safe
+    const hlSection = document.getElementById('highlights-section');
+    const hlList    = document.getElementById('highlights-list');
+    hlList.textContent = '';
+    const highlights = result.highlights || [];
+    if (highlights.length) {
+      highlights.forEach(h => {
+        const card = document.createElement('div');
+        card.className = 'highlight-card';
+
+        const q = document.createElement('div');
+        q.className = 'highlight-quote';
+        q.textContent = h.quote || '';
+        card.appendChild(q);
+
+        if (h.timestamp || h.speaker) {
+          const meta = document.createElement('div');
+          meta.className = 'highlight-meta';
+          if (h.timestamp) {
+            const t = document.createElement('span');
+            t.className = 'highlight-meta-pill';
+            t.textContent = '⏱ ' + h.timestamp;
+            meta.appendChild(t);
+          }
+          if (h.speaker) {
+            const s = document.createElement('span');
+            s.className = 'highlight-meta-pill';
+            s.textContent = '👤 ' + h.speaker;
+            meta.appendChild(s);
+          }
+          card.appendChild(meta);
+        }
+
+        if (h.why) {
+          const why = document.createElement('div');
+          why.className = 'highlight-why';
+          why.textContent = h.why;
+          card.appendChild(why);
+        }
+
+        hlList.appendChild(card);
+      });
+      hlSection.style.display = 'block';
+    } else {
+      hlSection.style.display = 'none';
+    }
+
     // Key Terms Glossary — built with DOM APIs (no innerHTML) to prevent XSS
     const ktSection = document.getElementById('key-terms-section');
     const ktList    = document.getElementById('key-terms-list');
@@ -4178,7 +4336,73 @@
     }
 
     renderFlashcards(result.flashcards || [], taskId);
+    renderMindMap(result.mindmap || null, taskId);
     if (taskId) showChatPanel(taskId);
+  }
+
+  function renderMindMapNode(node, depth, ul) {
+    if (!node || !node.label) return;
+    const li = document.createElement('li');
+    const span = document.createElement('span');
+    span.className = 'mindmap-node depth-' + Math.min(depth, 2);
+    span.textContent = node.label;
+    li.appendChild(span);
+    const kids = Array.isArray(node.children) ? node.children : [];
+    if (kids.length) {
+      const sub = document.createElement('ul');
+      kids.forEach(c => renderMindMapNode(c, depth + 1, sub));
+      li.appendChild(sub);
+    }
+    ul.appendChild(li);
+  }
+
+  function renderMindMap(mindmap, taskId) {
+    const section = document.getElementById('mindmap-section');
+    const body    = document.getElementById('mindmap-body');
+    body.textContent = '';
+
+    if (!taskId) { section.style.display = 'none'; return; }
+    section.style.display = 'block';
+
+    if (mindmap && mindmap.root) {
+      const wrap = document.createElement('div');
+      wrap.className = 'mindmap-tree';
+      const rootUl = document.createElement('ul');
+      renderMindMapNode(mindmap.root, 0, rootUl);
+      wrap.appendChild(rootUl);
+      body.appendChild(wrap);
+      return;
+    }
+
+    // CTA — generate on demand
+    const empty = document.createElement('div');
+    empty.className = 'mindmap-empty';
+    const txt = document.createElement('span');
+    txt.textContent = 'מפת חשיבה לא נוצרה עדיין. צור עכשיו (~10 שניות).';
+    const btn = document.createElement('button');
+    btn.className = 'mindmap-cta';
+    btn.textContent = '🧠 צור מפת חשיבה';
+    btn.onclick = async () => {
+      btn.disabled = true; btn.textContent = '⏳ יוצר…';
+      try {
+        const r = await fetch('/api/tasks/' + encodeURIComponent(taskId) + '/mindmap', { method: 'POST' });
+        if (!r.ok) {
+          const t = await r.text();
+          throw new Error(t || ('HTTP ' + r.status));
+        }
+        const data = await r.json();
+        renderMindMap(data.mindmap, taskId);
+      } catch (e) {
+        btn.disabled = false; btn.textContent = '🔄 נסה שוב';
+        const err = document.createElement('div');
+        err.className = 'mindmap-error';
+        err.textContent = 'יצירת מפת חשיבה נכשלה — נסה שוב בעוד רגע.';
+        body.appendChild(err);
+      }
+    };
+    empty.appendChild(txt);
+    empty.appendChild(btn);
+    body.appendChild(empty);
   }
 
   function esc(s) { return (s || '').replace(/'/g, "\\'").replace(/"/g, '&quot;'); }
@@ -4712,6 +4936,8 @@
     document.getElementById('transcript-section').style.display = 'none';
     document.getElementById('flashcards-section').style.display = 'none';
     document.getElementById('key-terms-section').style.display = 'none';
+    document.getElementById('highlights-section').style.display = 'none';
+    document.getElementById('mindmap-section').style.display = 'none';
     flashcards = []; fcIndex = 0; fcKnew = 0; fcMissed = 0; fcSeen = new Set();
     hideError();
     switchTab('url');
