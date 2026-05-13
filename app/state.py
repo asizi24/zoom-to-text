@@ -115,6 +115,32 @@ CREATE INDEX IF NOT EXISTS idx_flashcard_reviews_user_due
 ON flashcard_reviews (user_id, due_at)
 """
 
+# ── B4: audio clips + user glossaries ───────────────────────────────────────
+
+CREATE_AUDIO_CLIPS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS audio_clips (
+    id         TEXT PRIMARY KEY,
+    task_id    TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    user_id    TEXT NOT NULL REFERENCES users(id),
+    start_sec  REAL NOT NULL,
+    end_sec    REAL NOT NULL,
+    label      TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+)
+"""
+
+CREATE_AUDIO_CLIPS_TASK_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_audio_clips_task ON audio_clips (task_id)
+"""
+
+CREATE_USER_GLOSSARIES_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS user_glossaries (
+    user_id       TEXT PRIMARY KEY REFERENCES users(id),
+    glossary_json TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+)
+"""
+
 
 # ── Lifecycle ─────────────────────────────────────────────────────────────────────
 
@@ -156,6 +182,9 @@ async def init_db():
     await db.execute(CREATE_LTI_OIDC_STATE_TABLE_SQL)
     await db.execute(CREATE_FLASHCARD_REVIEWS_TABLE_SQL)
     await db.execute(CREATE_FLASHCARD_REVIEWS_DUE_INDEX_SQL)
+    await db.execute(CREATE_AUDIO_CLIPS_TABLE_SQL)
+    await db.execute(CREATE_AUDIO_CLIPS_TASK_INDEX_SQL)
+    await db.execute(CREATE_USER_GLOSSARIES_TABLE_SQL)
     await db.commit()
 
     # Add index on user_id for fast per-user task listings
@@ -1568,3 +1597,107 @@ async def update_speaker_map(
     )
     await db.commit()
     return True
+
+
+# ── B4: Audio clips ────────────────────────────────────────────────────────
+
+async def create_audio_clip(
+    clip_id: str,
+    task_id: str,
+    user_id: str,
+    start_sec: float,
+    end_sec: float,
+    label: str = "",
+) -> dict:
+    """Insert a new audio-clip share record. No ffmpeg; just metadata."""
+    db = await _get_db()
+    now = _now().isoformat()
+    await db.execute(
+        "INSERT INTO audio_clips (id, task_id, user_id, start_sec, end_sec, label, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [clip_id, task_id, user_id, float(start_sec), float(end_sec), label or "", now],
+    )
+    await db.commit()
+    return {
+        "id": clip_id,
+        "task_id": task_id,
+        "user_id": user_id,
+        "start_sec": float(start_sec),
+        "end_sec": float(end_sec),
+        "label": label or "",
+        "created_at": now,
+    }
+
+
+async def get_audio_clip(clip_id: str) -> Optional[dict]:
+    """Public read — used by the shareable /clips/{id}.mp3 route."""
+    db = await _get_db()
+    async with db.execute(
+        "SELECT id, task_id, user_id, start_sec, end_sec, label, created_at "
+        "FROM audio_clips WHERE id = ?",
+        [clip_id],
+    ) as cur:
+        row = await cur.fetchone()
+    if row is None:
+        return None
+    return dict(row)
+
+
+async def list_clips_for_task(task_id: str, user_id: str) -> list[dict]:
+    """List a user's clips for a given task, newest first."""
+    db = await _get_db()
+    async with db.execute(
+        "SELECT id, task_id, user_id, start_sec, end_sec, label, created_at "
+        "FROM audio_clips WHERE task_id = ? AND user_id = ? "
+        "ORDER BY created_at DESC",
+        [task_id, user_id],
+    ) as cur:
+        rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+async def delete_audio_clip(clip_id: str, user_id: str) -> bool:
+    """Delete a clip only if it belongs to the calling user. Returns True on hit."""
+    db = await _get_db()
+    result = await db.execute(
+        "DELETE FROM audio_clips WHERE id = ? AND user_id = ?",
+        [clip_id, user_id],
+    )
+    await db.commit()
+    return result.rowcount > 0
+
+
+# ── B4: Cross-lecture glossary cache ────────────────────────────────────────
+
+async def get_user_glossary(user_id: str) -> Optional[dict]:
+    """Return cached glossary {"terms": [...], "updated_at": "..."} or None."""
+    db = await _get_db()
+    async with db.execute(
+        "SELECT glossary_json, updated_at FROM user_glossaries WHERE user_id = ?",
+        [user_id],
+    ) as cur:
+        row = await cur.fetchone()
+    if row is None:
+        return None
+    import json as _json
+    try:
+        terms = _json.loads(row["glossary_json"])
+    except (ValueError, TypeError):
+        terms = []
+    return {"terms": terms, "updated_at": row["updated_at"]}
+
+
+async def set_user_glossary(user_id: str, terms: list[dict]) -> str:
+    """Upsert the glossary cache and return the new updated_at timestamp."""
+    import json as _json
+    db = await _get_db()
+    now = _now().isoformat()
+    await db.execute(
+        "INSERT INTO user_glossaries (user_id, glossary_json, updated_at) "
+        "VALUES (?, ?, ?) "
+        "ON CONFLICT(user_id) DO UPDATE SET "
+        "glossary_json = excluded.glossary_json, updated_at = excluded.updated_at",
+        [user_id, _json.dumps(terms, ensure_ascii=False), now],
+    )
+    await db.commit()
+    return now

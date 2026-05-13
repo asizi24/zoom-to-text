@@ -267,3 +267,11 @@ class TutorRequest(BaseModel):
     """Request body for POST /api/tasks/{id}/tutor — Socratic AI tutor."""
 
     question: str = Field(..., min_length=1, max_length=2000)
+
+
+class AudioClipCreate(BaseModel):
+    """Request body for POST /api/tasks/{id}/clips — B4 clip sharing."""
+
+    start_sec: float = Field(..., ge=0)
+    end_sec: float = Field(..., gt=0)
+    label: str = Field("", max_length=200)

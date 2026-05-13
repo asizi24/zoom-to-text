@@ -25,6 +25,7 @@ from app.api.deps import get_current_user, enforce_rate_limit
 from app.config import settings
 from app.models import (
     AskAcrossRequest,
+    AudioClipCreate,
     CramGuideRequest,
     FlashcardReview,
     NotesUpdate,
@@ -35,7 +36,8 @@ from app.models import (
     TutorRequest,
 )
 from app.services import sm2
-from app.services import anki_export, processor, summarizer, text_extractor
+from app.services import anki_export, glossary, processor, summarizer, text_extractor
+from app.services.clip_extractor import ClipExtractionError, extract_clip_bytes
 from app.services.exporters.markdown import build_obsidian_markdown
 from app.services.task_service import prepare_supplementary_context
 from app.services.llm_providers import get_provider
@@ -982,6 +984,160 @@ async def tutor_endpoint(
     except TimeoutError as exc:
         raise HTTPException(status_code=504, detail=str(exc))
     return {"answer": answer}
+
+
+# ── B4: Audio clip sharing ────────────────────────────────────────────────
+
+_CLIP_MAX_DURATION_SEC = 300  # 5 minutes — match clip_extractor
+
+
+@router.post("/tasks/{task_id}/clips")
+async def create_clip(
+    task_id: str,
+    body: AudioClipCreate,
+    request: Request,
+    user_id: str = Depends(get_current_user),
+):
+    """Create a shareable clip from this task's audio between two timestamps."""
+    task = await state.get_task_for_user(task_id, user_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if body.end_sec <= body.start_sec:
+        raise HTTPException(status_code=400, detail="end_sec must be greater than start_sec")
+    if body.end_sec - body.start_sec > _CLIP_MAX_DURATION_SEC:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Clip duration may not exceed {_CLIP_MAX_DURATION_SEC} seconds",
+        )
+
+    audio_path = await state.get_audio_path(task_id)
+    if not audio_path or not Path(audio_path).exists():
+        raise HTTPException(status_code=400, detail="Source audio not available for this task")
+
+    clip_id = uuid.uuid4().hex
+    record = await state.create_audio_clip(
+        clip_id, task_id, user_id, body.start_sec, body.end_sec, body.label
+    )
+    base = str(request.base_url).rstrip("/")
+    return {
+        **record,
+        "share_url": f"{base}/clips/{clip_id}.mp3",
+    }
+
+
+@router.get("/tasks/{task_id}/clips")
+async def list_clips(
+    task_id: str,
+    user_id: str = Depends(get_current_user),
+):
+    """List the clips this user created for a task."""
+    task = await state.get_task_for_user(task_id, user_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return {"clips": await state.list_clips_for_task(task_id, user_id)}
+
+
+@router.delete("/clips/{clip_id}", status_code=204)
+async def delete_clip(
+    clip_id: str,
+    user_id: str = Depends(get_current_user),
+):
+    """Revoke a clip share link."""
+    if not await state.delete_audio_clip(clip_id, user_id):
+        raise HTTPException(status_code=404, detail="Clip not found")
+
+
+# ── B4: Cross-lecture glossary ────────────────────────────────────────────
+
+@router.get("/glossary")
+async def get_glossary(user_id: str = Depends(get_current_user)):
+    """Return the cached cross-lecture glossary, or an empty payload."""
+    cached = await state.get_user_glossary(user_id)
+    if cached is None:
+        return {"terms": [], "updated_at": None}
+    return cached
+
+
+@router.post("/glossary/refresh")
+async def refresh_glossary(user_id: str = Depends(get_current_user)):
+    """Rebuild the user's glossary from their last 30 completed lectures."""
+    try:
+        result = await glossary.build_glossary_for_user(user_id)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"Glossary build failed: {exc}")
+    return result
+
+
+# ── B4: Topic mastery dashboard ───────────────────────────────────────────
+
+@router.get("/mastery")
+async def get_topic_mastery(user_id: str = Depends(get_current_user)):
+    """Aggregate flashcard SM-2 state by card tag → mastery dashboard.
+
+    "Mastered" = at least 3 successful repetitions (the card has cleared the
+    1d → 6d → EF*6d cycle). "Due" = card's next due date has passed.
+    """
+    tasks = await state.list_completed_tasks_with_results(user_id=user_id, limit=200)
+    if not tasks:
+        return {"by_tag": [], "totals": {"cards": 0, "mastered": 0, "due": 0}}
+
+    now_iso = state._now().isoformat()
+    # Pull all due states once
+    due_states = await state.list_due_card_states(user_id, now_iso=now_iso)
+    due_keys = {(d["task_id"], d["card_index"]) for d in due_states}
+
+    tag_stats: dict[str, dict] = {}
+    total_cards = 0
+    total_mastered = 0
+    total_due = 0
+
+    for t in tasks:
+        if not t.result or not t.result.flashcards:
+            continue
+        # Pull review rows for this task in one shot
+        reviewed = await _list_review_rows_for_task(user_id, t.task_id)
+        rev_by_idx = {r["card_index"]: r for r in reviewed}
+
+        for idx, card in enumerate(t.result.flashcards):
+            total_cards += 1
+            tags = card.tags or ["ללא תגית"]
+            row = rev_by_idx.get(idx)
+            is_mastered = bool(row) and row["repetitions"] >= 3
+            is_due = (t.task_id, idx) in due_keys
+            if is_mastered:
+                total_mastered += 1
+            if is_due:
+                total_due += 1
+            for tag in tags:
+                bucket = tag_stats.setdefault(
+                    tag, {"tag": tag, "total": 0, "mastered": 0, "due": 0}
+                )
+                bucket["total"] += 1
+                if is_mastered:
+                    bucket["mastered"] += 1
+                if is_due:
+                    bucket["due"] += 1
+
+    by_tag = sorted(tag_stats.values(), key=lambda b: b["total"], reverse=True)
+    for b in by_tag:
+        b["mastery_pct"] = round(100 * b["mastered"] / b["total"]) if b["total"] else 0
+
+    return {
+        "by_tag": by_tag,
+        "totals": {"cards": total_cards, "mastered": total_mastered, "due": total_due},
+    }
+
+
+async def _list_review_rows_for_task(user_id: str, task_id: str) -> list[dict]:
+    """Tiny helper for /mastery — load all review rows for one task in one query."""
+    db = await state._get_db()
+    async with db.execute(
+        "SELECT card_index, easiness, interval, repetitions, due_at "
+        "FROM flashcard_reviews WHERE user_id = ? AND task_id = ?",
+        [user_id, task_id],
+    ) as cur:
+        rows = await cur.fetchall()
+    return [dict(r) for r in rows]
 
 
 @router.get("/tasks/{task_id}/flashcards/export.apkg")

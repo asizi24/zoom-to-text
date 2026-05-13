@@ -13,9 +13,9 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from app import state
 from app.api.routes import router
@@ -25,6 +25,7 @@ from app.api.streaming import router as streaming_router
 from app.config import settings
 from app.rate_limit import limiter
 from app.services import email_digest, transcriber
+from app.services.clip_extractor import ClipExtractionError, extract_clip_bytes
 
 logging.basicConfig(
     level=logging.INFO,
@@ -243,6 +244,48 @@ async def share_page(token: str):
     if index_path.exists():
         return FileResponse(index_path)
     return HTMLResponse("<h1>Zoom Transcriber</h1><p>static/index.html not found</p>")
+
+
+# ── B4: Public audio-clip endpoint ────────────────────────────────────────────
+# Streams a slice of a lecture's audio to anyone who has the clip URL.
+# No auth (that's the point — it's a share link). The slice itself is gated by
+# clip_id, which is a 32-char hex UUID, so guessing is infeasible.
+
+@app.get("/clips/{clip_id}.mp3", include_in_schema=False)
+async def public_audio_clip(clip_id: str):
+    clip = await state.get_audio_clip(clip_id)
+    if clip is None:
+        raise HTTPException(status_code=404, detail="Clip not found")
+    audio_path = await state.get_audio_path(clip["task_id"])
+    if not audio_path or not Path(audio_path).exists():
+        raise HTTPException(status_code=410, detail="Source audio is no longer available")
+    try:
+        data = await extract_clip_bytes(audio_path, clip["start_sec"], clip["end_sec"])
+    except ClipExtractionError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    return Response(
+        content=data,
+        media_type="audio/mpeg",
+        headers={
+            "Content-Disposition": f'inline; filename="clip-{clip_id[:8]}.mp3"',
+            "Cache-Control": "public, max-age=3600",
+        },
+    )
+
+
+@app.get("/api/clips/{clip_id}/meta", include_in_schema=False)
+async def public_clip_meta(clip_id: str):
+    """Public metadata for a shared clip — used by the share page UI."""
+    clip = await state.get_audio_clip(clip_id)
+    if clip is None:
+        raise HTTPException(status_code=404, detail="Clip not found")
+    return {
+        "id": clip["id"],
+        "start_sec": clip["start_sec"],
+        "end_sec": clip["end_sec"],
+        "label": clip["label"],
+        "created_at": clip["created_at"],
+    }
 
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
