@@ -424,7 +424,7 @@ session should know about these before the first edit.
 
 External-to-this-file context Claude should reach for when relevant:
 
-- `UPGRADE_PROMPT.md` — the strategic upgrade roadmap. Source of
+- `docs/UPGRADE_PROMPT.md` — the strategic upgrade roadmap. Source of
   Tasks 1.1, 1.2, 1.3, 1.4, 1.5, 2.1, 2.2, 2.3, 3.x. Read this
   before scoping a "next big thing."
 - `docs/superpowers/specs/` — design specs written before
