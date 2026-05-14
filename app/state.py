@@ -172,6 +172,44 @@ CREATE_TASK_SHARES_USER_INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS idx_task_shares_user ON task_shares (user_id)
 """
 
+# ── B6.2: lesson recipes (saved processing presets) ──────────────────────────
+
+CREATE_LESSON_RECIPES_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS lesson_recipes (
+    id          TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL REFERENCES users(id),
+    name        TEXT NOT NULL,
+    mode        TEXT NOT NULL,
+    language    TEXT NOT NULL DEFAULT 'he',
+    tags_json   TEXT NOT NULL DEFAULT '[]',
+    notes       TEXT,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+)
+"""
+
+CREATE_LESSON_RECIPES_USER_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_lesson_recipes_user ON lesson_recipes (user_id, created_at DESC)
+"""
+
+# ── B6.3: slide decks + per-slide alignment to chapters ──────────────────────
+
+CREATE_LESSON_SLIDES_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS lesson_slides (
+    id              TEXT PRIMARY KEY,
+    task_id         TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    page_index      INTEGER NOT NULL,
+    title           TEXT NOT NULL DEFAULT '',
+    body            TEXT NOT NULL DEFAULT '',
+    chapter_index   INTEGER,
+    created_at      TEXT NOT NULL
+)
+"""
+
+CREATE_LESSON_SLIDES_TASK_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_lesson_slides_task ON lesson_slides (task_id, page_index)
+"""
+
 
 # ── Lifecycle ─────────────────────────────────────────────────────────────────────
 
@@ -220,6 +258,10 @@ async def init_db():
     await db.execute(CREATE_USER_WEBHOOKS_USER_INDEX_SQL)
     await db.execute(CREATE_TASK_SHARES_TABLE_SQL)
     await db.execute(CREATE_TASK_SHARES_USER_INDEX_SQL)
+    await db.execute(CREATE_LESSON_RECIPES_TABLE_SQL)
+    await db.execute(CREATE_LESSON_RECIPES_USER_INDEX_SQL)
+    await db.execute(CREATE_LESSON_SLIDES_TABLE_SQL)
+    await db.execute(CREATE_LESSON_SLIDES_TASK_INDEX_SQL)
     await db.commit()
 
     # Add index on user_id for fast per-user task listings
@@ -1956,3 +1998,232 @@ async def get_task_readable_by_user(task_id: str, user_id: str) -> Optional[Task
         failed_at=_row_failed_at(row),
         notes=_row_notes(row),
     )
+
+
+# ── B6.2: lesson recipe helpers ─────────────────────────────────────────────
+
+import json as _json
+
+
+_ALLOWED_RECIPE_MODES = {"gemini_direct", "whisper_local", "whisper_api"}
+
+
+def _row_to_recipe(row: aiosqlite.Row) -> dict:
+    try:
+        tags = _json.loads(row["tags_json"] or "[]")
+        if not isinstance(tags, list):
+            tags = []
+    except _json.JSONDecodeError:
+        tags = []
+    return {
+        "id": row["id"],
+        "user_id": row["user_id"],
+        "name": row["name"],
+        "mode": row["mode"],
+        "language": row["language"],
+        "tags": tags,
+        "notes": row["notes"] if row["notes"] is not None else "",
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+async def create_recipe(
+    user_id: str,
+    name: str,
+    mode: str,
+    language: str = "he",
+    tags: Optional[list[str]] = None,
+    notes: Optional[str] = None,
+) -> dict:
+    db = await _get_db()
+    recipe_id = uuid.uuid4().hex
+    now = _now().isoformat()
+    await db.execute(
+        """
+        INSERT INTO lesson_recipes
+            (id, user_id, name, mode, language, tags_json, notes, created_at, updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?)
+        """,
+        [
+            recipe_id,
+            user_id,
+            name,
+            mode,
+            language,
+            _json.dumps(tags or [], ensure_ascii=False),
+            notes,
+            now,
+            now,
+        ],
+    )
+    await db.commit()
+    return {
+        "id": recipe_id,
+        "user_id": user_id,
+        "name": name,
+        "mode": mode,
+        "language": language,
+        "tags": list(tags or []),
+        "notes": notes or "",
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+async def list_recipes_for_user(user_id: str) -> list[dict]:
+    db = await _get_db()
+    async with db.execute(
+        "SELECT * FROM lesson_recipes WHERE user_id = ? ORDER BY created_at DESC",
+        [user_id],
+    ) as cur:
+        rows = await cur.fetchall()
+    return [_row_to_recipe(r) for r in rows]
+
+
+async def get_recipe_for_user(recipe_id: str, user_id: str) -> Optional[dict]:
+    db = await _get_db()
+    async with db.execute(
+        "SELECT * FROM lesson_recipes WHERE id = ? AND user_id = ?",
+        [recipe_id, user_id],
+    ) as cur:
+        row = await cur.fetchone()
+    return _row_to_recipe(row) if row else None
+
+
+async def update_recipe(
+    recipe_id: str,
+    user_id: str,
+    *,
+    name: Optional[str] = None,
+    mode: Optional[str] = None,
+    language: Optional[str] = None,
+    tags: Optional[list[str]] = None,
+    notes: Optional[str] = None,
+) -> Optional[dict]:
+    current = await get_recipe_for_user(recipe_id, user_id)
+    if current is None:
+        return None
+    new_name = name if name is not None else current["name"]
+    new_mode = mode if mode is not None else current["mode"]
+    new_lang = language if language is not None else current["language"]
+    new_tags = tags if tags is not None else current["tags"]
+    new_notes = notes if notes is not None else current["notes"]
+    now = _now().isoformat()
+    db = await _get_db()
+    await db.execute(
+        """
+        UPDATE lesson_recipes
+        SET name = ?, mode = ?, language = ?, tags_json = ?, notes = ?, updated_at = ?
+        WHERE id = ? AND user_id = ?
+        """,
+        [
+            new_name,
+            new_mode,
+            new_lang,
+            _json.dumps(new_tags, ensure_ascii=False),
+            new_notes,
+            now,
+            recipe_id,
+            user_id,
+        ],
+    )
+    await db.commit()
+    return await get_recipe_for_user(recipe_id, user_id)
+
+
+async def delete_recipe(recipe_id: str, user_id: str) -> bool:
+    db = await _get_db()
+    result = await db.execute(
+        "DELETE FROM lesson_recipes WHERE id = ? AND user_id = ?",
+        [recipe_id, user_id],
+    )
+    await db.commit()
+    return result.rowcount > 0
+
+
+# ── B6.3: lesson slide helpers ──────────────────────────────────────────────
+
+
+def _row_to_slide(row: aiosqlite.Row) -> dict:
+    return {
+        "id": row["id"],
+        "task_id": row["task_id"],
+        "page_index": row["page_index"],
+        "title": row["title"],
+        "body": row["body"],
+        "chapter_index": row["chapter_index"],
+        "created_at": row["created_at"],
+    }
+
+
+async def replace_slides_for_task(
+    task_id: str, slides: list[dict]
+) -> list[dict]:
+    """Overwrite the slide deck for a task with the provided list.
+
+    Each entry must have at least `page_index` and `title`; `body` and
+    `chapter_index` are optional. Returns the persisted rows.
+    """
+    db = await _get_db()
+    await db.execute("DELETE FROM lesson_slides WHERE task_id = ?", [task_id])
+    now = _now().isoformat()
+    rows: list[dict] = []
+    for slide in slides:
+        slide_id = uuid.uuid4().hex
+        page_index = int(slide["page_index"])
+        title = (slide.get("title") or "").strip()
+        body = (slide.get("body") or "").strip()
+        chapter_index = slide.get("chapter_index")
+        await db.execute(
+            """
+            INSERT INTO lesson_slides
+                (id, task_id, page_index, title, body, chapter_index, created_at)
+            VALUES (?,?,?,?,?,?,?)
+            """,
+            [slide_id, task_id, page_index, title, body, chapter_index, now],
+        )
+        rows.append(
+            {
+                "id": slide_id,
+                "task_id": task_id,
+                "page_index": page_index,
+                "title": title,
+                "body": body,
+                "chapter_index": chapter_index,
+                "created_at": now,
+            }
+        )
+    await db.commit()
+    return rows
+
+
+async def list_slides_for_task(task_id: str) -> list[dict]:
+    db = await _get_db()
+    async with db.execute(
+        "SELECT * FROM lesson_slides WHERE task_id = ? ORDER BY page_index ASC",
+        [task_id],
+    ) as cur:
+        rows = await cur.fetchall()
+    return [_row_to_slide(r) for r in rows]
+
+
+async def update_slide_chapter(
+    slide_id: str, task_id: str, chapter_index: Optional[int]
+) -> bool:
+    db = await _get_db()
+    result = await db.execute(
+        "UPDATE lesson_slides SET chapter_index = ? WHERE id = ? AND task_id = ?",
+        [chapter_index, slide_id, task_id],
+    )
+    await db.commit()
+    return result.rowcount > 0
+
+
+async def clear_slides_for_task(task_id: str) -> int:
+    db = await _get_db()
+    result = await db.execute(
+        "DELETE FROM lesson_slides WHERE task_id = ?", [task_id]
+    )
+    await db.commit()
+    return result.rowcount

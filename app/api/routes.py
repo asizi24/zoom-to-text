@@ -29,7 +29,13 @@ from app.models import (
     CramGuideRequest,
     FlashcardReview,
     NotesUpdate,
+    PodcastScriptResponse,
+    PodcastTurn,
     ProcessingMode,
+    RecipeCreate,
+    RecipeUpdate,
+    SlideAlignmentUpdate,
+    SlideDeckUpload,
     TaskCreate,
     TaskResponse,
     TaskShareCreate,
@@ -1622,3 +1628,185 @@ async def get_readable_task(
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
     return task
+
+
+# ── B6.2: lesson recipes ────────────────────────────────────────────────────
+# Saved processing presets. The recipe carries a `mode`, `language`, optional
+# `tags` and free-text `notes`. The frontend reads these to pre-fill the task
+# creation form; the backend never auto-applies them.
+
+
+@router.get("/recipes")
+async def list_recipes(user_id: str = Depends(get_current_user)):
+    return {"recipes": await state.list_recipes_for_user(user_id)}
+
+
+@router.post("/recipes", status_code=201)
+async def create_recipe(
+    payload: RecipeCreate,
+    user_id: str = Depends(get_current_user),
+):
+    recipe = await state.create_recipe(
+        user_id=user_id,
+        name=payload.name.strip(),
+        mode=payload.mode,
+        language=payload.language,
+        tags=payload.tags,
+        notes=payload.notes,
+    )
+    return recipe
+
+
+@router.get("/recipes/{recipe_id}")
+async def get_recipe(
+    recipe_id: str,
+    user_id: str = Depends(get_current_user),
+):
+    recipe = await state.get_recipe_for_user(recipe_id, user_id)
+    if recipe is None:
+        raise HTTPException(status_code=404, detail="Recipe not found")
+    return recipe
+
+
+@router.patch("/recipes/{recipe_id}")
+async def update_recipe(
+    recipe_id: str,
+    payload: RecipeUpdate,
+    user_id: str = Depends(get_current_user),
+):
+    updated = await state.update_recipe(
+        recipe_id,
+        user_id,
+        name=payload.name.strip() if payload.name is not None else None,
+        mode=payload.mode,
+        language=payload.language,
+        tags=payload.tags,
+        notes=payload.notes,
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Recipe not found")
+    return updated
+
+
+@router.delete("/recipes/{recipe_id}", status_code=204)
+async def delete_recipe(
+    recipe_id: str,
+    user_id: str = Depends(get_current_user),
+):
+    if not await state.delete_recipe(recipe_id, user_id):
+        raise HTTPException(status_code=404, detail="Recipe not found")
+    return Response(status_code=204)
+
+
+# ── B6.3: slide deck + transcript alignment ─────────────────────────────────
+# A "slide deck" is just a list of (page_index, title, body) entries the user
+# uploads (or extracts client-side from a PDF). We auto-align each slide to
+# one of the lesson's chapters using a heuristic (lexical overlap), then let
+# the user manually correct the mapping via PATCH.
+
+
+@router.post("/tasks/{task_id}/slides", status_code=201)
+async def upload_slides(
+    task_id: str,
+    payload: SlideDeckUpload,
+    user_id: str = Depends(get_current_user),
+):
+    task = await state.get_task_for_user(task_id, user_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    # Heuristic auto-alignment: best-overlap chapter per slide.
+    chapters = task.result.chapters if task.result and task.result.chapters else []
+    chapter_haystacks = [
+        ((c.title or "") + " " + (c.content or "")).lower() for c in chapters
+    ]
+    aligned: list[dict] = []
+    for slide in payload.slides:
+        slide_text = (slide.title + " " + slide.body).lower()
+        slide_tokens = {w for w in re.findall(r"[\w֐-׿]{3,}", slide_text)}
+        best_idx: Optional[int] = None
+        best_score = 0
+        for idx, hay in enumerate(chapter_haystacks):
+            chapter_tokens = set(re.findall(r"[\w֐-׿]{3,}", hay))
+            if not chapter_tokens:
+                continue
+            score = len(slide_tokens & chapter_tokens)
+            if score > best_score:
+                best_score = score
+                best_idx = idx
+        aligned.append(
+            {
+                "page_index": slide.page_index,
+                "title": slide.title,
+                "body": slide.body,
+                "chapter_index": best_idx if best_score > 0 else None,
+            }
+        )
+    rows = await state.replace_slides_for_task(task_id, aligned)
+    return {"slides": rows}
+
+
+@router.get("/tasks/{task_id}/slides")
+async def list_slides(
+    task_id: str,
+    user_id: str = Depends(get_current_user),
+):
+    # Allow owner OR shared-task reader so cohort members can see slides too.
+    if not await state.user_can_read_task(task_id, user_id):
+        raise HTTPException(status_code=404, detail="Task not found")
+    return {"slides": await state.list_slides_for_task(task_id)}
+
+
+@router.patch("/tasks/{task_id}/slides/{slide_id}")
+async def update_slide_alignment(
+    task_id: str,
+    slide_id: str,
+    payload: SlideAlignmentUpdate,
+    user_id: str = Depends(get_current_user),
+):
+    task = await state.get_task_for_user(task_id, user_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if not await state.update_slide_chapter(slide_id, task_id, payload.chapter_index):
+        raise HTTPException(status_code=404, detail="Slide not found")
+    slides = await state.list_slides_for_task(task_id)
+    return {"slides": slides}
+
+
+@router.delete("/tasks/{task_id}/slides", status_code=204)
+async def delete_slides(
+    task_id: str,
+    user_id: str = Depends(get_current_user),
+):
+    task = await state.get_task_for_user(task_id, user_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    await state.clear_slides_for_task(task_id)
+    return Response(status_code=204)
+
+
+# ── B6.4: AI podcast companion (script-only) ────────────────────────────────
+# Generates a two-host conversational script from the lesson summary. TTS is
+# deferred to a future feature so we don't take a new external-credential
+# dependency in this batch.
+
+
+@router.get("/tasks/{task_id}/podcast-script", response_model=PodcastScriptResponse)
+async def generate_podcast_script(
+    task_id: str,
+    user_id: str = Depends(get_current_user),
+):
+    task = await state.get_task_for_user(task_id, user_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.status != TaskStatus.COMPLETED or task.result is None:
+        raise HTTPException(
+            status_code=400, detail="Task must be completed before generating a podcast"
+        )
+    from app.services.podcast_script import build_podcast_script  # local import
+
+    payload = await build_podcast_script(task.result)
+    return PodcastScriptResponse(
+        task_id=task_id,
+        turns=[PodcastTurn(**t) for t in payload["turns"]],
+        model=payload["model"],
+    )

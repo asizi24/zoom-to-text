@@ -5,6 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="description" content="עוזר לימודי חכם מבוסס AI: הדבק קישור Zoom או העלה הקלטה וקבל תמלול מדויק, סיכום מובנה, פרקים עם נקודות מפתח ומבחן אמריקאי — הכל תוך דקות." />
   <title>Zoom Transcriber — עוזר לימודי</title>
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <meta name="theme-color" content="#7c3aed" />
+  <link rel="icon" type="image/svg+xml" href="/static/icon.svg" />
+  <link rel="apple-touch-icon" href="/static/icon.svg" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="Z2T" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Rubik:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
@@ -6580,6 +6586,17 @@
     } catch (e) {
       console.error('share load failed', e);
     }
+  }
+</script>
+<script>
+  // B6.1: register the PWA service worker. Failures are non-fatal — the app
+  // still works without offline shell caching.
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker
+        .register('/service-worker.js', { scope: '/' })
+        .catch((err) => console.warn('SW registration failed:', err));
+    });
   }
 </script>
 </body>

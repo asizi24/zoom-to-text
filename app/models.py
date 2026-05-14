@@ -294,3 +294,67 @@ class TaskShareCreate(BaseModel):
     """Request body for POST /api/tasks/{id}/shares — B5 cohort sharing."""
 
     email: str = Field(..., min_length=3, max_length=320)
+
+
+# ── B6.2: lesson recipes ────────────────────────────────────────────────────
+
+class RecipeCreate(BaseModel):
+    """Request body for POST /api/recipes — saved processing preset."""
+
+    name: str = Field(..., min_length=1, max_length=60)
+    mode: str = Field(..., pattern=r"^(gemini_direct|whisper_local|whisper_api)$")
+    language: str = Field("he", min_length=2, max_length=8)
+    tags: list[str] = Field(default_factory=list)
+    notes: Optional[str] = Field(None, max_length=500)
+
+
+class RecipeUpdate(BaseModel):
+    """Request body for PATCH /api/recipes/{id}."""
+
+    name: Optional[str] = Field(None, min_length=1, max_length=60)
+    mode: Optional[str] = Field(
+        None, pattern=r"^(gemini_direct|whisper_local|whisper_api)$"
+    )
+    language: Optional[str] = Field(None, min_length=2, max_length=8)
+    tags: Optional[list[str]] = None
+    notes: Optional[str] = Field(None, max_length=500)
+
+
+# ── B6.3: slide deck + alignment ────────────────────────────────────────────
+
+class SlideInput(BaseModel):
+    """A single slide as supplied by the client (text extracted browser-side
+    from a PDF, or manually authored)."""
+
+    page_index: int = Field(..., ge=0, le=10_000)
+    title: str = Field("", max_length=300)
+    body: str = Field("", max_length=4000)
+
+
+class SlideDeckUpload(BaseModel):
+    """Request body for POST /api/tasks/{id}/slides — replaces the existing deck."""
+
+    slides: list[SlideInput] = Field(..., max_length=500)
+
+
+class SlideAlignmentUpdate(BaseModel):
+    """Request body for PATCH /api/tasks/{id}/slides/{slide_id}."""
+
+    chapter_index: Optional[int] = Field(None, ge=0, le=200)
+
+
+# ── B6.4: AI podcast companion ──────────────────────────────────────────────
+
+class PodcastTurn(BaseModel):
+    """A single line in the two-host podcast script."""
+
+    speaker: str = Field(..., pattern=r"^(host_a|host_b)$")
+    text: str
+
+
+class PodcastScriptResponse(BaseModel):
+    """Response body for GET /api/tasks/{id}/podcast-script."""
+
+    task_id: str
+    turns: list[PodcastTurn]
+    model: str

@@ -228,6 +228,35 @@ async def health():
     return {"status": "ok", "version": "2.0.0"}
 
 
+# ── B6.1: PWA manifest + service worker ──────────────────────────────────────
+# Both must be served from the site root: the manifest by convention, and the
+# service worker because its default registration scope is its serving path's
+# directory. We also send `Service-Worker-Allowed: /` so the SW controls the
+# entire origin.
+
+@app.get("/manifest.webmanifest", include_in_schema=False)
+async def pwa_manifest():
+    p = Path("static/manifest.webmanifest")
+    if not p.exists():
+        raise HTTPException(status_code=404, detail="manifest not found")
+    return FileResponse(p, media_type="application/manifest+json")
+
+
+@app.get("/service-worker.js", include_in_schema=False)
+async def pwa_service_worker():
+    p = Path("static/service-worker.js")
+    if not p.exists():
+        raise HTTPException(status_code=404, detail="service worker not found")
+    return FileResponse(
+        p,
+        media_type="application/javascript",
+        headers={
+            "Service-Worker-Allowed": "/",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+        },
+    )
+
+
 @app.get("/login", response_class=HTMLResponse, include_in_schema=False)
 async def login_page():
     """Serve the login page."""

@@ -1,0 +1,22 @@
+{
+  "name": "Zoom Transcriber — עוזר לימודי",
+  "short_name": "Z2T",
+  "description": "תמלול וסיכום הקלטות Zoom עם AI: סיכומים, פרקים, מבחנים, פלאשקארדים, ומפת חשיבה — תוך דקות.",
+  "lang": "he",
+  "dir": "rtl",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#090b14",
+  "theme_color": "#7c3aed",
+  "orientation": "portrait",
+  "categories": ["education", "productivity"],
+  "icons": [
+    {
+      "src": "/static/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
