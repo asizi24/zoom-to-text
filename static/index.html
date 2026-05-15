@@ -1658,6 +1658,32 @@
       background: rgba(124,58,237,.08);
     }
 
+    /* ── History mode tabs (mine / shared with me) ── */
+    .history-mode-tabs {
+      display: flex; gap: 6px; margin-bottom: 12px;
+    }
+    .history-mode-tab {
+      flex: 1; padding: 8px 14px;
+      background: rgba(255,255,255,.04);
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 10px; cursor: pointer;
+      color: var(--muted); font-size: .82rem;
+      font-family: inherit; font-weight: 500;
+      transition: all .2s ease;
+    }
+    .history-mode-tab:hover {
+      border-color: rgba(124,58,237,.4); color: #c4b5fd;
+    }
+    .history-mode-tab.active {
+      background: rgba(124,58,237,.12);
+      border-color: rgba(124,58,237,.55);
+      color: #c4b5fd;
+    }
+    .h-owner {
+      font-size: .72rem; color: rgba(196,181,253,.85);
+      margin-top: 2px;
+    }
+
     /* ── History toggle button (fixed) ── */
     .history-toggle-btn {
       position: fixed; bottom: 24px; left: 24px;
@@ -3814,6 +3840,10 @@
     <h2>🕘 היסטוריה</h2>
     <button class="history-close" onclick="toggleHistory()" aria-label="סגירת היסטוריה">✕</button>
   </div>
+  <div class="history-mode-tabs">
+    <button class="history-mode-tab active" id="hmt-mine" onclick="setHistoryMode('mine')">🎙️ ההקלטות שלי</button>
+    <button class="history-mode-tab" id="hmt-shared" onclick="setHistoryMode('shared')">👥 שותפו איתי</button>
+  </div>
   <div class="history-controls">
     <div class="history-search-wrap">
       <input type="search" id="history-search" class="history-search-input"
@@ -3891,6 +3921,7 @@
   let historyVisible = false;
   let historyOffset = 0;
   let historySearchTimer = null;
+  let historyMode = 'mine'; // 'mine' | 'shared'
   const HISTORY_PAGE_SIZE = 10;
   let processingStartTime = null;
 
@@ -5385,9 +5416,132 @@
     card.style.display = historyVisible ? 'block' : 'none';
     if (historyVisible) {
       historyOffset = 0;
-      document.getElementById('history-search').value = '';
+      historyMode = 'mine';
+      _applyHistoryModeUI();
+      const search = document.getElementById('history-search');
+      if (search) search.value = '';
       await renderHistoryPage();
       loadDigestPreference();
+    }
+  }
+
+  // Reflect historyMode in tab UI + show/hide owner-only controls.
+  function _applyHistoryModeUI() {
+    const mine = document.getElementById('hmt-mine');
+    const shared = document.getElementById('hmt-shared');
+    if (mine)   mine.classList.toggle('active',   historyMode === 'mine');
+    if (shared) shared.classList.toggle('active', historyMode === 'shared');
+    // Hide owner-only controls in shared mode. The "shared with me" list is a
+    // small read-only feed — search/bulk/cram/digest-prefs/ask-across don't
+    // apply (and their backends would 404/403 on non-owned tasks anyway).
+    const showForMine = historyMode === 'mine';
+    const controls = document.querySelector('.history-controls');
+    if (controls) controls.style.display = showForMine ? '' : 'none';
+    const prefs = document.getElementById('prefs-row');
+    if (prefs) prefs.style.display = showForMine ? '' : 'none';
+    const ask = document.getElementById('ask-across-wrap');
+    if (ask) ask.style.display = showForMine ? '' : 'none';
+    const pg = document.getElementById('history-pagination');
+    if (pg) pg.innerHTML = '';
+  }
+
+  async function setHistoryMode(mode) {
+    if (mode !== 'mine' && mode !== 'shared') return;
+    if (mode === historyMode) return;
+    historyMode = mode;
+    _applyHistoryModeUI();
+    if (mode === 'mine') {
+      historyOffset = 0;
+      await renderHistoryPage();
+    } else {
+      await renderSharedTasks();
+    }
+  }
+
+  async function renderSharedTasks() {
+    const container = document.getElementById('history-content');
+    container.innerHTML = '<div class="history-empty">טוען...</div>';
+    try {
+      const r = await fetch('/api/shared-tasks');
+      if (!r.ok) {
+        container.innerHTML = '<div class="history-empty">שגיאה בטעינת הקלטות משותפות</div>';
+        return;
+      }
+      const data = await r.json();
+      const tasks = (data && data.tasks) || [];
+      if (!tasks.length) {
+        container.innerHTML = '<div class="history-empty">עדיין לא שותפו איתך הקלטות</div>';
+        return;
+      }
+      const list = document.createElement('div');
+      list.className = 'history-list';
+      tasks.forEach(t => {
+        const item = document.createElement('div');
+        const isCompleted = t.status === 'completed';
+        const isFailed    = t.status === 'failed';
+        const isCancelled = t.status === 'cancelled';
+        item.className = `history-item${isFailed || isCancelled ? ' failed' : ''}`;
+        const statusIcon = isCompleted ? '✅' : isFailed ? '❌' : isCancelled ? '🚫' : '⏳';
+        const badgeClass = isCompleted ? 'completed' : isFailed ? 'failed' : isCancelled ? 'failed' : 'running';
+        const badgeText  = isCompleted ? 'הושלם' : isFailed ? 'נכשל' : isCancelled ? 'בוטל' : 'בתהליך';
+        const dt = new Date(t.created_at).toLocaleString('he-IL', { dateStyle: 'short', timeStyle: 'short' });
+        const shortUrl = (t.url || '').replace(/^upload:/, '📁 ').replace('https://', '').slice(0, 60);
+
+        const statusSpan = document.createElement('span');
+        statusSpan.className = 'h-status';
+        statusSpan.textContent = statusIcon;
+        item.appendChild(statusSpan);
+
+        const infoDiv = document.createElement('div');
+        infoDiv.className = 'h-info';
+        const urlDiv = document.createElement('div');
+        urlDiv.className = 'h-url';
+        urlDiv.textContent = shortUrl || 'לא ידוע';
+        infoDiv.appendChild(urlDiv);
+        const metaDiv = document.createElement('div');
+        metaDiv.className = 'h-meta';
+        metaDiv.textContent = dt;
+        infoDiv.appendChild(metaDiv);
+        if (t.owner_email) {
+          const ownerDiv = document.createElement('div');
+          ownerDiv.className = 'h-owner';
+          ownerDiv.textContent = `שותף ע"י ${t.owner_email}`;
+          infoDiv.appendChild(ownerDiv);
+        }
+        item.appendChild(infoDiv);
+
+        const badge = document.createElement('span');
+        badge.className = `h-badge ${badgeClass}`;
+        badge.textContent = badgeText;
+        item.appendChild(badge);
+
+        if (isCompleted) {
+          item.onclick = () => loadSharedTask(t.id);
+        }
+        list.appendChild(item);
+      });
+      container.innerHTML = '';
+      container.appendChild(list);
+    } catch (e) {
+      container.innerHTML = '<div class="history-empty">שגיאה בטעינת הקלטות משותפות</div>';
+    }
+  }
+
+  async function loadSharedTask(taskId) {
+    try {
+      const r = await fetch(`/api/tasks/${taskId}/readable`);
+      if (!r.ok) {
+        alert('שגיאה בטעינת המשימה');
+        return;
+      }
+      const task = await r.json();
+      if (task.result) {
+        currentSource = task.url || '';
+        toggleHistory();
+        showResults(task.result, taskId, !!task.has_audio, task.message);
+      }
+    } catch {
+      alert('שגיאה בטעינת המשימה');
     }
   }
 
