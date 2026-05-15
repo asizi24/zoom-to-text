@@ -101,6 +101,31 @@ export async function downloadObsidian(taskId) {
 }
 
 /**
+ * Fetch an .ics calendar event from the server and download it.
+ * @param {string} taskId
+ */
+export async function downloadIcs(taskId) {
+  try {
+    const resp = await fetch(`/api/tasks/${taskId}/export/ics`, {
+      credentials: 'include',
+    });
+    if (!resp.ok) {
+      alert('ייצוא יומן נכשל: ' + resp.status);
+      return;
+    }
+    const text = await resp.text();
+    const blob = new Blob([text], { type: 'text/calendar; charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `lesson-${taskId.slice(0, 8)}.ics`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  } catch (err) {
+    alert('שגיאה בייצוא יומן: ' + err.message);
+  }
+}
+
+/**
  * Fetch a server-rendered PDF export and download it.
  * @param {string} taskId
  */

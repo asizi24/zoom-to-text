@@ -3092,6 +3092,87 @@
   <!-- About button (opens profile card modal) -->
   <button type="button" class="about-toggle" onclick="openAbout()">👤 עליי</button>
 
+  <!-- Insights button (opens cross-lecture glossary + mastery dashboard) -->
+  <button type="button" class="about-toggle" onclick="openInsightsModal()"
+          style="right:128px;" title="מילון מונחים ולוח שליטה בנושאים מכל ההרצאות">
+    📊 לימוד שלי
+  </button>
+
+  <!-- Webhooks button (opens Slack/Discord notification config) -->
+  <button type="button" class="about-toggle" onclick="openWebhooksModal()"
+          style="right:248px;" title="הגדר התראות Slack/Discord על השלמת עיבוד">
+    🔔 התראות
+  </button>
+
+  <!-- Webhooks modal — Slack/Discord notifications config -->
+  <div class="about-overlay" id="webhooks-modal" onclick="if(event.target===this)closeWebhooksModal()">
+    <div class="profile-card-wrap">
+      <div class="profile-card" style="text-align:right; max-width:560px;">
+        <button type="button" class="about-close" onclick="closeWebhooksModal()" aria-label="סגור">✕</button>
+        <h2 class="profile-name" style="margin-bottom:8px;">🔔 התראות יוצאות</h2>
+        <p class="profile-bio" style="margin-bottom:18px;">
+          קבל הודעה ב-Slack או ב-Discord כשעיבוד של הרצאה מסתיים.
+          הוסף Incoming Webhook URL (חייב להתחיל ב-<code>https://</code>).
+        </p>
+        <div class="profile-divider"></div>
+
+        <div id="webhooks-list" style="display:flex; flex-direction:column; gap:10px; margin:16px 0; max-height:240px; overflow-y:auto;"></div>
+
+        <!-- New webhook form -->
+        <div style="background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.1); border-radius:10px; padding:14px;">
+          <div style="font-weight:600; margin-bottom:10px;">הוסף Webhook</div>
+          <div style="display:flex; gap:8px; margin-bottom:10px;">
+            <button type="button" class="webhook-kind-opt selected" data-kind="slack" onclick="selectWebhookKind(this)"
+                    style="flex:1; padding:8px 10px; background:rgba(124,58,237,0.2); border:1px solid rgba(124,58,237,0.5); border-radius:8px; color:#fff; cursor:pointer; font-size:.9rem;">💬 Slack</button>
+            <button type="button" class="webhook-kind-opt" data-kind="discord" onclick="selectWebhookKind(this)"
+                    style="flex:1; padding:8px 10px; background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.15); border-radius:8px; color:#fff; cursor:pointer; font-size:.9rem;">🎮 Discord</button>
+          </div>
+          <input type="url" id="webhook-url-input" placeholder="https://hooks.slack.com/services/..." maxlength="2000"
+                 style="width:100%; padding:10px 12px; background:rgba(0,0,0,0.25); border:1px solid rgba(255,255,255,0.15); border-radius:8px; color:#fff; margin-bottom:12px; font-size:.9rem; direction:ltr; text-align:left;">
+          <button type="button" class="action-btn" onclick="createWebhook()" id="webhook-save-btn" style="width:100%;">💾 הוסף</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Insights modal — glossary + topic mastery -->
+  <div class="about-overlay" id="insights-modal" onclick="if(event.target===this)closeInsightsModal()">
+    <div class="profile-card-wrap">
+      <div class="profile-card" style="text-align:right; max-width:680px; max-height:85vh; overflow-y:auto;">
+        <button type="button" class="about-close" onclick="closeInsightsModal()" aria-label="סגור">✕</button>
+        <h2 class="profile-name" style="margin-bottom:6px;">📊 לימוד שלי</h2>
+        <p class="profile-bio" style="margin-bottom:14px;">
+          תצוגה חוצת-הרצאות של מונחים שכבר נחשפת אליהם והרמה בה כל נושא נמצא.
+        </p>
+        <div class="profile-divider"></div>
+
+        <!-- Topic mastery section -->
+        <div style="margin-top:16px;">
+          <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:10px;">
+            <div style="font-weight:600; font-size:1rem;">🧠 שליטה בנושאים</div>
+            <button type="button" class="action-btn" onclick="loadMastery()" style="background:rgba(255,255,255,0.06); padding:4px 10px; font-size:.8rem;">🔄 רענן</button>
+          </div>
+          <div id="mastery-totals" style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px;"></div>
+          <div id="mastery-content" style="font-size:.9rem;"></div>
+        </div>
+
+        <div class="profile-divider" style="margin-top:20px;"></div>
+
+        <!-- Cross-lecture glossary section -->
+        <div style="margin-top:16px;">
+          <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:10px;">
+            <div style="font-weight:600; font-size:1rem;">📚 מילון מונחים</div>
+            <div style="display:flex; gap:8px; align-items:center;">
+              <span id="glossary-updated" style="font-size:.75rem; color:var(--muted);"></span>
+              <button type="button" class="action-btn" onclick="refreshGlossary()" id="glossary-refresh-btn" style="background:rgba(255,255,255,0.06); padding:4px 10px; font-size:.8rem;">🔄 בנה מחדש</button>
+            </div>
+          </div>
+          <div id="glossary-content" style="font-size:.9rem;"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- About modal — Asaf Zitun profile card -->
   <div class="about-overlay" id="about-overlay" onclick="if(event.target===this)closeAbout()">
     <div class="profile-card-wrap">
@@ -3125,6 +3206,47 @@
           <span>צור קשר</span>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="7" y1="17" x2="17" y2="7"/><polyline points="7 7 17 7 17 17"/></svg>
         </a>
+      </div>
+    </div>
+  </div>
+
+  <!-- Recipes modal — saved processing presets -->
+  <div class="about-overlay" id="recipes-modal" onclick="if(event.target===this)closeRecipesModal()">
+    <div class="profile-card-wrap">
+      <div class="profile-card" style="text-align:right; max-width:560px;">
+        <button type="button" class="about-close" onclick="closeRecipesModal()" aria-label="סגור">✕</button>
+        <h2 class="profile-name" style="margin-bottom:8px;">📋 מתכוני שיעור</h2>
+        <p class="profile-bio" style="margin-bottom:18px;">
+          שמור הגדרות עיבוד שאתה משתמש בהן הרבה (מצב, שפה, תגיות).
+          הבחירה במתכון תמלא אוטומטית את טופס היצירה.
+        </p>
+        <div class="profile-divider"></div>
+
+        <!-- Existing recipes list -->
+        <div id="recipes-list" style="display:flex; flex-direction:column; gap:10px; margin:16px 0; max-height:260px; overflow-y:auto;"></div>
+
+        <!-- New / Edit form -->
+        <div style="background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.1); border-radius:10px; padding:14px;">
+          <div style="font-weight:600; margin-bottom:10px;" id="recipe-form-title">מתכון חדש</div>
+          <input type="text" id="recipe-name-input" placeholder="שם המתכון (לדוגמה: הרצאה / ישיבה)" maxlength="120"
+                 style="width:100%; padding:10px 12px; background:rgba(0,0,0,0.25); border:1px solid rgba(255,255,255,0.15); border-radius:8px; color:#fff; margin-bottom:10px; font-size:.95rem; direction:rtl;">
+          <div style="font-size:.85rem; color:var(--muted); margin-bottom:6px;">מצב עיבוד</div>
+          <div id="recipe-mode-row" style="display:flex; gap:8px; margin-bottom:12px; flex-wrap:wrap;">
+            <button type="button" class="recipe-mode-opt selected" data-mode="gemini_direct" onclick="selectRecipeMode(this)" style="flex:1; min-width:120px; padding:8px 10px; background:rgba(124,58,237,0.2); border:1px solid rgba(124,58,237,0.5); border-radius:8px; color:#fff; cursor:pointer; font-size:.85rem;">⚡ Gemini</button>
+            <button type="button" class="recipe-mode-opt" data-mode="whisper_local" onclick="selectRecipeMode(this)" style="flex:1; min-width:120px; padding:8px 10px; background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.15); border-radius:8px; color:#fff; cursor:pointer; font-size:.85rem;">🔒 Whisper מקומי</button>
+            <button type="button" class="recipe-mode-opt" data-mode="whisper_api" onclick="selectRecipeMode(this)" style="flex:1; min-width:120px; padding:8px 10px; background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.15); border-radius:8px; color:#fff; cursor:pointer; font-size:.85rem;">☁️ Whisper API</button>
+          </div>
+          <input type="text" id="recipe-language-input" value="he" placeholder="שפה (he/en/...)" maxlength="10"
+                 style="width:100%; padding:10px 12px; background:rgba(0,0,0,0.25); border:1px solid rgba(255,255,255,0.15); border-radius:8px; color:#fff; margin-bottom:10px; font-size:.95rem; direction:rtl;">
+          <input type="text" id="recipe-tags-input" placeholder="תגיות מופרדות בפסיק (math, ai, lecture)" maxlength="200"
+                 style="width:100%; padding:10px 12px; background:rgba(0,0,0,0.25); border:1px solid rgba(255,255,255,0.15); border-radius:8px; color:#fff; margin-bottom:10px; font-size:.95rem; direction:rtl;">
+          <textarea id="recipe-notes-input" placeholder="הערות (אופציונלי)" rows="2" maxlength="2000"
+                    style="width:100%; padding:10px 12px; background:rgba(0,0,0,0.25); border:1px solid rgba(255,255,255,0.15); border-radius:8px; color:#fff; margin-bottom:12px; font-size:.95rem; direction:rtl; resize:vertical; font-family:inherit;"></textarea>
+          <div style="display:flex; gap:8px;">
+            <button type="button" class="action-btn" onclick="saveRecipeForm()" id="recipe-save-btn" style="flex:1;">💾 שמור</button>
+            <button type="button" class="action-btn" onclick="clearRecipeForm()" style="background:rgba(255,255,255,0.06);" id="recipe-cancel-btn">נקה</button>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -3258,6 +3380,18 @@
       </div>
       <input type="file" id="uploadSuppFiles" multiple accept=".pdf,.docx,.html,.htm,.txt,.md" style="display:none">
     </div>
+  </div>
+
+  <!-- Recipe selector (saved processing presets) -->
+  <div id="recipe-selector-block" style="margin-top:22px; display:none;">
+    <div class="mode-label" style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
+      <span>📋 מתכון מוכן</span>
+      <button type="button" onclick="openRecipesModal()" style="background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.15); color:rgba(255,255,255,0.85); padding:4px 10px; border-radius:6px; cursor:pointer; font-size:.78rem;">נהל מתכונים</button>
+    </div>
+    <select id="recipe-selector" onchange="applyRecipeToForm(this.value)"
+            style="width:100%; padding:10px 12px; background:rgba(0,0,0,0.25); border:1px solid rgba(255,255,255,0.15); border-radius:8px; color:#fff; font-size:.95rem; direction:rtl; margin-top:6px;">
+      <option value="">בחר/י מתכון (אופציונלי)</option>
+    </select>
   </div>
 
   <!-- Mode selector -->
@@ -3463,13 +3597,15 @@
     <div class="results-primary">
       <button class="action-btn back-btn" onclick="reset()" title="חזרה למסך הראשי">← חזרה</button>
       <button class="action-btn" id="copy-all-btn" onclick="copyAll()">📋 העתק הכל</button>
-      <button class="action-btn share-btn" id="share-btn" onclick="shareLesson()" title="צור קישור שיתוף לחברים">🔗 שתף</button>
+      <button class="action-btn share-btn" id="share-btn" onclick="shareLesson()" title="צור קישור ציבורי לשיתוף">🔗 שתף</button>
+      <button class="action-btn" id="cohort-share-btn" onclick="openCohortShare()" title="שתף עם משתמש ספציפי לפי אימייל">👥 שתף עם חבר</button>
     </div>
     <!-- Secondary export actions -->
     <div class="results-secondary">
       <span class="export-label">ייצוא:</span>
       <button class="action-btn action-btn-export" onclick="exportMarkdown()">⬇️ Markdown</button>
       <button class="action-btn action-btn-export" onclick="exportObsidian()" title="פורמט Obsidian: frontmatter, action items כ-checkboxes, תגיות לפי owner">🟣 Obsidian</button>
+      <button class="action-btn action-btn-export" onclick="exportIcs()" title="ייצוא ל-Google/Apple/Outlook Calendar — אירוע יחיד בקובץ .ics">📅 יומן</button>
       <button class="action-btn action-btn-export" onclick="exportPdf()" title="הורד PDF מעוצב לשיתוף או הדפסה">📄 PDF</button>
       <button class="action-btn action-btn-export" onclick="window.print()">🖨️ הדפסה</button>
     </div>
@@ -3482,6 +3618,33 @@
     <button class="copy-btn" style="position:static; padding:3px 10px;" onclick="copyShareLink()">📋 העתק</button>
     <button class="copy-btn" id="revoke-share-btn" style="position:static; padding:3px 10px; background:rgba(239,68,68,.15); border-color:rgba(239,68,68,.4);" onclick="revokeShare()">🗑️ בטל שיתוף</button>
     <span id="share-expires-label" style="color:var(--muted); font-size:.8rem;"></span>
+  </div>
+
+  <!-- Cohort share panel (per-task email share) -->
+  <div id="cohort-share-panel" style="display:none; margin:12px 0; padding:14px; background:rgba(99,102,241,.08); border:1px solid rgba(99,102,241,.25); border-radius:10px;">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+      <div style="font-weight:600;">👥 שיתוף עם חבר</div>
+      <button class="copy-btn" style="position:static; padding:3px 10px;" onclick="closeCohortShare()">סגור</button>
+    </div>
+    <p style="font-size:.85rem; color:var(--muted); margin:0 0 10px;">
+      שתף את ההרצאה עם משתמש ספציפי לפי אימייל (חייב להיות משתמש קיים במערכת).
+    </p>
+    <div style="display:flex; gap:8px; margin-bottom:12px;">
+      <input type="email" id="cohort-email-input" placeholder="email@example.com"
+             onkeydown="if(event.key==='Enter'){event.preventDefault();grantCohortShare();}"
+             style="flex:1; padding:8px 10px; background:rgba(0,0,0,0.25); border:1px solid rgba(255,255,255,0.15); border-radius:8px; color:#fff; font-size:.9rem; direction:ltr; text-align:left;">
+      <button class="action-btn" id="cohort-add-btn" onclick="grantCohortShare()">➕ הוסף</button>
+    </div>
+    <div id="cohort-share-list" style="display:flex; flex-direction:column; gap:6px;"></div>
+  </div>
+
+  <!-- Podcast script section -->
+  <div id="podcast-script-section" style="margin:12px 0;">
+    <button class="action-btn" id="podcast-script-toggle" onclick="togglePodcastScript()"
+            title="הפק סקריפט פודקאסט קונברסציוני בין שני מנחים על בסיס השיעור">
+      🎙️ סקריפט פודקאסט
+    </button>
+    <div id="podcast-script-content" style="display:none; margin-top:12px;"></div>
   </div>
 
   <!-- Summary -->
@@ -4331,6 +4494,8 @@
   function showResults(result, taskId, hasAudio, taskMessage) {
     hideLiveTranscript();
     hideProgress();
+    resetPodcastScript();
+    resetCohortShare();
     currentResult = result;
     currentTaskId = taskId;
     // Push a history entry so the Back button returns to the home view
@@ -4972,6 +5137,135 @@
   }
 
   // ══════════════════════════════════════════════════════════════════════════
+  // Cohort share (per-task, email-targeted)
+  // ══════════════════════════════════════════════════════════════════════════
+  function openCohortShare() {
+    if (!currentTaskId) return;
+    const panel = document.getElementById('cohort-share-panel');
+    panel.style.display = 'block';
+    loadCohortShareList();
+    setTimeout(() => {
+      const input = document.getElementById('cohort-email-input');
+      if (input) input.focus();
+    }, 50);
+  }
+
+  function closeCohortShare() {
+    const panel = document.getElementById('cohort-share-panel');
+    if (panel) panel.style.display = 'none';
+  }
+
+  function resetCohortShare() {
+    const panel = document.getElementById('cohort-share-panel');
+    if (panel) panel.style.display = 'none';
+    const list = document.getElementById('cohort-share-list');
+    if (list) list.textContent = '';
+    const input = document.getElementById('cohort-email-input');
+    if (input) input.value = '';
+  }
+
+  async function loadCohortShareList() {
+    if (!currentTaskId) return;
+    const list = document.getElementById('cohort-share-list');
+    if (!list) return;
+    list.textContent = '';
+    try {
+      const r = await fetch(`/api/tasks/${currentTaskId}/shares`, {
+        credentials: 'include',
+      });
+      if (!r.ok) {
+        const detail = await r.json().catch(() => ({}));
+        throw new Error(detail.detail || `HTTP ${r.status}`);
+      }
+      const data = await r.json();
+      const shares = data.shares || [];
+      if (!shares.length) {
+        const empty = document.createElement('div');
+        empty.style.cssText = 'font-size:.85rem; color:var(--muted); padding:6px 2px;';
+        empty.textContent = 'אין שיתופים אישיים כרגע.';
+        list.appendChild(empty);
+        return;
+      }
+      shares.forEach(s => {
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex; justify-content:space-between; align-items:center; gap:8px; padding:6px 10px; background:rgba(0,0,0,0.2); border-radius:6px;';
+        const label = document.createElement('span');
+        label.style.cssText = 'font-size:.9rem; direction:ltr; text-align:left;';
+        label.textContent = s.email || s.user_email || s.target_email || `משתמש #${s.target_user_id || s.user_id || '?'}`;
+        const btn = document.createElement('button');
+        btn.className = 'copy-btn';
+        btn.style.cssText = 'position:static; padding:3px 10px; background:rgba(239,68,68,.15); border-color:rgba(239,68,68,.4);';
+        btn.textContent = '🗑️ בטל';
+        const targetId = s.target_user_id || s.user_id;
+        btn.onclick = () => revokeCohortShare(targetId, btn);
+        row.appendChild(label);
+        row.appendChild(btn);
+        list.appendChild(row);
+      });
+    } catch (err) {
+      const errRow = document.createElement('div');
+      errRow.style.cssText = 'font-size:.85rem; color:#f87171; padding:6px 2px;';
+      errRow.textContent = 'שגיאה בטעינת השיתופים: ' + err.message;
+      list.appendChild(errRow);
+    }
+  }
+
+  async function grantCohortShare() {
+    if (!currentTaskId) return;
+    const input = document.getElementById('cohort-email-input');
+    const btn = document.getElementById('cohort-add-btn');
+    const email = (input.value || '').trim();
+    if (!email) {
+      alert('יש להזין כתובת אימייל.');
+      input.focus();
+      return;
+    }
+    const orig = btn.innerHTML;
+    btn.innerHTML = '⏳';
+    btn.disabled = true;
+    try {
+      const r = await fetch(`/api/tasks/${currentTaskId}/shares`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
+      });
+      if (!r.ok) {
+        const detail = await r.json().catch(() => ({}));
+        throw new Error(detail.detail || `HTTP ${r.status}`);
+      }
+      input.value = '';
+      await loadCohortShareList();
+    } catch (err) {
+      alert('שגיאה בשיתוף: ' + err.message);
+    } finally {
+      btn.innerHTML = orig;
+      btn.disabled = false;
+    }
+  }
+
+  async function revokeCohortShare(targetUserId, btn) {
+    if (!currentTaskId || !targetUserId) return;
+    if (!confirm('לבטל את השיתוף עם המשתמש?')) return;
+    const orig = btn ? btn.innerHTML : null;
+    if (btn) { btn.innerHTML = '⏳'; btn.disabled = true; }
+    try {
+      const r = await fetch(`/api/tasks/${currentTaskId}/shares/${targetUserId}`, {
+        method: 'DELETE',
+        credentials: 'include',
+      });
+      if (!r.ok && r.status !== 204) {
+        const detail = await r.json().catch(() => ({}));
+        throw new Error(detail.detail || `HTTP ${r.status}`);
+      }
+      await loadCohortShareList();
+    } catch (err) {
+      if (btn) { btn.innerHTML = orig; btn.disabled = false; }
+      alert('שגיאה בביטול השיתוף: ' + err.message);
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
   // Export helpers — logic lives in /static/js/export-utils.js (ES module).
   // Dynamic import means the module is fetched once and cached by the browser.
   async function exportMarkdown() {
@@ -4986,10 +5280,100 @@
     await downloadObsidian(currentTaskId);
   }
 
+  async function exportIcs() {
+    if (!currentTaskId) return;
+    const { downloadIcs } = await import('/static/js/export-utils.js');
+    await downloadIcs(currentTaskId);
+  }
+
   async function exportPdf() {
     if (!currentTaskId) return;
     const { downloadPdf } = await import('/static/js/export-utils.js');
     await downloadPdf(currentTaskId);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // Podcast script viewer
+  // ══════════════════════════════════════════════════════════════════════════
+  let podcastScriptLoaded = false;
+
+  async function togglePodcastScript() {
+    if (!currentTaskId) return;
+    const content = document.getElementById('podcast-script-content');
+    const btn = document.getElementById('podcast-script-toggle');
+    if (podcastScriptLoaded) {
+      const showing = content.style.display !== 'none';
+      content.style.display = showing ? 'none' : 'block';
+      return;
+    }
+    const orig = btn.innerHTML;
+    btn.innerHTML = '⏳ טוען סקריפט...';
+    btn.disabled = true;
+    try {
+      const r = await fetch(`/api/tasks/${currentTaskId}/podcast-script`, {
+        credentials: 'include',
+      });
+      if (!r.ok) {
+        const detail = await r.json().catch(() => ({}));
+        throw new Error(detail.detail || `HTTP ${r.status}`);
+      }
+      const data = await r.json();
+      renderPodcastScript(data, content);
+      content.style.display = 'block';
+      podcastScriptLoaded = true;
+    } catch (err) {
+      alert('שגיאה בהפקת סקריפט פודקאסט: ' + err.message);
+    } finally {
+      btn.innerHTML = orig;
+      btn.disabled = false;
+    }
+  }
+
+  function renderPodcastScript(data, root) {
+    root.textContent = '';
+    const wrap = document.createElement('div');
+    wrap.style.display = 'flex';
+    wrap.style.flexDirection = 'column';
+    wrap.style.gap = '8px';
+    const speakerLabel = { host_a: 'מנחה א׳', host_b: 'מנחה ב׳' };
+    (data.turns || []).forEach(t => {
+      const bubble = document.createElement('div');
+      const isA = t.speaker === 'host_a';
+      bubble.style.maxWidth = '85%';
+      bubble.style.padding = '10px 14px';
+      bubble.style.borderRadius = '14px';
+      bubble.style.lineHeight = '1.55';
+      bubble.style.fontSize = '.95rem';
+      bubble.style.alignSelf = isA ? 'flex-end' : 'flex-start';
+      bubble.style.background = isA ? 'rgba(124,58,237,.14)' : 'rgba(99,102,241,.12)';
+      bubble.style.border = '1px solid ' + (isA ? 'rgba(124,58,237,.3)' : 'rgba(99,102,241,.3)');
+      const label = document.createElement('div');
+      label.style.fontSize = '.78rem';
+      label.style.color = 'var(--muted)';
+      label.style.marginBottom = '4px';
+      label.textContent = speakerLabel[t.speaker] || t.speaker;
+      const body = document.createElement('div');
+      body.textContent = t.text || '';
+      bubble.appendChild(label);
+      bubble.appendChild(body);
+      wrap.appendChild(bubble);
+    });
+    root.appendChild(wrap);
+    if (data.model === 'fallback') {
+      const hint = document.createElement('div');
+      hint.textContent = 'גרסה מקומית — ה-LLM לא זמין כרגע';
+      hint.style.color = 'var(--muted)';
+      hint.style.fontSize = '.8rem';
+      hint.style.marginTop = '10px';
+      hint.style.textAlign = 'center';
+      root.appendChild(hint);
+    }
+  }
+
+  function resetPodcastScript() {
+    podcastScriptLoaded = false;
+    const content = document.getElementById('podcast-script-content');
+    if (content) { content.textContent = ''; content.style.display = 'none'; }
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -5296,6 +5680,8 @@
     document.getElementById('mindmap-section').style.display = 'none';
     document.getElementById('notepad-section').style.display = 'none';
     flashcards = []; fcIndex = 0; fcKnew = 0; fcMissed = 0; fcSeen = new Set(); fcTaskId = null;
+    resetPodcastScript();
+    resetCohortShare();
     hideError();
     switchTab('url');
     // Don't push a new home state if we're already there (avoids double entries)
@@ -6514,6 +6900,597 @@
         document.getElementById('about-overlay').classList.contains('open')) {
       closeAbout();
     }
+    if (e.key === 'Escape') {
+      const cohort = document.getElementById('cohort-share-panel');
+      if (cohort && cohort.style.display !== 'none') {
+        closeCohortShare();
+      }
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // Recipes (saved processing presets)
+  // ══════════════════════════════════════════════════════════════════════════
+  let recipes = [];
+  let editingRecipeId = null;
+  let recipeFormMode = 'gemini_direct';
+
+  function openRecipesModal() {
+    document.getElementById('recipes-modal').classList.add('open');
+    clearRecipeForm();
+  }
+  function closeRecipesModal() {
+    document.getElementById('recipes-modal').classList.remove('open');
+  }
+
+  function selectRecipeMode(el) {
+    document.querySelectorAll('.recipe-mode-opt').forEach(b => {
+      b.classList.remove('selected');
+      b.style.background = 'rgba(255,255,255,0.06)';
+      b.style.border = '1px solid rgba(255,255,255,0.15)';
+    });
+    el.classList.add('selected');
+    el.style.background = 'rgba(124,58,237,0.2)';
+    el.style.border = '1px solid rgba(124,58,237,0.5)';
+    recipeFormMode = el.dataset.mode;
+  }
+
+  function clearRecipeForm() {
+    editingRecipeId = null;
+    document.getElementById('recipe-form-title').textContent = 'מתכון חדש';
+    document.getElementById('recipe-save-btn').innerHTML = '💾 שמור';
+    document.getElementById('recipe-name-input').value = '';
+    document.getElementById('recipe-language-input').value = 'he';
+    document.getElementById('recipe-tags-input').value = '';
+    document.getElementById('recipe-notes-input').value = '';
+    const gemBtn = document.querySelector('.recipe-mode-opt[data-mode="gemini_direct"]');
+    if (gemBtn) selectRecipeMode(gemBtn);
+  }
+
+  async function loadRecipes() {
+    try {
+      const r = await fetch('/api/recipes', { credentials: 'include' });
+      if (!r.ok) return;
+      const data = await r.json();
+      recipes = data.recipes || [];
+      renderRecipesList();
+      renderRecipeSelector();
+    } catch (e) {
+      console.warn('recipes fetch failed', e);
+    }
+  }
+
+  function renderRecipesList() {
+    const list = document.getElementById('recipes-list');
+    if (!list) return;
+    list.textContent = '';
+    if (!recipes.length) {
+      const empty = document.createElement('div');
+      empty.style.color = 'var(--muted)';
+      empty.style.fontSize = '.9rem';
+      empty.style.textAlign = 'center';
+      empty.style.padding = '20px 0';
+      empty.textContent = 'אין מתכונים שמורים. צור מתכון חדש למטה.';
+      list.appendChild(empty);
+      return;
+    }
+    const modeLabel = {
+      gemini_direct: '⚡ Gemini',
+      whisper_local: '🔒 Whisper מקומי',
+      whisper_api: '☁️ Whisper API',
+    };
+    recipes.forEach(rec => {
+      const row = document.createElement('div');
+      row.style.background = 'rgba(255,255,255,0.05)';
+      row.style.border = '1px solid rgba(255,255,255,0.12)';
+      row.style.borderRadius = '8px';
+      row.style.padding = '10px 12px';
+      row.style.display = 'flex';
+      row.style.alignItems = 'center';
+      row.style.gap = '10px';
+
+      const info = document.createElement('div');
+      info.style.flex = '1';
+      info.style.minWidth = '0';
+      const nameEl = document.createElement('div');
+      nameEl.style.fontWeight = '600';
+      nameEl.style.fontSize = '.95rem';
+      nameEl.textContent = rec.name;
+      const metaEl = document.createElement('div');
+      metaEl.style.fontSize = '.8rem';
+      metaEl.style.color = 'var(--muted)';
+      metaEl.style.marginTop = '2px';
+      const tagText = (rec.tags && rec.tags.length) ? ' · ' + rec.tags.map(t => '#' + t).join(' ') : '';
+      metaEl.textContent = (modeLabel[rec.mode] || rec.mode) + ' · ' + (rec.language || 'he') + tagText;
+      info.appendChild(nameEl);
+      info.appendChild(metaEl);
+
+      const editBtn = document.createElement('button');
+      editBtn.type = 'button';
+      editBtn.textContent = '✏️';
+      editBtn.title = 'ערוך';
+      editBtn.style.cssText = 'background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.15); color:#fff; padding:6px 10px; border-radius:6px; cursor:pointer;';
+      editBtn.addEventListener('click', () => beginEditRecipe(rec.id));
+
+      const delBtn = document.createElement('button');
+      delBtn.type = 'button';
+      delBtn.textContent = '🗑️';
+      delBtn.title = 'מחק';
+      delBtn.style.cssText = 'background:rgba(239,68,68,0.15); border:1px solid rgba(239,68,68,0.4); color:#fff; padding:6px 10px; border-radius:6px; cursor:pointer;';
+      delBtn.addEventListener('click', () => deleteRecipe(rec.id));
+
+      row.appendChild(info);
+      row.appendChild(editBtn);
+      row.appendChild(delBtn);
+      list.appendChild(row);
+    });
+  }
+
+  function renderRecipeSelector() {
+    const block = document.getElementById('recipe-selector-block');
+    const sel = document.getElementById('recipe-selector');
+    if (!block || !sel) return;
+    const cur = sel.value;
+    sel.textContent = '';
+    const def = document.createElement('option');
+    def.value = '';
+    def.textContent = 'בחר/י מתכון (אופציונלי)';
+    sel.appendChild(def);
+    recipes.forEach(rec => {
+      const opt = document.createElement('option');
+      opt.value = rec.id;
+      opt.textContent = rec.name;
+      sel.appendChild(opt);
+    });
+    block.style.display = recipes.length ? 'block' : 'none';
+    if (cur && recipes.some(r => r.id === cur)) sel.value = cur;
+  }
+
+  function applyRecipeToForm(recipeId) {
+    if (!recipeId) return;
+    const rec = recipes.find(r => r.id === recipeId);
+    if (!rec) return;
+    const btn = document.querySelector(`.mode-opt[data-mode="${rec.mode}"]`);
+    if (btn && btn.style.display !== 'none') {
+      selectMode(btn);
+    }
+  }
+
+  function beginEditRecipe(id) {
+    const rec = recipes.find(r => r.id === id);
+    if (!rec) return;
+    editingRecipeId = id;
+    document.getElementById('recipe-form-title').textContent = 'עריכת מתכון';
+    document.getElementById('recipe-save-btn').innerHTML = '💾 עדכן';
+    document.getElementById('recipe-name-input').value = rec.name || '';
+    document.getElementById('recipe-language-input').value = rec.language || 'he';
+    document.getElementById('recipe-tags-input').value = (rec.tags || []).join(', ');
+    document.getElementById('recipe-notes-input').value = rec.notes || '';
+    const modeBtn = document.querySelector(`.recipe-mode-opt[data-mode="${rec.mode}"]`);
+    if (modeBtn) selectRecipeMode(modeBtn);
+  }
+
+  async function saveRecipeForm() {
+    const name = document.getElementById('recipe-name-input').value.trim();
+    if (!name) { alert('יש להזין שם למתכון'); return; }
+    const language = document.getElementById('recipe-language-input').value.trim() || 'he';
+    const tags = document.getElementById('recipe-tags-input').value
+      .split(',').map(t => t.trim()).filter(Boolean);
+    const notes = document.getElementById('recipe-notes-input').value.trim() || null;
+    const payload = { name, mode: recipeFormMode, language, tags, notes };
+    const btn = document.getElementById('recipe-save-btn');
+    const orig = btn.innerHTML;
+    btn.innerHTML = '⏳';
+    btn.disabled = true;
+    try {
+      const url = editingRecipeId ? `/api/recipes/${editingRecipeId}` : '/api/recipes';
+      const method = editingRecipeId ? 'PATCH' : 'POST';
+      const r = await fetch(url, {
+        method,
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!r.ok) {
+        const detail = await r.json().catch(() => ({}));
+        throw new Error(detail.detail || `HTTP ${r.status}`);
+      }
+      await loadRecipes();
+      clearRecipeForm();
+    } catch (e) {
+      alert('שגיאה בשמירת המתכון: ' + e.message);
+    } finally {
+      btn.innerHTML = orig;
+      btn.disabled = false;
+    }
+  }
+
+  async function deleteRecipe(id) {
+    if (!confirm('למחוק את המתכון?')) return;
+    try {
+      const r = await fetch(`/api/recipes/${id}`, {
+        method: 'DELETE',
+        credentials: 'include',
+      });
+      if (!r.ok && r.status !== 204) {
+        const detail = await r.json().catch(() => ({}));
+        throw new Error(detail.detail || `HTTP ${r.status}`);
+      }
+      if (editingRecipeId === id) clearRecipeForm();
+      await loadRecipes();
+    } catch (e) {
+      alert('שגיאה במחיקה: ' + e.message);
+    }
+  }
+
+  // ESC closes the recipes modal too
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    const m = document.getElementById('recipes-modal');
+    if (m && m.classList.contains('open')) closeRecipesModal();
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // Insights modal — cross-lecture glossary + topic mastery
+  // ══════════════════════════════════════════════════════════════════════════
+  let insightsLoaded = false;
+
+  function openInsightsModal() {
+    document.getElementById('insights-modal').classList.add('open');
+    if (!insightsLoaded) {
+      loadGlossary();
+      loadMastery();
+      insightsLoaded = true;
+    }
+  }
+  function closeInsightsModal() {
+    document.getElementById('insights-modal').classList.remove('open');
+  }
+
+  async function loadGlossary() {
+    const content = document.getElementById('glossary-content');
+    const upd = document.getElementById('glossary-updated');
+    content.textContent = '';
+    upd.textContent = '';
+    const loading = document.createElement('div');
+    loading.style.color = 'var(--muted)';
+    loading.textContent = 'טוען...';
+    content.appendChild(loading);
+    try {
+      const r = await fetch('/api/glossary', { credentials: 'include' });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json();
+      renderGlossary(data);
+    } catch (e) {
+      content.textContent = '';
+      const err = document.createElement('div');
+      err.style.color = '#ef4444';
+      err.textContent = 'שגיאה בטעינת מילון: ' + e.message;
+      content.appendChild(err);
+    }
+  }
+
+  function renderGlossary(data) {
+    const content = document.getElementById('glossary-content');
+    const upd = document.getElementById('glossary-updated');
+    content.textContent = '';
+    if (data.updated_at) {
+      const d = new Date(data.updated_at);
+      upd.textContent = 'עודכן ' + d.toLocaleDateString('he-IL', { day:'2-digit', month:'2-digit', year:'numeric' });
+    } else {
+      upd.textContent = '';
+    }
+    const terms = data.terms || [];
+    if (!terms.length) {
+      const empty = document.createElement('div');
+      empty.style.color = 'var(--muted)';
+      empty.style.padding = '10px 0';
+      empty.textContent = 'אין מילון עדיין — לחץ "בנה מחדש" כדי לחלץ מונחים מההרצאות.';
+      content.appendChild(empty);
+      return;
+    }
+    terms.forEach(t => {
+      const row = document.createElement('div');
+      row.style.cssText = 'background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.1); border-radius:8px; padding:10px 12px; margin-bottom:8px;';
+      const nameEl = document.createElement('div');
+      nameEl.style.cssText = 'font-weight:600; font-size:.95rem; margin-bottom:4px;';
+      nameEl.textContent = t.term;
+      const defEl = document.createElement('div');
+      defEl.style.cssText = 'color:rgba(255,255,255,0.8); font-size:.88rem; line-height:1.5;';
+      defEl.textContent = t.definition;
+      row.appendChild(nameEl);
+      row.appendChild(defEl);
+      if ((t.sources || []).length) {
+        const srcEl = document.createElement('div');
+        srcEl.style.cssText = 'margin-top:6px; font-size:.75rem; color:var(--muted);';
+        srcEl.textContent = `מופיע ב-${t.sources.length} הרצאות`;
+        row.appendChild(srcEl);
+      }
+      content.appendChild(row);
+    });
+  }
+
+  async function refreshGlossary() {
+    const btn = document.getElementById('glossary-refresh-btn');
+    const orig = btn.innerHTML;
+    btn.innerHTML = '⏳ בונה...';
+    btn.disabled = true;
+    try {
+      const r = await fetch('/api/glossary/refresh', {
+        method: 'POST',
+        credentials: 'include',
+      });
+      if (!r.ok) {
+        const detail = await r.json().catch(() => ({}));
+        throw new Error(detail.detail || `HTTP ${r.status}`);
+      }
+      const data = await r.json();
+      renderGlossary(data);
+    } catch (e) {
+      alert('שגיאה בבניית המילון: ' + e.message);
+    } finally {
+      btn.innerHTML = orig;
+      btn.disabled = false;
+    }
+  }
+
+  async function loadMastery() {
+    const content = document.getElementById('mastery-content');
+    const totals = document.getElementById('mastery-totals');
+    content.textContent = '';
+    totals.textContent = '';
+    const loading = document.createElement('div');
+    loading.style.color = 'var(--muted)';
+    loading.textContent = 'טוען...';
+    content.appendChild(loading);
+    try {
+      const r = await fetch('/api/mastery', { credentials: 'include' });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json();
+      renderMastery(data);
+    } catch (e) {
+      content.textContent = '';
+      const err = document.createElement('div');
+      err.style.color = '#ef4444';
+      err.textContent = 'שגיאה בטעינת לוח השליטה: ' + e.message;
+      content.appendChild(err);
+    }
+  }
+
+  function renderMastery(data) {
+    const content = document.getElementById('mastery-content');
+    const totals = document.getElementById('mastery-totals');
+    content.textContent = '';
+    totals.textContent = '';
+
+    const t = data.totals || { cards: 0, mastered: 0, due: 0 };
+    const totalsItems = [
+      { label: 'סה״כ כרטיסיות', value: t.cards, color: 'rgba(124,58,237,0.18)' },
+      { label: 'נשלטו', value: t.mastered, color: 'rgba(34,197,94,0.18)' },
+      { label: 'לחזרה', value: t.due, color: 'rgba(245,158,11,0.18)' },
+    ];
+    totalsItems.forEach(item => {
+      const pill = document.createElement('div');
+      pill.style.cssText = `flex:1; min-width:110px; background:${item.color}; border:1px solid rgba(255,255,255,0.12); border-radius:8px; padding:8px 12px; text-align:center;`;
+      const v = document.createElement('div');
+      v.style.cssText = 'font-size:1.3rem; font-weight:700;';
+      v.textContent = item.value;
+      const l = document.createElement('div');
+      l.style.cssText = 'font-size:.75rem; color:var(--muted);';
+      l.textContent = item.label;
+      pill.appendChild(v); pill.appendChild(l);
+      totals.appendChild(pill);
+    });
+
+    const byTag = data.by_tag || [];
+    if (!byTag.length) {
+      const empty = document.createElement('div');
+      empty.style.color = 'var(--muted)';
+      empty.style.padding = '10px 0';
+      empty.textContent = 'אין כרטיסיות עדיין — עבד הרצאה כדי לבנות לוח שליטה.';
+      content.appendChild(empty);
+      return;
+    }
+    byTag.forEach(b => {
+      const row = document.createElement('div');
+      row.style.cssText = 'margin-bottom:10px;';
+      const headRow = document.createElement('div');
+      headRow.style.cssText = 'display:flex; justify-content:space-between; align-items:baseline; margin-bottom:4px;';
+      const tagEl = document.createElement('div');
+      tagEl.style.cssText = 'font-weight:600; font-size:.92rem;';
+      tagEl.textContent = '#' + b.tag;
+      const statsEl = document.createElement('div');
+      statsEl.style.cssText = 'font-size:.78rem; color:var(--muted);';
+      const dueTxt = b.due > 0 ? ` · ${b.due} לחזרה` : '';
+      statsEl.textContent = `${b.mastered}/${b.total} (${b.mastery_pct}%)${dueTxt}`;
+      headRow.appendChild(tagEl);
+      headRow.appendChild(statsEl);
+      const bar = document.createElement('div');
+      bar.style.cssText = 'background:rgba(255,255,255,0.08); border-radius:6px; height:8px; overflow:hidden;';
+      const fill = document.createElement('div');
+      const pct = Math.max(0, Math.min(100, b.mastery_pct || 0));
+      fill.style.cssText = `width:${pct}%; height:100%; background:linear-gradient(90deg, rgba(124,58,237,0.85), rgba(99,102,241,0.85));`;
+      bar.appendChild(fill);
+      row.appendChild(headRow);
+      row.appendChild(bar);
+      content.appendChild(row);
+    });
+  }
+
+  // ESC closes the insights modal too
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    const m = document.getElementById('insights-modal');
+    if (m && m.classList.contains('open')) closeInsightsModal();
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // Webhooks — outgoing Slack/Discord notifications
+  // ══════════════════════════════════════════════════════════════════════════
+  let webhookFormKind = 'slack';
+
+  function openWebhooksModal() {
+    document.getElementById('webhooks-modal').classList.add('open');
+    loadWebhooks();
+  }
+  function closeWebhooksModal() {
+    document.getElementById('webhooks-modal').classList.remove('open');
+  }
+
+  function selectWebhookKind(el) {
+    document.querySelectorAll('.webhook-kind-opt').forEach(b => {
+      b.classList.remove('selected');
+      b.style.background = 'rgba(255,255,255,0.06)';
+      b.style.border = '1px solid rgba(255,255,255,0.15)';
+    });
+    el.classList.add('selected');
+    el.style.background = 'rgba(124,58,237,0.2)';
+    el.style.border = '1px solid rgba(124,58,237,0.5)';
+    webhookFormKind = el.dataset.kind;
+    document.getElementById('webhook-url-input').placeholder =
+      webhookFormKind === 'slack'
+        ? 'https://hooks.slack.com/services/...'
+        : 'https://discord.com/api/webhooks/...';
+  }
+
+  async function loadWebhooks() {
+    const list = document.getElementById('webhooks-list');
+    if (!list) return;
+    list.textContent = '';
+    const loading = document.createElement('div');
+    loading.style.color = 'var(--muted)';
+    loading.style.fontSize = '.9rem';
+    loading.style.textAlign = 'center';
+    loading.style.padding = '8px 0';
+    loading.textContent = 'טוען...';
+    list.appendChild(loading);
+    try {
+      const r = await fetch('/api/webhooks', { credentials: 'include' });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json();
+      renderWebhooksList(data.webhooks || []);
+    } catch (e) {
+      list.textContent = '';
+      const err = document.createElement('div');
+      err.style.color = '#ef4444';
+      err.textContent = 'שגיאה: ' + e.message;
+      list.appendChild(err);
+    }
+  }
+
+  function renderWebhooksList(items) {
+    const list = document.getElementById('webhooks-list');
+    list.textContent = '';
+    if (!items.length) {
+      const empty = document.createElement('div');
+      empty.style.color = 'var(--muted)';
+      empty.style.fontSize = '.9rem';
+      empty.style.textAlign = 'center';
+      empty.style.padding = '14px 0';
+      empty.textContent = 'אין webhooks מוגדרים. הוסף אחד למטה.';
+      list.appendChild(empty);
+      return;
+    }
+    const kindLabel = { slack: '💬 Slack', discord: '🎮 Discord' };
+    items.forEach(w => {
+      const row = document.createElement('div');
+      row.style.cssText = 'background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.12); border-radius:8px; padding:10px 12px; display:flex; align-items:center; gap:10px;';
+      const info = document.createElement('div');
+      info.style.cssText = 'flex:1; min-width:0;';
+      const head = document.createElement('div');
+      head.style.cssText = 'font-weight:600; font-size:.9rem;';
+      head.textContent = kindLabel[w.kind] || w.kind;
+      const urlEl = document.createElement('div');
+      urlEl.style.cssText = 'font-size:.75rem; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; direction:ltr;';
+      urlEl.title = w.url;
+      urlEl.textContent = w.url;
+      info.appendChild(head);
+      info.appendChild(urlEl);
+
+      const toggleBtn = document.createElement('button');
+      toggleBtn.type = 'button';
+      toggleBtn.title = w.enabled ? 'השבת' : 'הפעל';
+      toggleBtn.textContent = w.enabled ? '🟢' : '⚪';
+      toggleBtn.style.cssText = 'background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.15); color:#fff; padding:6px 10px; border-radius:6px; cursor:pointer;';
+      toggleBtn.addEventListener('click', () => toggleWebhook(w.id, !w.enabled));
+
+      const delBtn = document.createElement('button');
+      delBtn.type = 'button';
+      delBtn.title = 'מחק';
+      delBtn.textContent = '🗑️';
+      delBtn.style.cssText = 'background:rgba(239,68,68,0.15); border:1px solid rgba(239,68,68,0.4); color:#fff; padding:6px 10px; border-radius:6px; cursor:pointer;';
+      delBtn.addEventListener('click', () => deleteWebhook(w.id));
+
+      row.appendChild(info);
+      row.appendChild(toggleBtn);
+      row.appendChild(delBtn);
+      list.appendChild(row);
+    });
+  }
+
+  async function createWebhook() {
+    const url = document.getElementById('webhook-url-input').value.trim();
+    if (!url) { alert('יש להזין URL'); return; }
+    if (!url.startsWith('https://')) { alert('URL חייב להתחיל ב-https://'); return; }
+    const btn = document.getElementById('webhook-save-btn');
+    const orig = btn.innerHTML;
+    btn.innerHTML = '⏳';
+    btn.disabled = true;
+    try {
+      const r = await fetch('/api/webhooks', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind: webhookFormKind, url }),
+      });
+      if (!r.ok) {
+        const detail = await r.json().catch(() => ({}));
+        throw new Error(detail.detail || `HTTP ${r.status}`);
+      }
+      document.getElementById('webhook-url-input').value = '';
+      await loadWebhooks();
+    } catch (e) {
+      alert('שגיאה בהוספה: ' + e.message);
+    } finally {
+      btn.innerHTML = orig;
+      btn.disabled = false;
+    }
+  }
+
+  async function toggleWebhook(id, enabled) {
+    try {
+      const r = await fetch(`/api/webhooks/${id}`, {
+        method: 'PATCH',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      await loadWebhooks();
+    } catch (e) {
+      alert('שגיאה בעדכון: ' + e.message);
+    }
+  }
+
+  async function deleteWebhook(id) {
+    if (!confirm('למחוק את ה-webhook?')) return;
+    try {
+      const r = await fetch(`/api/webhooks/${id}`, {
+        method: 'DELETE',
+        credentials: 'include',
+      });
+      if (!r.ok && r.status !== 204) throw new Error(`HTTP ${r.status}`);
+      await loadWebhooks();
+    } catch (e) {
+      alert('שגיאה במחיקה: ' + e.message);
+    }
+  }
+
+  // ESC closes the webhooks modal too
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    const m = document.getElementById('webhooks-modal');
+    if (m && m.classList.contains('open')) closeWebhooksModal();
   });
 
   // ── Provider capabilities (filters the mode selector) ─────────────────────
@@ -6553,6 +7530,7 @@
       loadSharedLesson(shareMatch[1]);
     } else {
       loadCapabilities();
+      loadRecipes();
       startLiveTasksPolling();
     }
   });
