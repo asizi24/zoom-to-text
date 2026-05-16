@@ -14,26 +14,101 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Rubik:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <script>
+    // Pre-paint theme resolver — runs before stylesheet to avoid FOUC.
+    // Honors localStorage override; else falls through to prefers-color-scheme media query.
+    (function () {
+      try {
+        var saved = localStorage.getItem('z2t-theme');
+        if (saved === 'light' || saved === 'dark') {
+          document.documentElement.dataset.theme = saved;
+        }
+      } catch (e) { /* localStorage may be blocked — silent */ }
+    })();
+  </script>
   <style>
     :root {
-      --accent1: #7c3aed;
-      --accent2: #db2777;
-      --accent-g: linear-gradient(135deg, #7c3aed, #db2777);
+      /* Dark mode (default) — refreshed palette, WCAG AA on muted text */
+      --accent1: #8b5cf6;
+      --accent2: #ec4899;
+      --accent-g: linear-gradient(135deg, #8b5cf6, #ec4899);
       --success: #10b981;
       --error:   #ef4444;
       --warning: #f59e0b;
-      --text:    #e2e8f0;
-      --muted:   rgba(226,232,240,.75);
-      --border:  rgba(255,255,255,.1);
-      --card-bg: rgba(255,255,255,.055);
+      --text:    #e8edf5;
+      --muted:   rgba(232,237,245,.78);
+      --border:  rgba(255,255,255,.12);
+      --card-bg: rgba(255,255,255,.06);
+      --bg-base: #090b14;
       --radius:  24px;
       --shadow:  0 32px 80px rgba(0,0,0,.6), 0 0 0 1px rgba(139,92,246,.15), inset 0 1px 0 rgba(255,255,255,.1);
+      --mesh-opacity: 1;
+      color-scheme: dark;
+    }
+    /* Explicit light override (manual toggle) */
+    :root[data-theme="light"] {
+      --accent1: #6d28d9;
+      --accent2: #be185d;
+      --accent-g: linear-gradient(135deg, #6d28d9, #be185d);
+      --text:    #1a1730;
+      --muted:   #4c4666;
+      --border:  rgba(20,15,40,.12);
+      --card-bg: rgba(255,255,255,.72);
+      --bg-base: #f5f3ff;
+      --shadow:  0 20px 60px rgba(60,40,120,.18), 0 0 0 1px rgba(124,58,237,.08), inset 0 1px 0 rgba(255,255,255,.6);
+      --mesh-opacity: .35;
+      color-scheme: light;
+    }
+    /* System-light fallback when user has not manually toggled */
+    @media (prefers-color-scheme: light) {
+      :root:not([data-theme="dark"]):not([data-theme="light"]) {
+        --accent1: #6d28d9;
+        --accent2: #be185d;
+        --accent-g: linear-gradient(135deg, #6d28d9, #be185d);
+        --text:    #1a1730;
+        --muted:   #4c4666;
+        --border:  rgba(20,15,40,.12);
+        --card-bg: rgba(255,255,255,.72);
+        --bg-base: #f5f3ff;
+        --shadow:  0 20px 60px rgba(60,40,120,.18), 0 0 0 1px rgba(124,58,237,.08), inset 0 1px 0 rgba(255,255,255,.6);
+        --mesh-opacity: .35;
+        color-scheme: light;
+      }
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
 
+    /* ── A11y utilities ── */
+    .sr-only {
+      position: absolute !important;
+      width: 1px; height: 1px;
+      padding: 0; margin: -1px;
+      overflow: hidden; clip: rect(0, 0, 0, 0);
+      white-space: nowrap; border: 0;
+    }
+    .skip-link {
+      position: absolute;
+      inset-block-start: -100px;
+      inset-inline-start: 16px;
+      z-index: 10000;
+      padding: 12px 20px;
+      background: var(--accent-g, linear-gradient(135deg, #7c3aed, #db2777));
+      color: #fff;
+      border-radius: 12px;
+      font-weight: 600;
+      text-decoration: none;
+      box-shadow: 0 8px 24px rgba(0,0,0,.4);
+      transition: inset-block-start .2s ease;
+    }
+    .skip-link:focus,
+    .skip-link:focus-visible {
+      inset-block-start: 16px;
+      outline: 3px solid #fff;
+      outline-offset: 2px;
+    }
+
     body {
       font-family: 'Inter', 'Rubik', system-ui, sans-serif;
-      background: #090b14;
+      background: var(--bg-base);
       color: var(--text);
       min-height: 100vh;
       display: flex;
@@ -41,6 +116,7 @@
       align-items: center;
       padding: 0 20px 80px;
       overflow-x: hidden;
+      transition: background-color .3s ease, color .3s ease;
     }
 
     /* ── Background orbs ── */
@@ -56,6 +132,15 @@
     .orb1 { width: 600px; height: 600px; background: #4a1d8a; top: -160px; right: -120px; opacity: .16; }
     .orb2 { width: 450px; height: 450px; background: #9d174d; bottom: 60px; left: -100px; opacity: .09; }
     .orb3 { width: 350px; height: 350px; background: #1e3a8a; top: 45%; left: 50%; transform: translate(-50%,-50%); opacity: .07; }
+    /* Light mode — dial mesh + orbs way down so they don't bleach readability */
+    :root[data-theme="light"] .orb1 { opacity: .06; background: #8b5cf6; }
+    :root[data-theme="light"] .orb2 { opacity: .05; background: #ec4899; }
+    :root[data-theme="light"] .orb3 { opacity: .04; background: #6366f1; }
+    @media (prefers-color-scheme: light) {
+      :root:not([data-theme="dark"]):not([data-theme="light"]) .orb1 { opacity: .06; background: #8b5cf6; }
+      :root:not([data-theme="dark"]):not([data-theme="light"]) .orb2 { opacity: .05; background: #ec4899; }
+      :root:not([data-theme="dark"]):not([data-theme="light"]) .orb3 { opacity: .04; background: #6366f1; }
+    }
 
     /* ── Layout ── */
     .wrapper { position: relative; z-index: 1; width: 100%; max-width: 600px; padding-top: 56px; }
@@ -128,7 +213,7 @@
       z-index: 0;
       pointer-events: none;
       overflow: hidden;
-      opacity: .65;
+      opacity: calc(.65 * var(--mesh-opacity, 1));
     }
     .mesh-bg::before,
     .mesh-bg::after {
@@ -350,14 +435,19 @@
       background: rgba(0,0,0,.3); border-radius: 14px; padding: 4px;
     }
     .tab {
-      flex: 1; padding: 11px 0; border-radius: 10px; text-align: center;
+      flex: 1; padding: 12px 8px; min-height: 44px; border-radius: 10px; text-align: center;
       font-size: .88rem; font-weight: 600; cursor: pointer;
       color: var(--muted); transition: all .22s; border: none; background: none;
+      font-family: inherit;
     }
     .tab:hover:not(.active) { color: rgba(255,255,255,.65); }
     .tab.active {
       background: var(--accent-g); color: #fff;
       box-shadow: 0 4px 16px rgba(124,58,237,.4);
+    }
+    .tab:focus-visible {
+      outline: 2px solid var(--accent1);
+      outline-offset: 2px;
     }
     .tab-pane { display: none; }
     .tab-pane.active { display: block; animation: fadeIn .25s; }
@@ -425,7 +515,7 @@
     }
     .mode-icon { font-size: 1.5rem; margin-bottom: 6px; }
     .mode-name { font-weight: 700; font-size: .8rem; color: var(--text); margin-bottom: 3px; }
-    .mode-desc { font-size: .7rem; color: var(--muted); line-height: 1.4; }
+    .mode-desc { font-size: clamp(.76rem, 1.7vw, .85rem); color: var(--muted); line-height: 1.4; }
     .mode-opt.selected .mode-name { color: #c4b5fd; }
     .mode-opt.selected .mode-desc { color: rgba(196,181,253,.78); }
 
@@ -940,7 +1030,7 @@
       margin-bottom: 4px;
     }
     .hero-stat-label {
-      font-size: .68rem;
+      font-size: clamp(.72rem, 1.6vw, .82rem);
       color: rgba(196,181,253,.7);
       letter-spacing: .08em;
       text-transform: uppercase;
@@ -953,7 +1043,7 @@
       .hero-stats { gap: 0; }
       .hero-stat { padding: 0 12px; min-width: 56px; }
       .hero-stat-num { font-size: 1.25rem; }
-      .hero-stat-label { font-size: .6rem; }
+      /* keep clamp; do not regress below 11.5px */
     }
 
     /* Hero block must NOT print — print-header takes its place */
@@ -998,7 +1088,8 @@
       text-transform: uppercase; padding-inline-end: 6px; white-space: nowrap; flex-shrink: 0;
     }
     .action-btn {
-      padding: 8px 18px;
+      padding: 10px 18px;
+      min-height: 44px;
       border: 1px solid rgba(255,255,255,.12);
       background: rgba(255,255,255,.05);
       border-radius: 99px; font-size: .82rem; font-weight: 500;
@@ -1006,24 +1097,33 @@
       display: flex; align-items: center; gap: 6px; font-family: inherit;
     }
     .action-btn:hover { border-color: rgba(124,58,237,.5); color: #c4b5fd; background: rgba(124,58,237,.1); }
+    .action-btn:focus-visible {
+      outline: 2px solid var(--accent1);
+      outline-offset: 2px;
+    }
     .action-btn.success-flash { border-color: var(--success); color: #6ee7b7; }
     .action-btn.back-btn { color: rgba(255,255,255,.85); }
     .action-btn.back-btn:hover { border-color: rgba(255,255,255,.35); color: #fff; background: rgba(255,255,255,.08); }
-    /* Export buttons: smaller + slightly dimmer */
-    .action-btn-export { font-size: .78rem; padding: 6px 13px; opacity: .8; }
+    /* Export buttons: smaller visual weight but still 44px tap height */
+    .action-btn-export { font-size: .78rem; padding: 8px 14px; min-height: 44px; opacity: .8; }
     .action-btn-export:hover { opacity: 1; }
 
     /* ── Copyable ── */
     .copyable-wrap { position: relative; }
     .copy-btn {
       position: absolute; top: 0; left: 0;
-      padding: 4px 12px;
+      padding: 10px 14px;
+      min-height: 44px; min-width: 44px;
       background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.12);
-      border-radius: 8px; font-size: .75rem; cursor: pointer;
+      border-radius: 8px; font-size: .78rem; cursor: pointer;
       color: var(--muted); transition: all .2s; display: flex; align-items: center; gap: 4px;
       font-family: inherit;
     }
     .copy-btn:hover { border-color: rgba(124,58,237,.5); color: #c4b5fd; }
+    .copy-btn:focus-visible {
+      outline: 2px solid var(--accent1);
+      outline-offset: 2px;
+    }
     .copy-btn.copied { border-color: var(--success); color: #6ee7b7; }
     .summary-text {
       line-height: 1.95; color: var(--text); font-size: .98rem;
@@ -1116,6 +1216,13 @@
       cursor: pointer; color: #a78bfa; font-size: .88rem;
       font-weight: 500; text-decoration: underline;
       margin-top: 10px; display: inline-block;
+      background: none; border: none; padding: 0;
+      font-family: inherit; text-align: inherit;
+    }
+    .transcript-toggle:focus-visible {
+      outline: 2px solid #a78bfa;
+      outline-offset: 3px;
+      border-radius: 4px;
     }
     .transcript-box {
       display: none; margin-top: 10px; padding: 16px;
@@ -1887,28 +1994,28 @@
 
       .card { padding: 20px 18px; border-radius: 18px; }
 
-      .tab { font-size: .8rem; padding: 9px 0; }
+      .tab { font-size: .85rem; padding: 12px 6px; min-height: 44px; }
 
       .url-input { font-size: .88rem; padding: 12px 14px; }
 
       .mode-row { gap: 7px; }
-      .mode-opt { padding: 11px 6px; border-radius: 12px; }
+      .mode-opt { padding: 14px 8px; border-radius: 12px; min-height: 44px; }
       .mode-icon { font-size: 1.3rem; margin-bottom: 4px; }
-      .mode-name { font-size: .72rem; }
-      .mode-desc { font-size: .63rem; }
+      .mode-name { font-size: .82rem; }
+      /* .mode-desc keeps clamp() from the base rule */
 
-      .btn { padding: 13px 32px; font-size: .95rem; border-radius: 12px; }
+      .btn { padding: 14px 32px; min-height: 48px; font-size: .95rem; border-radius: 12px; }
 
       .results-actions { gap: 8px; }
       .results-secondary { padding: 6px 10px; gap: 5px; }
-      .action-btn { padding: 7px 14px; font-size: .78rem; }
-      .action-btn-export { font-size: .73rem; padding: 5px 10px; }
+      .action-btn { padding: 10px 14px; min-height: 44px; font-size: .82rem; }
+      .action-btn-export { font-size: .78rem; padding: 10px 14px; min-height: 44px; }
 
       .section-title { font-size: 1rem; }
 
       .q-card { padding: 16px 14px; }
-      .q-text { font-size: .88rem; }
-      .opt-btn { padding: 10px 12px; font-size: .85rem; }
+      .q-text { font-size: .92rem; }
+      .opt-btn { padding: 12px 14px; min-height: 44px; font-size: .9rem; }
 
       .chapter { padding: 14px 16px; }
 
@@ -2944,6 +3051,28 @@
       transition: background .15s, color .15s;
     }
     .about-toggle:hover { background: rgba(255,255,255,.14); color: #fff; }
+    :root[data-theme="light"] .about-toggle {
+      background: rgba(20,15,40,.08);
+      border-color: rgba(20,15,40,.16);
+      color: #1a1730;
+    }
+    :root[data-theme="light"] .about-toggle:hover {
+      background: rgba(20,15,40,.14);
+      color: #000;
+    }
+    @media (prefers-color-scheme: light) {
+      :root:not([data-theme="dark"]):not([data-theme="light"]) .about-toggle {
+        background: rgba(20,15,40,.08);
+        border-color: rgba(20,15,40,.16);
+        color: #1a1730;
+      }
+    }
+    .theme-toggle {
+      min-width: 44px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
     .about-overlay {
       position: fixed;
       inset: 0;
@@ -3098,6 +3227,58 @@
     }
     .about-close:hover { background: rgba(255,255,255,.16); color: #fff; }
 
+    /* ── Bottom-sheet modals on small screens (Phase 5) ─────────────────
+       All four overlays (about, webhooks, insights, recipes) share the
+       .about-overlay / .profile-card-wrap / .profile-card skeleton, so
+       targeting them here flips all of them at once. */
+    @media (max-width: 540px) {
+      .about-overlay {
+        align-items: flex-end;
+        padding: 0;
+      }
+      .profile-card-wrap {
+        max-width: 100%;
+        transform: translateY(100%);
+        transition: transform .32s cubic-bezier(.2,.85,.2,1);
+      }
+      .about-overlay.open .profile-card-wrap { transform: translateY(0); }
+      .profile-card-wrap::before { display: none; } /* drop the desktop glow */
+      .profile-card {
+        width: 100%;
+        max-height: 88vh;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        -webkit-overflow-scrolling: touch;
+        border-radius: 22px 22px 0 0;
+        padding: 30px 22px 28px;
+        /* drag-handle pill at the top */
+        padding-top: 30px;
+      }
+      .profile-card::before {
+        content: '';
+        position: absolute;
+        top: 8px;
+        left: 50%;
+        transform: translateX(-50%);
+        width: 44px;
+        height: 4px;
+        border-radius: 99px;
+        background: rgba(255,255,255,.28);
+        pointer-events: none;
+      }
+      .about-close {
+        top: 14px;
+        inset-inline-end: 14px;
+        width: 36px; height: 36px;
+        font-size: 1rem;
+      }
+      .profile-card-wrap.dragging { transition: none; }
+    }
+    :root[data-theme="light"] .profile-card::before { background: rgba(20,15,40,.22); }
+    @media (prefers-reduced-motion: reduce) {
+      .profile-card-wrap { transition: none !important; }
+    }
+
     .provider-badge {
       display: inline-block;
       padding: 2px 10px;
@@ -3115,6 +3296,8 @@
   </style>
 </head>
 <body>
+  <a href="#main-content" class="skip-link">דלג לתוכן הראשי</a>
+
   <!-- About button (opens profile card modal) -->
   <button type="button" class="about-toggle" onclick="openAbout()">👤 עליי</button>
 
@@ -3130,12 +3313,19 @@
     🔔 התראות
   </button>
 
+  <!-- Theme toggle (light/dark) -->
+  <button type="button" class="about-toggle theme-toggle" id="theme-toggle"
+          aria-pressed="false" aria-label="החלף מצב כהה או בהיר"
+          style="right:368px;" title="החלף מצב כהה / בהיר">
+    <span id="theme-toggle-icon" aria-hidden="true">🌙</span>
+  </button>
+
   <!-- Webhooks modal — Slack/Discord notifications config -->
-  <div class="about-overlay" id="webhooks-modal" onclick="if(event.target===this)closeWebhooksModal()">
+  <div class="about-overlay" id="webhooks-modal" role="dialog" aria-modal="true" aria-labelledby="webhooks-modal-title" aria-hidden="true" tabindex="-1" onclick="if(event.target===this)closeWebhooksModal()">
     <div class="profile-card-wrap">
       <div class="profile-card" style="text-align:right; max-width:560px;">
         <button type="button" class="about-close" onclick="closeWebhooksModal()" aria-label="סגור">✕</button>
-        <h2 class="profile-name" style="margin-bottom:8px;">🔔 התראות יוצאות</h2>
+        <h2 class="profile-name" id="webhooks-modal-title" style="margin-bottom:8px;">🔔 התראות יוצאות</h2>
         <p class="profile-bio" style="margin-bottom:18px;">
           קבל הודעה ב-Slack או ב-Discord כשעיבוד של הרצאה מסתיים.
           הוסף Incoming Webhook URL (חייב להתחיל ב-<code>https://</code>).
@@ -3153,7 +3343,7 @@
             <button type="button" class="webhook-kind-opt" data-kind="discord" onclick="selectWebhookKind(this)"
                     style="flex:1; padding:8px 10px; background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.15); border-radius:8px; color:#fff; cursor:pointer; font-size:.9rem;">🎮 Discord</button>
           </div>
-          <input type="url" id="webhook-url-input" placeholder="https://hooks.slack.com/services/..." maxlength="2000"
+          <input type="url" id="webhook-url-input" aria-label="כתובת Webhook" placeholder="https://hooks.slack.com/services/..." maxlength="2000"
                  style="width:100%; padding:10px 12px; background:rgba(0,0,0,0.25); border:1px solid rgba(255,255,255,0.15); border-radius:8px; color:#fff; margin-bottom:12px; font-size:.9rem; direction:ltr; text-align:left;">
           <button type="button" class="action-btn" onclick="createWebhook()" id="webhook-save-btn" style="width:100%;">💾 הוסף</button>
         </div>
@@ -3162,11 +3352,11 @@
   </div>
 
   <!-- Insights modal — glossary + topic mastery -->
-  <div class="about-overlay" id="insights-modal" onclick="if(event.target===this)closeInsightsModal()">
+  <div class="about-overlay" id="insights-modal" role="dialog" aria-modal="true" aria-labelledby="insights-modal-title" aria-hidden="true" tabindex="-1" onclick="if(event.target===this)closeInsightsModal()">
     <div class="profile-card-wrap">
       <div class="profile-card" style="text-align:right; max-width:680px; max-height:85vh; overflow-y:auto;">
         <button type="button" class="about-close" onclick="closeInsightsModal()" aria-label="סגור">✕</button>
-        <h2 class="profile-name" style="margin-bottom:6px;">📊 לימוד שלי</h2>
+        <h2 class="profile-name" id="insights-modal-title" style="margin-bottom:6px;">📊 לימוד שלי</h2>
         <p class="profile-bio" style="margin-bottom:14px;">
           תצוגה חוצת-הרצאות של מונחים שכבר נחשפת אליהם והרמה בה כל נושא נמצא.
         </p>
@@ -3200,14 +3390,14 @@
   </div>
 
   <!-- About modal — Asaf Zitun profile card -->
-  <div class="about-overlay" id="about-overlay" onclick="if(event.target===this)closeAbout()">
+  <div class="about-overlay" id="about-overlay" role="dialog" aria-modal="true" aria-labelledby="about-modal-title" aria-hidden="true" tabindex="-1" onclick="if(event.target===this)closeAbout()">
     <div class="profile-card-wrap">
       <div class="profile-card">
         <button type="button" class="about-close" onclick="closeAbout()" aria-label="סגור">✕</button>
         <div class="profile-avatar">
           <div class="profile-avatar-inner">A</div>
         </div>
-        <h2 class="profile-name">Asaf Zitun</h2>
+        <h2 class="profile-name" id="about-modal-title">Asaf Zitun</h2>
         <p class="profile-title" id="profile-title-text">מהנדס DevOps</p>
         <p class="profile-bio" id="profile-bio-text">
           CI/CD ב-GitHub Actions · Docker · Kubernetes · Terraform · Fly.io ו-GCP.
@@ -3237,11 +3427,11 @@
   </div>
 
   <!-- Recipes modal — saved processing presets -->
-  <div class="about-overlay" id="recipes-modal" onclick="if(event.target===this)closeRecipesModal()">
+  <div class="about-overlay" id="recipes-modal" role="dialog" aria-modal="true" aria-labelledby="recipes-modal-title" aria-hidden="true" tabindex="-1" onclick="if(event.target===this)closeRecipesModal()">
     <div class="profile-card-wrap">
       <div class="profile-card" style="text-align:right; max-width:560px;">
         <button type="button" class="about-close" onclick="closeRecipesModal()" aria-label="סגור">✕</button>
-        <h2 class="profile-name" style="margin-bottom:8px;">📋 מתכוני שיעור</h2>
+        <h2 class="profile-name" id="recipes-modal-title" style="margin-bottom:8px;">📋 מתכוני שיעור</h2>
         <p class="profile-bio" style="margin-bottom:18px;">
           שמור הגדרות עיבוד שאתה משתמש בהן הרבה (מצב, שפה, תגיות).
           הבחירה במתכון תמלא אוטומטית את טופס היצירה.
@@ -3254,7 +3444,7 @@
         <!-- New / Edit form -->
         <div style="background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.1); border-radius:10px; padding:14px;">
           <div style="font-weight:600; margin-bottom:10px;" id="recipe-form-title">מתכון חדש</div>
-          <input type="text" id="recipe-name-input" placeholder="שם המתכון (לדוגמה: הרצאה / ישיבה)" maxlength="120"
+          <input type="text" id="recipe-name-input" aria-label="שם המתכון" placeholder="שם המתכון (לדוגמה: הרצאה / ישיבה)" maxlength="120"
                  style="width:100%; padding:10px 12px; background:rgba(0,0,0,0.25); border:1px solid rgba(255,255,255,0.15); border-radius:8px; color:#fff; margin-bottom:10px; font-size:.95rem; direction:rtl;">
           <div style="font-size:.85rem; color:var(--muted); margin-bottom:6px;">מצב עיבוד</div>
           <div id="recipe-mode-row" style="display:flex; gap:8px; margin-bottom:12px; flex-wrap:wrap;">
@@ -3262,11 +3452,11 @@
             <button type="button" class="recipe-mode-opt" data-mode="whisper_local" onclick="selectRecipeMode(this)" style="flex:1; min-width:120px; padding:8px 10px; background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.15); border-radius:8px; color:#fff; cursor:pointer; font-size:.85rem;">🔒 Whisper מקומי</button>
             <button type="button" class="recipe-mode-opt" data-mode="whisper_api" onclick="selectRecipeMode(this)" style="flex:1; min-width:120px; padding:8px 10px; background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.15); border-radius:8px; color:#fff; cursor:pointer; font-size:.85rem;">☁️ Whisper API</button>
           </div>
-          <input type="text" id="recipe-language-input" value="he" placeholder="שפה (he/en/...)" maxlength="10"
+          <input type="text" id="recipe-language-input" aria-label="שפת המתכון" value="he" placeholder="שפה (he/en/...)" maxlength="10"
                  style="width:100%; padding:10px 12px; background:rgba(0,0,0,0.25); border:1px solid rgba(255,255,255,0.15); border-radius:8px; color:#fff; margin-bottom:10px; font-size:.95rem; direction:rtl;">
-          <input type="text" id="recipe-tags-input" placeholder="תגיות מופרדות בפסיק (math, ai, lecture)" maxlength="200"
+          <input type="text" id="recipe-tags-input" aria-label="תגיות מופרדות בפסיק" placeholder="תגיות מופרדות בפסיק (math, ai, lecture)" maxlength="200"
                  style="width:100%; padding:10px 12px; background:rgba(0,0,0,0.25); border:1px solid rgba(255,255,255,0.15); border-radius:8px; color:#fff; margin-bottom:10px; font-size:.95rem; direction:rtl;">
-          <textarea id="recipe-notes-input" placeholder="הערות (אופציונלי)" rows="2" maxlength="2000"
+          <textarea id="recipe-notes-input" aria-label="הערות למתכון" placeholder="הערות (אופציונלי)" rows="2" maxlength="2000"
                     style="width:100%; padding:10px 12px; background:rgba(0,0,0,0.25); border:1px solid rgba(255,255,255,0.15); border-radius:8px; color:#fff; margin-bottom:12px; font-size:.95rem; direction:rtl; resize:vertical; font-family:inherit;"></textarea>
           <div style="display:flex; gap:8px;">
             <button type="button" class="action-btn" onclick="saveRecipeForm()" id="recipe-save-btn" style="flex:1;">💾 שמור</button>
@@ -3317,7 +3507,7 @@
   <div class="orb orb3"></div>
 </div>
 
-<main class="wrapper">
+<main class="wrapper" id="main-content">
 
   <!-- Brand -->
   <div class="brand">
@@ -3330,15 +3520,17 @@
 <div class="card" id="input-card">
 
   <!-- Tabs -->
-  <div class="tabs">
-    <button class="tab active" onclick="switchTab('url')">🔗 קישור הקלטה</button>
-    <button class="tab"        onclick="switchTab('file')">📁 העלאת קובץ</button>
+  <div class="tabs" role="tablist" aria-label="מקור התמלול">
+    <button type="button" class="tab active" role="tab" id="tab-url-trigger"  aria-selected="true"  aria-controls="tab-url"  tabindex="0"  data-tab-key="url"  onclick="switchTab('url')">🔗 קישור הקלטה</button>
+    <button type="button" class="tab"        role="tab" id="tab-file-trigger" aria-selected="false" aria-controls="tab-file" tabindex="-1" data-tab-key="file" onclick="switchTab('file')">📁 העלאת קובץ</button>
   </div>
 
   <!-- URL tab -->
-  <div class="tab-pane active" id="tab-url">
+  <div class="tab-pane active" id="tab-url" role="tabpanel" aria-labelledby="tab-url-trigger" tabindex="0">
     <div class="url-wrap">
       <input type="text" class="url-input" id="url-input"
+             aria-label="קישור להקלטה"
+             aria-describedby="input-error"
              placeholder="קישור Zoom / YouTube / Google Drive / …" />
     </div>
     <p class="url-hint">💡 תומך ב-Zoom, YouTube וכל קישור ש-yt-dlp יודע לפתוח. להקלטות Zoom פרטיות — השתמש בתוסף Chrome.</p>
@@ -3370,7 +3562,7 @@
   </div>
 
   <!-- File upload tab -->
-  <div class="tab-pane" id="tab-file">
+  <div class="tab-pane" id="tab-file" role="tabpanel" aria-labelledby="tab-file-trigger" tabindex="0">
     <div class="drop-zone" id="drop-zone" tabindex="0" role="button" aria-label="אזור גרירה — גרור קובץ או הקש Enter לבחירת קובץ">
       <div class="icon">☁️</div>
       <h3>גרור קובץ לכאן או לחץ לבחירה</h3>
@@ -3460,7 +3652,8 @@
     <button class="btn-glass" id="submit-btn" onclick="submit()">✨ עבד שיעור</button>
     <div class="kbd-hint">לחץ <kbd>Enter</kbd> לשליחה</div>
   </div>
-  <div class="error-box" id="error-box"></div>
+  <div class="error-box" id="error-box" role="alert" aria-live="assertive"></div>
+  <div class="sr-only" id="input-error" role="status" aria-live="polite"></div>
 </div>
 
 <!-- stats row -->
@@ -3656,7 +3849,7 @@
       שתף את ההרצאה עם משתמש ספציפי לפי אימייל (חייב להיות משתמש קיים במערכת).
     </p>
     <div style="display:flex; gap:8px; margin-bottom:12px;">
-      <input type="email" id="cohort-email-input" placeholder="email@example.com"
+      <input type="email" id="cohort-email-input" aria-label="כתובת אימייל לשיתוף" placeholder="email@example.com"
              onkeydown="if(event.key==='Enter'){event.preventDefault();grantCohortShare();}"
              style="flex:1; padding:8px 10px; background:rgba(0,0,0,0.25); border:1px solid rgba(255,255,255,0.15); border-radius:8px; color:#fff; font-size:.9rem; direction:ltr; text-align:left;">
       <button class="action-btn" id="cohort-add-btn" onclick="grantCohortShare()">➕ הוסף</button>
@@ -3693,7 +3886,7 @@
   <div id="notepad-section" style="display:none;">
     <div class="section-title">📝 הפנקס שלי</div>
     <div class="notepad-card">
-      <textarea id="notepad-textarea"
+      <textarea id="notepad-textarea" aria-label="פנקס רשימות אישי"
                 placeholder="כתוב כאן הערות אישיות, מחשבות, שאלות לזכור... ההערות נשמרות אוטומטית."
                 oninput="onNotepadInput()"></textarea>
       <div class="notepad-meta">
@@ -3710,14 +3903,14 @@
       <button class="speaker-toggle-btn active" id="speaker-mode-diarized" onclick="setTranscriptMode('diarized')">👥 לפי דוברים</button>
     </div>
     <div class="speaker-list" id="speaker-list" style="display:none;"></div>
-    <span class="transcript-toggle" onclick="toggleTranscript()">▶ הצג תמלול גולמי</span>
+    <button type="button" class="transcript-toggle" onclick="toggleTranscript()" aria-expanded="false" aria-controls="transcript-box">▶ הצג תמלול גולמי</button>
     <div class="transcript-box" id="transcript-box"></div>
   </div>
 
   <!-- Content Search -->
   <div style="margin-top:28px;" id="content-search-section" style="display:none;">
     <div class="result-search-row">
-      <input type="search" id="result-search-input" class="result-search-input"
+      <input type="search" id="result-search-input" class="result-search-input" aria-label="חיפוש בתוכן השיעור"
              placeholder="🔍 חפש בתוך השיעור..." dir="rtl"
              oninput="onResultSearch()" />
     </div>
@@ -3819,7 +4012,7 @@
     <button type="button" class="chat-quick-prompt" onclick="useQuickPrompt(this)">סכם את ההתערבויות שלי</button>
   </div>
   <div class="chat-input-row">
-    <textarea id="chat-input" rows="2" placeholder="שאל שאלה על השיעור..." dir="rtl"
+    <textarea id="chat-input" aria-label="שאלה לצ׳אט" rows="2" placeholder="שאל שאלה על השיעור..." dir="rtl"
       onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendChat();}"></textarea>
     <button class="chat-send-btn" id="chat-send-btn" onclick="sendChat()">שלח</button>
   </div>
@@ -3846,7 +4039,7 @@
   </div>
   <div class="history-controls">
     <div class="history-search-wrap">
-      <input type="search" id="history-search" class="history-search-input"
+      <input type="search" id="history-search" class="history-search-input" aria-label="חיפוש בהיסטוריה"
              placeholder="חיפוש בהקלטות..." oninput="onHistorySearch()" />
     </div>
     <button class="cram-select-btn" id="cram-select-btn" onclick="toggleCramSelect()">📚 בחר לתרגול משותף</button>
@@ -3869,7 +4062,7 @@
       <span class="ask-across-status">ה-AI מחפש בסיכומי כל ההקלטות שלך</span>
     </div>
     <div class="ask-across-row">
-      <input type="text" id="ask-across-input" class="ask-across-input"
+      <input type="text" id="ask-across-input" class="ask-across-input" aria-label="שאלה חוצת-הרצאות"
              placeholder="לדוגמה: מה הוחלט בפגישה האחרונה לגבי תקציב? איפה דיברנו על אומגה 3?"
              onkeydown="onAskAcrossKey(event)" />
       <button id="ask-across-btn" class="ask-across-btn" onclick="askAcrossLectures()">שאל</button>
@@ -3969,8 +4162,11 @@
   // ══════════════════════════════════════════════════════════════════════════
   function switchTab(tab) {
     currentTab = tab;
-    document.querySelectorAll('.tab').forEach((b,i) => {
-      b.classList.toggle('active', (tab === 'url' && i === 0) || (tab === 'file' && i === 1));
+    document.querySelectorAll('[role="tablist"] [role="tab"]').forEach(btn => {
+      const isActive = btn.dataset.tabKey === tab;
+      btn.classList.toggle('active', isActive);
+      btn.setAttribute('aria-selected', String(isActive));
+      btn.setAttribute('tabindex', isActive ? '0' : '-1');
     });
     document.getElementById('tab-url' ).classList.toggle('active', tab === 'url');
     document.getElementById('tab-file').classList.toggle('active', tab === 'file');
@@ -4963,6 +5159,7 @@
     const open = box.style.display === 'block';
     box.style.display = open ? 'none' : 'block';
     tog.textContent = (open ? '▶' : '▼') + ' ' + (open ? 'הצג תמלול גולמי' : 'הסתר תמלול');
+    tog.setAttribute('aria-expanded', String(!open));
   }
 
   // ── Speaker rendering helpers ─────────────────────────────────────────
@@ -7042,23 +7239,45 @@
     }, { passive: true });
   })();
 
+  // ── Modal a11y helpers ───────────────────────────────────────────────────
+  // Tracks which element to restore focus to when a modal closes.
+  const _modalReturnFocus = new Map();
+  function _openModal(id) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    _modalReturnFocus.set(id, document.activeElement);
+    el.classList.add('open');
+    el.setAttribute('aria-hidden', 'false');
+    // Focus the first focusable element inside (close button is reliable)
+    const closeBtn = el.querySelector('.about-close');
+    if (closeBtn) closeBtn.focus();
+  }
+  function _closeModal(id) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.classList.remove('open');
+    el.setAttribute('aria-hidden', 'true');
+    const ret = _modalReturnFocus.get(id);
+    if (ret && typeof ret.focus === 'function') ret.focus();
+    _modalReturnFocus.delete(id);
+  }
+
   // ── About modal (profile card) ───────────────────────────────────────────
-  function openAbout() {
-    document.getElementById('about-overlay').classList.add('open');
-  }
-  function closeAbout() {
-    document.getElementById('about-overlay').classList.remove('open');
-  }
+  function openAbout() { _openModal('about-overlay'); }
+  function closeAbout() { _closeModal('about-overlay'); }
   document.addEventListener('keydown', e => {
-    if (e.key === 'Escape' &&
-        document.getElementById('about-overlay').classList.contains('open')) {
-      closeAbout();
-    }
-    if (e.key === 'Escape') {
-      const cohort = document.getElementById('cohort-share-panel');
-      if (cohort && cohort.style.display !== 'none') {
-        closeCohortShare();
+    if (e.key !== 'Escape') return;
+    const modals = ['about-overlay', 'webhooks-modal', 'insights-modal', 'recipes-modal'];
+    for (const id of modals) {
+      const m = document.getElementById(id);
+      if (m && m.classList.contains('open')) {
+        _closeModal(id);
+        return;
       }
+    }
+    const cohort = document.getElementById('cohort-share-panel');
+    if (cohort && cohort.style.display !== 'none') {
+      closeCohortShare();
     }
   });
 
@@ -7070,11 +7289,11 @@
   let recipeFormMode = 'gemini_direct';
 
   function openRecipesModal() {
-    document.getElementById('recipes-modal').classList.add('open');
+    _openModal('recipes-modal');
     clearRecipeForm();
   }
   function closeRecipesModal() {
-    document.getElementById('recipes-modal').classList.remove('open');
+    _closeModal('recipes-modal');
   }
 
   function selectRecipeMode(el) {
@@ -7290,7 +7509,7 @@
   let insightsLoaded = false;
 
   function openInsightsModal() {
-    document.getElementById('insights-modal').classList.add('open');
+    _openModal('insights-modal');
     if (!insightsLoaded) {
       loadGlossary();
       loadMastery();
@@ -7298,7 +7517,7 @@
     }
   }
   function closeInsightsModal() {
-    document.getElementById('insights-modal').classList.remove('open');
+    _closeModal('insights-modal');
   }
 
   async function loadGlossary() {
@@ -7484,11 +7703,11 @@
   let webhookFormKind = 'slack';
 
   function openWebhooksModal() {
-    document.getElementById('webhooks-modal').classList.add('open');
+    _openModal('webhooks-modal');
     loadWebhooks();
   }
   function closeWebhooksModal() {
-    document.getElementById('webhooks-modal').classList.remove('open');
+    _closeModal('webhooks-modal');
   }
 
   function selectWebhookKind(el) {
@@ -7731,5 +7950,10 @@
     });
   }
 </script>
+
+<!-- A11y / UX modules (Phase 2-5 of redesign) -->
+<script src="/static/js/tabs.js" defer></script>
+<script src="/static/js/theme.js" defer></script>
+<script src="/static/js/modals.js" defer></script>
 </body>
 </html>

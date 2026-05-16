@@ -53,6 +53,10 @@ Thumbs.db
 *.pem
 key.json
 *.json
+!package.json
+!package-lock.json
+!lighthouserc.json
+!tsconfig.json
 
 # GCP Service Account keys (NEVER commit these!)
 key.json
@@ -81,3 +85,9 @@ _legacy_archive/
 # RuFlo / Claude-flow tooling (generated, never committed)
 .claude-flow/
 .swarm/
+
+# Node / Playwright / Lighthouse CI
+node_modules/
+playwright-report/
+test-results/
+.lighthouseci/

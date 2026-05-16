@@ -1,0 +1,17 @@
+{
+  "name": "zoom-to-text-a11y",
+  "private": true,
+  "version": "0.0.0",
+  "description": "A11y + Lighthouse CI test harness for the Zoom-to-Text UI (no app code).",
+  "scripts": {
+    "test:a11y": "playwright test tests-a11y/",
+    "test:lhci": "lhci autorun",
+    "test:a11y:install": "playwright install --with-deps chromium"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.10.0",
+    "@lhci/cli": "^0.14.0",
+    "@playwright/test": "^1.49.0",
+    "typescript": "^5.6.0"
+  }
+}
