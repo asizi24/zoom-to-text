@@ -224,15 +224,35 @@ async def create_task_from_upload(
 
 # ── Query tasks ───────────────────────────────────────────────────────────────────
 
+def _validate_iso(value: str | None, field: str) -> str | None:
+    """Reject garbage timestamps with 422 instead of leaking to SQLite."""
+    if value is None:
+        return None
+    from datetime import datetime
+    try:
+        # fromisoformat accepts both "2026-05-17" and "2026-05-17T10:09:23".
+        datetime.fromisoformat(value)
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"invalid ISO 8601 for {field}")
+    return value
+
+
 @router.get("/tasks", response_model=list)
 async def list_tasks(
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
     search: str | None = Query(None, max_length=200),
+    since: str | None = Query(None, max_length=40),
+    until: str | None = Query(None, max_length=40),
     user_id: str = Depends(get_current_user),
 ):
-    """Return recent processing jobs (newest first) with optional search and pagination."""
-    return await state.list_tasks(limit=limit, user_id=user_id, search=search, offset=offset)
+    """Return recent processing jobs (newest first) with optional search, date filter, pagination."""
+    since = _validate_iso(since, "since")
+    until = _validate_iso(until, "until")
+    return await state.list_tasks(
+        limit=limit, user_id=user_id, search=search, offset=offset,
+        since=since, until=until,
+    )
 
 
 @router.get("/tasks/{task_id}", response_model=TaskResponse)

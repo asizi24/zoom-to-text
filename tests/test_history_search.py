@@ -68,6 +68,84 @@ async def test_limit_is_respected_with_search(client):
     assert len(results) == 2
 
 
+# ── Date-filter DB tests ──────────────────────────────────────────────────────
+
+async def _backdate(task_id: str, iso: str) -> None:
+    """Force a task's created_at to a known ISO timestamp."""
+    from app import state
+    db = await state._get_db()
+    await db.execute("UPDATE tasks SET created_at=? WHERE id=?", [iso, task_id])
+    await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_since_filter_excludes_older_tasks(client):
+    """since= returns only tasks whose created_at >= the given ISO bound."""
+    from app import state
+    await state.create_task("dt_old", "https://example.com/old")
+    await state.create_task("dt_new", "https://example.com/new")
+    await _backdate("dt_old", "2025-01-01T00:00:00+00:00")
+    await _backdate("dt_new", "2026-05-01T00:00:00+00:00")
+
+    results = await state.list_tasks(since="2026-01-01T00:00:00+00:00")
+    ids = {r["id"] for r in results}
+    assert "dt_new" in ids
+    assert "dt_old" not in ids
+
+
+@pytest.mark.asyncio
+async def test_until_filter_excludes_newer_tasks(client):
+    """until= returns only tasks whose created_at <= the given ISO bound."""
+    from app import state
+    await state.create_task("dt_old2", "https://example.com/old2")
+    await state.create_task("dt_new2", "https://example.com/new2")
+    await _backdate("dt_old2", "2025-01-01T00:00:00+00:00")
+    await _backdate("dt_new2", "2026-05-01T00:00:00+00:00")
+
+    results = await state.list_tasks(until="2026-01-01T00:00:00+00:00")
+    ids = {r["id"] for r in results}
+    assert "dt_old2" in ids
+    assert "dt_new2" not in ids
+
+
+@pytest.mark.asyncio
+async def test_since_and_until_combine(client):
+    """since + until bracket a window inclusively."""
+    from app import state
+    await state.create_task("dt_a", "https://example.com/a")
+    await state.create_task("dt_b", "https://example.com/b")
+    await state.create_task("dt_c", "https://example.com/c")
+    await _backdate("dt_a", "2026-01-01T00:00:00+00:00")
+    await _backdate("dt_b", "2026-03-01T00:00:00+00:00")
+    await _backdate("dt_c", "2026-06-01T00:00:00+00:00")
+
+    results = await state.list_tasks(
+        since="2026-02-01T00:00:00+00:00",
+        until="2026-04-01T00:00:00+00:00",
+    )
+    ids = {r["id"] for r in results}
+    assert ids == {"dt_b"}
+
+
+@pytest.mark.asyncio
+async def test_date_filter_combines_with_search(client):
+    """search and since= apply together (AND, not OR)."""
+    from app import state
+    await state.create_task("dts1", "https://zoom.us/window/match")
+    await state.create_task("dts2", "https://zoom.us/window/match")
+    await state.create_task("dts3", "https://zoom.us/other/excluded")
+    await _backdate("dts1", "2025-12-01T00:00:00+00:00")
+    await _backdate("dts2", "2026-05-01T00:00:00+00:00")
+    await _backdate("dts3", "2026-05-01T00:00:00+00:00")
+
+    results = await state.list_tasks(
+        search="window/match",
+        since="2026-01-01T00:00:00+00:00",
+    )
+    ids = {r["id"] for r in results}
+    assert ids == {"dts2"}
+
+
 # ── Route-level tests ─────────────────────────────────────────────────────────
 
 def _login(client, monkeypatch) -> str:
@@ -94,6 +172,27 @@ def test_route_accepts_search_and_offset_params(client, monkeypatch):
     )
     assert r.status_code == 200
     assert isinstance(r.json(), list)
+
+
+def test_route_accepts_since_and_until_params(client, monkeypatch):
+    """GET /api/tasks?since=&until= must return 200, not 422."""
+    sid = _login(client, monkeypatch)
+    r = client.get(
+        "/api/tasks?since=2026-01-01T00:00:00&until=2026-12-31T23:59:59",
+        cookies={"session_id": sid},
+    )
+    assert r.status_code == 200
+    assert isinstance(r.json(), list)
+
+
+def test_route_rejects_invalid_since(client, monkeypatch):
+    """Garbage ISO bounds yield 422, not a 500 from SQLite."""
+    sid = _login(client, monkeypatch)
+    r = client.get(
+        "/api/tasks?since=not-a-date",
+        cookies={"session_id": sid},
+    )
+    assert r.status_code == 422
 
 
 @pytest.mark.asyncio

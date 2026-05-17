@@ -1784,6 +1784,48 @@
       box-shadow: 0 0 0 4px rgba(124,58,237,.1);
     }
     .history-search-input::placeholder { color: rgba(226,232,240,.4); }
+    .history-date-row {
+      display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end;
+    }
+    .history-date-field {
+      display: flex; flex-direction: column; gap: 4px;
+      flex: 1 1 140px; min-width: 0;
+    }
+    .history-date-field > span {
+      font-size: .75rem; color: var(--muted); padding-inline-start: 4px;
+    }
+    .history-date-input {
+      width: 100%;
+      padding: 10px 12px; min-height: 44px;
+      background: rgba(0,0,0,.3);
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 11px; color: var(--text);
+      font-size: .9rem; font-family: inherit;
+      outline: none; box-sizing: border-box;
+      color-scheme: dark;
+      transition: border-color .2s ease, background .2s ease, box-shadow .2s ease;
+    }
+    .history-date-input:focus {
+      border-color: rgba(124,58,237,.55);
+      background: rgba(0,0,0,.4);
+      box-shadow: 0 0 0 4px rgba(124,58,237,.1);
+    }
+    .history-date-clear {
+      padding: 10px 14px; min-height: 44px;
+      background: rgba(255,255,255,.04);
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 11px; cursor: pointer;
+      color: var(--muted); font-size: .82rem;
+      font-family: inherit; font-weight: 500;
+      transition: all .2s ease;
+    }
+    .history-date-clear:hover {
+      border-color: rgba(124,58,237,.4); color: #c4b5fd;
+      background: rgba(124,58,237,.08);
+    }
+    .history-date-clear:disabled {
+      opacity: .35; cursor: not-allowed;
+    }
     .history-pagination {
       display: flex; gap: 8px; margin-top: 14px;
     }
@@ -4078,6 +4120,20 @@
       <input type="search" id="history-search" class="history-search-input" aria-label="חיפוש בהיסטוריה"
              placeholder="חיפוש בהקלטות..." oninput="onHistorySearch()" />
     </div>
+    <div class="history-date-row">
+      <label class="history-date-field">
+        <span>מתאריך</span>
+        <input type="date" id="history-date-since" class="history-date-input"
+               aria-label="סינון מתאריך" onchange="onHistoryDateChange()" />
+      </label>
+      <label class="history-date-field">
+        <span>עד תאריך</span>
+        <input type="date" id="history-date-until" class="history-date-input"
+               aria-label="סינון עד תאריך" onchange="onHistoryDateChange()" />
+      </label>
+      <button type="button" class="history-date-clear" id="history-date-clear"
+              onclick="clearHistoryDates()" disabled>נקה תאריכים</button>
+    </div>
     <button class="cram-select-btn" id="cram-select-btn" onclick="toggleCramSelect()">📚 בחר לתרגול משותף</button>
     <button class="history-bulk-btn" id="history-bulk-btn" onclick="toggleBulkSelect()">🗂️ בחירה מרובה</button>
   </div>
@@ -5846,15 +5902,51 @@
     }, 300);
   }
 
+  function _getHistoryDateBounds() {
+    const sinceRaw = (document.getElementById('history-date-since') || {}).value || '';
+    const untilRaw = (document.getElementById('history-date-until') || {}).value || '';
+    // <input type="date"> returns YYYY-MM-DD. Expand to full-day bounds so the
+    // ISO comparison on created_at (which includes T...) brackets the day inclusively.
+    const since = sinceRaw ? `${sinceRaw}T00:00:00` : '';
+    const until = untilRaw ? `${untilRaw}T23:59:59` : '';
+    return { since, until, hasAny: !!(sinceRaw || untilRaw) };
+  }
+
+  function _syncHistoryDateClearBtn() {
+    const btn = document.getElementById('history-date-clear');
+    if (!btn) return;
+    const { hasAny } = _getHistoryDateBounds();
+    btn.disabled = !hasAny;
+  }
+
+  function onHistoryDateChange() {
+    historyOffset = 0;
+    _syncHistoryDateClearBtn();
+    renderHistoryPage();
+  }
+
+  function clearHistoryDates() {
+    const since = document.getElementById('history-date-since');
+    const until = document.getElementById('history-date-until');
+    if (since) since.value = '';
+    if (until) until.value = '';
+    historyOffset = 0;
+    _syncHistoryDateClearBtn();
+    renderHistoryPage();
+  }
+
   async function renderHistoryPage() {
     const container = document.getElementById('history-content');
     const search = document.getElementById('history-search').value.trim();
+    const { since, until } = _getHistoryDateBounds();
     container.innerHTML = '<div class="history-empty">טוען...</div>';
 
     // Fetch one extra item to detect whether a next page exists
     const fetchLimit = HISTORY_PAGE_SIZE + 1;
     const params = new URLSearchParams({ limit: fetchLimit, offset: historyOffset });
     if (search) params.set('search', search);
+    if (since)  params.set('since', since);
+    if (until)  params.set('until', until);
 
     try {
       const r = await fetch(`/api/tasks?${params}`);
@@ -5863,7 +5955,8 @@
       const displayTasks = tasks.slice(0, HISTORY_PAGE_SIZE);
 
       if (!displayTasks.length) {
-        container.innerHTML = `<div class="history-empty">${search ? 'לא נמצאו הקלטות תואמות' : 'אין היסטוריה עדיין'}</div>`;
+        const filterActive = search || since || until;
+        container.innerHTML = `<div class="history-empty">${filterActive ? 'לא נמצאו הקלטות תואמות' : 'אין היסטוריה עדיין'}</div>`;
       } else {
         const list = document.createElement('div');
         list.className = 'history-list';

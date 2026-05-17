@@ -632,12 +632,16 @@ async def list_tasks(
     user_id: Optional[str] = None,
     search: Optional[str] = None,
     offset: int = 0,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
 ) -> list[dict]:
     """
     Return tasks ordered by created_at DESC with optional search and pagination.
 
     search   — case-insensitive LIKE match against the url and result_json columns
     offset   — number of rows to skip (for cursor-based pagination)
+    since    — ISO 8601 lower bound: created_at >= since (inclusive)
+    until    — ISO 8601 upper bound: created_at <= until (inclusive)
     """
     db = await _get_db()
     conditions: list[str] = []
@@ -652,6 +656,14 @@ async def list_tasks(
         # url holds the recording source; result_json embeds the full transcript
         conditions.append("(url LIKE ? OR result_json LIKE ?)")
         params.extend([pattern, pattern])
+
+    if since:
+        conditions.append("created_at >= ?")
+        params.append(since)
+
+    if until:
+        conditions.append("created_at <= ?")
+        params.append(until)
 
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     params.extend([limit, offset])
