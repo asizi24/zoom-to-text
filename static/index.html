@@ -75,6 +75,42 @@
         color-scheme: light;
       }
     }
+    /* Light-mode contrast overrides — elements that used literal rgba(255,255,255,...)
+       become invisible against the light --bg-base. Use solid dark tones (≥4.5:1). */
+    :root[data-theme="light"] .brand-badge,
+    :root[data-theme="light"] .stat,
+    :root[data-theme="light"] .history-toggle-btn,
+    :root[data-theme="light"] .h-owner {
+      color: #2a2546;
+    }
+    :root[data-theme="light"] .brand-badge {
+      background: rgba(124,58,237,.08);
+      border-color: rgba(124,58,237,.22);
+    }
+    :root[data-theme="light"] .history-toggle-btn {
+      background: rgba(255,255,255,.85);
+      border-color: rgba(124,58,237,.22);
+      box-shadow: 0 4px 16px rgba(60,40,120,.18);
+    }
+    :root[data-theme="light"] .history-toggle-btn:hover { color: #1a1730; }
+    @media (prefers-color-scheme: light) {
+      :root:not([data-theme="dark"]):not([data-theme="light"]) .brand-badge,
+      :root:not([data-theme="dark"]):not([data-theme="light"]) .stat,
+      :root:not([data-theme="dark"]):not([data-theme="light"]) .history-toggle-btn,
+      :root:not([data-theme="dark"]):not([data-theme="light"]) .h-owner {
+        color: #2a2546;
+      }
+      :root:not([data-theme="dark"]):not([data-theme="light"]) .brand-badge {
+        background: rgba(124,58,237,.08);
+        border-color: rgba(124,58,237,.22);
+      }
+      :root:not([data-theme="dark"]):not([data-theme="light"]) .history-toggle-btn {
+        background: rgba(255,255,255,.85);
+        border-color: rgba(124,58,237,.22);
+        box-shadow: 0 4px 16px rgba(60,40,120,.18);
+      }
+      :root:not([data-theme="dark"]):not([data-theme="light"]) .history-toggle-btn:hover { color: #1a1730; }
+    }
     * { box-sizing: border-box; margin: 0; padding: 0; }
 
     /* ── A11y utilities ── */
