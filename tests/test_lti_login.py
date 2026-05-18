@@ -116,7 +116,6 @@ def test_login_each_call_issues_fresh_state_and_nonce(client, lti_env):
     assert qa["nonce"][0] != qb["nonce"][0]
 
 
-@pytest.mark.asyncio
 async def test_login_persists_state_row_with_matching_nonce(client, lti_env):
     """The state token in the redirect must be consumable, with the same nonce."""
     lti_env.write_platforms([PLATFORM])

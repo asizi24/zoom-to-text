@@ -316,17 +316,22 @@ async def _call_whisper_api(client: httpx.AsyncClient, chunk_path: str, language
     """Send a single audio chunk to the OpenAI Whisper API and return the transcript text."""
     lang_param = language if language != "auto" else None
 
-    with open(chunk_path, "rb") as f:
-        data = {"model": "whisper-1", "response_format": "text"}
-        if lang_param:
-            data["language"] = lang_param
+    # Read the chunk off the event loop. Chunks are capped at ~13 min of
+    # audio (≤25 MB / OpenAI Whisper-1 limit), so loading fully into memory
+    # is fine and lets httpx stream pure bytes without holding a sync file
+    # handle through an awaited POST.
+    chunk_bytes = await asyncio.to_thread(Path(chunk_path).read_bytes)
 
-        response = await client.post(
-            "https://api.openai.com/v1/audio/transcriptions",
-            headers={"Authorization": f"Bearer {settings.openai_api_key}"},
-            files={"file": (Path(chunk_path).name, f, "audio/mpeg")},
-            data=data,
-        )
+    data = {"model": "whisper-1", "response_format": "text"}
+    if lang_param:
+        data["language"] = lang_param
+
+    response = await client.post(
+        "https://api.openai.com/v1/audio/transcriptions",
+        headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+        files={"file": (Path(chunk_path).name, chunk_bytes, "audio/mpeg")},
+        data=data,
+    )
 
     response.raise_for_status()
     return response.text

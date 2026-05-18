@@ -38,7 +38,6 @@ def _claims(email: str) -> LaunchClaims:
     )
 
 
-@pytest.mark.asyncio
 async def test_authorize_returns_session_id_for_allowlisted_email(client):
     platform = _platform(["alice@tau.ac.il"])
     session_id = await authorize_and_create_session(_claims("alice@tau.ac.il"), platform)
@@ -54,7 +53,6 @@ async def test_authorize_returns_session_id_for_allowlisted_email(client):
     assert row["email"] == "alice@tau.ac.il"
 
 
-@pytest.mark.asyncio
 async def test_authorize_rejects_email_not_in_allowlist(client):
     platform = _platform(["alice@tau.ac.il"])
     with pytest.raises(LtiAuthorizationError):
@@ -63,7 +61,6 @@ async def test_authorize_rejects_email_not_in_allowlist(client):
         )
 
 
-@pytest.mark.asyncio
 async def test_authorize_does_not_create_session_when_rejected(client):
     """A rejected launch must not pollute the sessions table."""
     platform = _platform(["alice@tau.ac.il"])
@@ -80,7 +77,6 @@ async def test_authorize_does_not_create_session_when_rejected(client):
     assert before == after
 
 
-@pytest.mark.asyncio
 async def test_authorize_with_empty_allowlist_rejects_everyone(client):
     """A platform whose allowed_emails is empty rejects every user."""
     platform = _platform([])

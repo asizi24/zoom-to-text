@@ -101,7 +101,6 @@ def test_merge_results_ignores_raw_when_flag_off(monkeypatch):
 
 # ── summarize_transcript: parallel orchestration ──────────────────────────────
 
-@pytest.mark.asyncio
 async def test_summarize_transcript_runs_both_calls_and_merges(monkeypatch):
     """Happy path: text mode runs synthesis + extraction and merges."""
     from app.models import LessonResult
@@ -145,7 +144,6 @@ async def test_summarize_transcript_runs_both_calls_and_merges(monkeypatch):
     assert result.action_items[0].owner == "Asaf"
 
 
-@pytest.mark.asyncio
 async def test_summarize_transcript_extraction_failure_graceful_skip(monkeypatch):
     """If extraction raises, the task still completes with synthesis-only fields."""
     from app.models import LessonResult
@@ -169,7 +167,6 @@ async def test_summarize_transcript_extraction_failure_graceful_skip(monkeypatch
     assert result.sentiment_analysis is None
 
 
-@pytest.mark.asyncio
 async def test_summarize_transcript_synthesis_failure_propagates(monkeypatch):
     """If synthesis fails, the whole task fails (no graceful skip)."""
     from app.services import summarizer as s
@@ -190,7 +187,6 @@ async def test_summarize_transcript_synthesis_failure_propagates(monkeypatch):
         await s.summarize_transcript("transcript")
 
 
-@pytest.mark.asyncio
 async def test_summarize_transcript_raw_responses_persisted_when_flag_on(monkeypatch):
     """LLM_DEBUG_RAW_RESPONSES=true → raw_llm_response populated end-to-end."""
     from app.config import settings
@@ -220,7 +216,6 @@ async def test_summarize_transcript_raw_responses_persisted_when_flag_on(monkeyp
 
 # ── summarize_audio: parallel orchestration (Gemini provider) ─────────────────
 
-@pytest.mark.asyncio
 async def test_summarize_audio_runs_both_calls_and_merges(monkeypatch):
     """Audio mode: upload once, synthesize + extract in parallel, cleanup once."""
     from app.config import settings
@@ -271,7 +266,6 @@ async def test_summarize_audio_runs_both_calls_and_merges(monkeypatch):
     assert len(result.action_items) == 1
 
 
-@pytest.mark.asyncio
 async def test_summarize_audio_cleans_up_even_when_extraction_fails(monkeypatch):
     """Cleanup of uploaded audio runs even on extraction failure."""
     from app.config import settings

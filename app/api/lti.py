@@ -137,8 +137,12 @@ async def lti_launch(
     try:
         claims = oidc.verify_id_token(id_token, platform, expected_nonce=saved["nonce"])
     except oidc.LtiValidationError as exc:
+        # Log the specific cause server-side so ops can debug, but return
+        # a generic message — telling a caller which JWT check failed
+        # (audience vs nonce vs expiry vs azp) leaks signal for an attacker
+        # probing the endpoint with forged tokens.
         logger.warning("LTI launch — id_token validation failed: %s", exc)
-        raise HTTPException(status_code=400, detail=f"Invalid id_token: {exc}")
+        raise HTTPException(status_code=400, detail="invalid_launch")
 
     try:
         session_id = await bridge.authorize_and_create_session(claims, platform)

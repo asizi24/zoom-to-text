@@ -41,7 +41,6 @@ def test_transcribe_ivrit_ai_is_coroutine():
     assert asyncio.iscoroutinefunction(transcriber.transcribe_ivrit_ai)
 
 
-@pytest.mark.asyncio
 async def test_processor_routes_ivrit_mode_to_ivrit_transcriber(monkeypatch, tmp_path):
     """
     Wire-up test: confirm _process_audio dispatches IVRIT_AI to
@@ -92,7 +91,6 @@ async def test_processor_routes_ivrit_mode_to_ivrit_transcriber(monkeypatch, tmp
     await state.close_db()
 
 
-@pytest.mark.asyncio
 async def test_unload_model_if_idle_handles_both_caches(monkeypatch):
     """
     The idle watcher must not crash when only the ivrit cache is populated,

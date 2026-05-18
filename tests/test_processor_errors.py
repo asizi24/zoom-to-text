@@ -11,7 +11,6 @@ import pytest
 
 # ── _run_stage helper ────────────────────────────────────────────────────────
 
-@pytest.mark.asyncio
 async def test_run_stage_classifies_unknown_exception_with_stage():
     from app.errors import ProcessingError, ProcessingStage
     from app.services.processor import _run_stage
@@ -28,7 +27,6 @@ async def test_run_stage_classifies_unknown_exception_with_stage():
     assert "totally unknown failure mode" in pe.technical_details
 
 
-@pytest.mark.asyncio
 async def test_run_stage_passes_processing_error_through_unchanged():
     from app.errors import ProcessingError, ProcessingStage
     from app.services.processor import _run_stage
@@ -51,7 +49,6 @@ async def test_run_stage_passes_processing_error_through_unchanged():
     assert exc_info.value.stage == ProcessingStage.DIARIZE
 
 
-@pytest.mark.asyncio
 async def test_run_stage_classifies_gemini_429_in_summarize_stage():
     from app.errors import ProcessingStage
     from app.services.processor import _run_stage
@@ -69,7 +66,6 @@ async def test_run_stage_classifies_gemini_429_in_summarize_stage():
 
 # ── End-to-end through run_pipeline_from_file ────────────────────────────────
 
-@pytest.mark.asyncio
 async def test_run_pipeline_from_file_persists_user_message_on_summarize_failure(
     monkeypatch, tmp_path
 ):
@@ -124,7 +120,6 @@ async def test_run_pipeline_from_file_persists_user_message_on_summarize_failure
     assert "completed" not in captured
 
 
-@pytest.mark.asyncio
 async def test_run_pipeline_from_file_classifies_unknown_failure(
     monkeypatch, tmp_path
 ):

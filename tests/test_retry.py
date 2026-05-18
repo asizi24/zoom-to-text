@@ -32,7 +32,6 @@ def test_retry_requires_auth(client):
     assert r.status_code == 401
 
 
-@pytest.mark.asyncio
 async def test_retry_404_for_unknown_task(client, monkeypatch):
     sid = _login(client, monkeypatch)
     r = client.post(
@@ -43,7 +42,6 @@ async def test_retry_404_for_unknown_task(client, monkeypatch):
     assert r.status_code == 404
 
 
-@pytest.mark.asyncio
 async def test_retry_400_for_non_failed_task(client, monkeypatch):
     """Tasks in 'pending' status cannot be retried."""
     from app import state
@@ -59,7 +57,6 @@ async def test_retry_400_for_non_failed_task(client, monkeypatch):
     assert r.status_code == 400
 
 
-@pytest.mark.asyncio
 async def test_retry_rejects_upload_source(client, monkeypatch):
     """Uploaded-file tasks have no URL to re-fetch — must return 400."""
     from app import state
@@ -76,7 +73,6 @@ async def test_retry_rejects_upload_source(client, monkeypatch):
     assert r.status_code == 400
 
 
-@pytest.mark.asyncio
 async def test_retry_creates_new_task_and_removes_old(client, monkeypatch):
     """
     A successful retry:
@@ -122,7 +118,6 @@ async def test_retry_creates_new_task_and_removes_old(client, monkeypatch):
     assert pipeline_calls[0]["url"] == "https://zoom.us/retry-me"
 
 
-@pytest.mark.asyncio
 async def test_retry_unlinks_old_audio_file(client, monkeypatch, tmp_path):
     """The audio file from the old failed task is removed from disk."""
     from app import state
@@ -157,7 +152,6 @@ async def test_retry_unlinks_old_audio_file(client, monkeypatch, tmp_path):
     assert not audio.exists(), "old audio file should be unlinked on retry"
 
 
-@pytest.mark.asyncio
 async def test_retry_rejects_foreign_owner(client, monkeypatch):
     """A user cannot retry another user's failed task — 404 (anti-enumeration)."""
     from app import state

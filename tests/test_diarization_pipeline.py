@@ -12,7 +12,6 @@ Covers:
 import pytest
 
 
-@pytest.mark.asyncio
 async def test_summarize_transcript_runs_diarize_then_synth_then_extract(monkeypatch):
     """Happy path: diarize → (synth ‖ extract), both downstream get diarized text."""
     from app.config import settings
@@ -58,7 +57,6 @@ async def test_summarize_transcript_runs_diarize_then_synth_then_extract(monkeyp
     assert result.speaker_map == {"Speaker A": "אסף"}
 
 
-@pytest.mark.asyncio
 async def test_summarize_transcript_diarization_failure_falls_back_to_raw(monkeypatch):
     """If diarize raises, downstream calls receive the raw transcript."""
     from app.config import settings
@@ -101,7 +99,6 @@ async def test_summarize_transcript_diarization_failure_falls_back_to_raw(monkey
     assert result.summary == "ok"
 
 
-@pytest.mark.asyncio
 async def test_summarize_transcript_skips_diarization_when_flag_disabled(monkeypatch):
     """ENABLE_DIARIZATION=False → diarize is not called."""
     from app.config import settings
@@ -139,7 +136,6 @@ async def test_summarize_transcript_skips_diarization_when_flag_disabled(monkeyp
     assert result.speaker_map is None
 
 
-@pytest.mark.asyncio
 async def test_summarize_audio_does_not_run_diarization(monkeypatch):
     """GEMINI_DIRECT path skips diarization entirely (audio model handles speakers)."""
     from app.config import settings

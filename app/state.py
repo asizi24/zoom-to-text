@@ -36,6 +36,13 @@ def _now() -> datetime:
 _db: aiosqlite.Connection | None = None
 _db_lock = asyncio.Lock()
 
+# Serialize read-modify-write blocks on JSON-encoded columns. Without these,
+# two concurrent SELECT result_json → mutate → UPDATE flows would race and
+# the second UPDATE silently overwrites the first (lost-update). At ~5
+# concurrent users the contention is negligible, but correctness is not.
+_speaker_map_lock = asyncio.Lock()
+_chat_history_lock = asyncio.Lock()
+
 # ── Schema ───────────────────────────────────────────────────────────────────────
 
 CREATE_TABLE_SQL = """
@@ -230,6 +237,14 @@ async def _get_db() -> aiosqlite.Connection:
         _db.row_factory = aiosqlite.Row
         logger.info(f"SQLite connection opened: {DB_PATH}")
     return _db
+
+
+# Public alias for external callers (routes, ad-hoc raw SQL outside this module).
+# Tests still use _get_db directly since they need the same connection the
+# autouse singleton-reset fixture targets, but production callers should not
+# reach across the private-name boundary.
+async def get_db() -> aiosqlite.Connection:
+    return await _get_db()
 
 
 async def close_db():
@@ -1246,17 +1261,20 @@ async def append_chat_message(task_id: str, role: str, content: str) -> None:
     Trims the history to _MAX_CHAT_MESSAGES (oldest messages dropped first).
     """
     import json as _json
-    history = await get_chat_history(task_id)
-    history.append({"role": role, "content": content})
-    # Trim from front to keep within the message cap
-    if len(history) > _MAX_CHAT_MESSAGES:
-        history = history[-_MAX_CHAT_MESSAGES:]
-    db = await _get_db()
-    await db.execute(
-        "UPDATE tasks SET chat_history=? WHERE id=?",
-        [_json.dumps(history, ensure_ascii=False), task_id],
-    )
-    await db.commit()
+    # Serialize SELECT-modify-UPDATE so two concurrent POSTs don't both read
+    # the same baseline history and clobber each other on UPDATE.
+    async with _chat_history_lock:
+        history = await get_chat_history(task_id)
+        history.append({"role": role, "content": content})
+        # Trim from front to keep within the message cap
+        if len(history) > _MAX_CHAT_MESSAGES:
+            history = history[-_MAX_CHAT_MESSAGES:]
+        db = await _get_db()
+        await db.execute(
+            "UPDATE tasks SET chat_history=? WHERE id=?",
+            [_json.dumps(history, ensure_ascii=False), task_id],
+        )
+        await db.commit()
 
 
 async def clear_chat_history(task_id: str) -> None:
@@ -1655,19 +1673,6 @@ async def update_speaker_map(
     """
     import json as _json
 
-    db = await _get_db()
-    async with db.execute(
-        "SELECT result_json FROM tasks WHERE id=? AND user_id=?",
-        [task_id, user_id],
-    ) as cursor:
-        row = await cursor.fetchone()
-    if row is None or not row["result_json"]:
-        return False
-    try:
-        data = _json.loads(row["result_json"])
-    except (TypeError, ValueError):
-        logger.warning(f"update_speaker_map: result_json for {task_id} is not valid JSON")
-        return False
     # Filter the map: keep only string→string entries with non-empty values.
     # Empty values mean "remove this speaker name" — we delete the key.
     cleaned: dict[str, str] = {}
@@ -1678,14 +1683,31 @@ async def update_speaker_map(
             continue
         if isinstance(v, str):
             cleaned[k] = v.strip()[:80]  # cap individual names at 80 chars
-    data["speaker_map"] = cleaned
-    new_json = _json.dumps(data, ensure_ascii=False)
-    await db.execute(
-        "UPDATE tasks SET result_json=? WHERE id=?",
-        [new_json, task_id],
-    )
-    await db.commit()
-    return True
+
+    db = await _get_db()
+    # Serialize SELECT-modify-UPDATE so a concurrent rename + diarization
+    # re-run don't both read the same baseline and clobber each other.
+    async with _speaker_map_lock:
+        async with db.execute(
+            "SELECT result_json FROM tasks WHERE id=? AND user_id=?",
+            [task_id, user_id],
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None or not row["result_json"]:
+            return False
+        try:
+            data = _json.loads(row["result_json"])
+        except (TypeError, ValueError):
+            logger.warning(f"update_speaker_map: result_json for {task_id} is not valid JSON")
+            return False
+        data["speaker_map"] = cleaned
+        new_json = _json.dumps(data, ensure_ascii=False)
+        await db.execute(
+            "UPDATE tasks SET result_json=? WHERE id=?",
+            [new_json, task_id],
+        )
+        await db.commit()
+        return True
 
 
 # ── B4: Audio clips ────────────────────────────────────────────────────────

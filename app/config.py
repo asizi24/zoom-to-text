@@ -81,8 +81,10 @@ class Settings(BaseSettings):
     allowed_emails: str = ""
     # Comma-separated list of admin emails. Admins bypass per-user 24h quotas
     # and per-IP rate limits, and have block_until/is_banned auto-cleared on
-    # startup. Override with ADMIN_EMAILS env var.
-    admin_emails: str = "asaf.zitun@gmail.com"
+    # startup. Override with ADMIN_EMAILS env var. Default is empty so a
+    # fresh clone doesn't silently grant admin to a hard-coded address —
+    # set ADMIN_EMAILS in your `.env` (see `.env.example`).
+    admin_emails: str = ""
     resend_api_key: str = ""
     # Allowed CORS origin — set to your Fly.io domain in production
     cors_origin: str = "http://localhost:8000"

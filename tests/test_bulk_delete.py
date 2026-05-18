@@ -29,7 +29,6 @@ def _login(client, monkeypatch) -> str:
 # ── DB-level tests ────────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_bulk_delete_only_removes_owned(client):
     """Tasks owned by user_id are deleted; tasks owned by another user are skipped."""
     from app import state
@@ -45,7 +44,6 @@ async def test_bulk_delete_only_removes_owned(client):
     assert await state.get_task_for_user("bd3", "user-B") is not None
 
 
-@pytest.mark.asyncio
 async def test_bulk_delete_returns_audio_paths(client):
     """audio_paths is populated with paths for tasks that had audio."""
     from app import state
@@ -59,7 +57,6 @@ async def test_bulk_delete_returns_audio_paths(client):
     assert out["audio_paths"] == ["/data/downloads/a1.m4a"]
 
 
-@pytest.mark.asyncio
 async def test_bulk_delete_empty_list(client):
     """Calling with no IDs returns empty buckets — no DB hit needed."""
     from app import state
@@ -76,7 +73,6 @@ def test_bulk_delete_endpoint_requires_auth(client):
     assert r.status_code == 401
 
 
-@pytest.mark.asyncio
 async def test_bulk_delete_endpoint_removes_owned_only(client, monkeypatch):
     """End-to-end: owned tasks deleted, foreign task untouched, response shape correct."""
     from app import state
@@ -112,7 +108,6 @@ def test_bulk_delete_validates_payload(client, monkeypatch):
     assert r.status_code == 422
 
 
-@pytest.mark.asyncio
 async def test_bulk_delete_endpoint_unlinks_audio_files(client, monkeypatch, tmp_path):
     """Audio files on disk are removed by the endpoint via _remove_audio_safely."""
     from app import state

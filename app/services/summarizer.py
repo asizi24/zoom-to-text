@@ -35,6 +35,16 @@ import time
 from pathlib import Path
 from typing import Callable
 
+# NOTE: This file is the ONE exception to the
+# "no direct google-genai imports outside app/services/llm_providers"
+# rule documented in CLAUDE.md. Reasons:
+#   1. summarize_audio uses the file-upload + multimodal generate flow,
+#      which the provider abstraction does not yet wrap (only text gen).
+#   2. The audio path is gemini-only — non-gemini providers don't accept
+#      audio uploads, and at boot summarizer.py guards with
+#      _is_gemini_provider() before ever calling client.files.upload.
+# When the provider abstraction grows an upload_audio + multimodal API,
+# move these imports into llm_providers/gemini.py.
 from google import genai
 from google.genai import types
 
@@ -1630,11 +1640,24 @@ async def _summarize_audio_chunked(
             )
         return text
 
+    tasks = [
+        asyncio.create_task(_transcribe_one(i, c))
+        for i, c in enumerate(chunks)
+    ]
     try:
-        transcripts = await asyncio.gather(
-            *(_transcribe_one(i, c) for i, c in enumerate(chunks))
-        )
+        transcripts = await asyncio.gather(*tasks)
     finally:
+        # If any task raised or the caller cancelled us, sibling tasks may
+        # still be running inside a ThreadPoolExecutor (run_in_executor
+        # futures are not cancellable from asyncio). Deleting the chunk
+        # files before those threads finish risks ffmpeg/Gemini reading a
+        # half-deleted path on Windows or a stale inode on Linux.
+        # Wait for ALL tasks to settle before unlinking.
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        if any(not t.done() for t in tasks):
+            await asyncio.gather(*tasks, return_exceptions=True)
         _cleanup_chunk_files(chunks)
 
     full_transcript = "\n\n".join(t for t in transcripts if t)
@@ -1738,24 +1761,36 @@ async def summarize_audio(
         None, _upload_audio_to_gemini, audio_path, progress_cb
     )
 
-    try:
-        # Step 2: Synthesis + Extraction in parallel.
-        synthesis_future = loop.run_in_executor(
-            None,
-            _synthesize_audio_capture,
-            audio_file,
-            progress_cb,
-            supplementary_context,
-        )
-        extraction_future = loop.run_in_executor(
-            None, _extract_audio_capture, audio_file
-        )
+    # Step 2: Synthesis + Extraction in parallel.
+    synthesis_future = loop.run_in_executor(
+        None,
+        _synthesize_audio_capture,
+        audio_file,
+        progress_cb,
+        supplementary_context,
+    )
+    extraction_future = loop.run_in_executor(
+        None, _extract_audio_capture, audio_file
+    )
+    gather_task = asyncio.gather(
+        synthesis_future, extraction_future, return_exceptions=True
+    )
 
+    try:
         synthesis_outcome, extraction_outcome = await asyncio.wait_for(
-            asyncio.gather(synthesis_future, extraction_future, return_exceptions=True),
+            gather_task,
             timeout=_GEMINI_TIMEOUT,
         )
     except asyncio.TimeoutError:
+        # asyncio.wait_for cancels gather_task, but ThreadPoolExecutor
+        # futures backing run_in_executor cannot be cancelled — the
+        # threads keep running until Gemini responds. Wait for them to
+        # settle so we don't issue _delete_gemini_file while another
+        # thread is still streaming the upload, which on Gemini's side
+        # produces "file already deleted" 400s mid-upload.
+        await asyncio.gather(
+            synthesis_future, extraction_future, return_exceptions=True
+        )
         await loop.run_in_executor(None, _delete_gemini_file, audio_file)
         raise TimeoutError("⏱️ Gemini לא הגיב תוך 10 דקות — נסה שוב")
 
@@ -2318,17 +2353,10 @@ def _parse_cram_guide_response(text: str) -> CramGuideResult:
         return CramGuideResult()
 
 
-def _generate_cram_guide_sync(lessons: list[dict]) -> CramGuideResult:
+def _generate_cram_guide_sync_gemini(lessons: list[dict]) -> CramGuideResult:
+    """Gemini sync path: blocking client.generate_content under a ThreadPoolExecutor."""
     lessons_text = _build_lessons_text(lessons)
     prompt = _CRAM_GUIDE_PROMPT.format(n=len(lessons), lessons_text=lessons_text)
-
-    if not _is_gemini_provider():
-        provider = get_provider()
-        import asyncio as _aio
-
-        text = _aio.run(provider.generate_text(prompt, timeout=_CRAM_GUIDE_TIMEOUT))
-        return _parse_cram_guide_response(text)
-
     client = _get_client()
     response = _generate_with_retry(client, prompt)
     return _parse_cram_guide_response(_response_text(response))
@@ -2344,12 +2372,28 @@ async def generate_cram_guide(lessons: list[dict]) -> CramGuideResult:
     if not lessons:
         return CramGuideResult()
 
-    loop = asyncio.get_running_loop()
     try:
-        return await asyncio.wait_for(
-            loop.run_in_executor(None, _generate_cram_guide_sync, lessons),
+        if _is_gemini_provider():
+            # Gemini google-genai client is sync — run it in the default
+            # ThreadPoolExecutor so the event loop stays free.
+            loop = asyncio.get_running_loop()
+            return await asyncio.wait_for(
+                loop.run_in_executor(None, _generate_cram_guide_sync_gemini, lessons),
+                timeout=_CRAM_GUIDE_TIMEOUT,
+            )
+
+        # Non-Gemini providers expose a native async API — call it directly
+        # rather than spawning a nested event loop inside an executor (which
+        # the previous implementation did with asyncio.run, defeating
+        # cancellation propagation from the outer wait_for).
+        provider = get_provider()
+        lessons_text = _build_lessons_text(lessons)
+        prompt = _CRAM_GUIDE_PROMPT.format(n=len(lessons), lessons_text=lessons_text)
+        text = await asyncio.wait_for(
+            provider.generate_text(prompt, timeout=_CRAM_GUIDE_TIMEOUT),
             timeout=_CRAM_GUIDE_TIMEOUT,
         )
+        return _parse_cram_guide_response(text)
     except asyncio.TimeoutError:
         logger.warning("Cram guide generation timed out")
         return CramGuideResult()

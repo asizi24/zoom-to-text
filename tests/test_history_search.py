@@ -9,7 +9,6 @@ import pytest
 
 # ── DB-level tests ────────────────────────────────────────────────────────────
 
-@pytest.mark.asyncio
 async def test_search_filters_by_url(client):
     """Only tasks whose URL contains the search term are returned."""
     from app import state
@@ -22,7 +21,6 @@ async def test_search_filters_by_url(client):
     assert "hs2" not in ids
 
 
-@pytest.mark.asyncio
 async def test_search_is_case_insensitive(client):
     """SQLite LIKE is case-insensitive for ASCII characters."""
     from app import state
@@ -32,7 +30,6 @@ async def test_search_is_case_insensitive(client):
     assert any(r["id"] == "hs3" for r in results)
 
 
-@pytest.mark.asyncio
 async def test_search_no_match_returns_empty_list(client):
     """A search term with no matching tasks returns []."""
     from app import state
@@ -42,7 +39,6 @@ async def test_search_no_match_returns_empty_list(client):
     assert results == []
 
 
-@pytest.mark.asyncio
 async def test_offset_paginates_without_overlap(client):
     """Page 1 and page 2 results are disjoint (no task appears twice)."""
     from app import state
@@ -57,7 +53,6 @@ async def test_offset_paginates_without_overlap(client):
     assert {r["id"] for r in page1}.isdisjoint({r["id"] for r in page2})
 
 
-@pytest.mark.asyncio
 async def test_limit_is_respected_with_search(client):
     """limit= caps results even when search matches more tasks than the limit."""
     from app import state
@@ -78,7 +73,6 @@ async def _backdate(task_id: str, iso: str) -> None:
     await db.commit()
 
 
-@pytest.mark.asyncio
 async def test_since_filter_excludes_older_tasks(client):
     """since= returns only tasks whose created_at >= the given ISO bound."""
     from app import state
@@ -93,7 +87,6 @@ async def test_since_filter_excludes_older_tasks(client):
     assert "dt_old" not in ids
 
 
-@pytest.mark.asyncio
 async def test_until_filter_excludes_newer_tasks(client):
     """until= returns only tasks whose created_at <= the given ISO bound."""
     from app import state
@@ -108,7 +101,6 @@ async def test_until_filter_excludes_newer_tasks(client):
     assert "dt_new2" not in ids
 
 
-@pytest.mark.asyncio
 async def test_since_and_until_combine(client):
     """since + until bracket a window inclusively."""
     from app import state
@@ -127,7 +119,6 @@ async def test_since_and_until_combine(client):
     assert ids == {"dt_b"}
 
 
-@pytest.mark.asyncio
 async def test_date_filter_combines_with_search(client):
     """search and since= apply together (AND, not OR)."""
     from app import state
@@ -195,7 +186,6 @@ def test_route_rejects_invalid_since(client, monkeypatch):
     assert r.status_code == 422
 
 
-@pytest.mark.asyncio
 async def test_route_search_returns_only_matching_task(client, monkeypatch):
     """End-to-end: task seeded in DB is found by search, non-matching task is excluded."""
     from app import state

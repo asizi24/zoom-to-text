@@ -37,6 +37,19 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _allowed_origins() -> list[str]:
+    """Normalize settings.cors_origin to a list of allowed origins."""
+    raw = getattr(settings, "cors_origin", None)
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        # Support comma-separated strings as well as bare single origins.
+        return [o.strip() for o in raw.split(",") if o.strip()]
+    if isinstance(raw, (list, tuple)):
+        return [str(o).strip() for o in raw if str(o).strip()]
+    return [str(raw).strip()]
+
+
 @router.websocket("/ws/transcribe")
 async def ws_transcribe(
     websocket: WebSocket,
@@ -51,6 +64,25 @@ async def ws_transcribe(
     result is returned in a single {"type": "done", "transcript": "..."}
     message before the connection closes.
     """
+    # Origin check FIRST — reject before the handshake completes so a
+    # malicious cross-origin page cannot ride the user's session cookie.
+    origin = websocket.headers.get("origin")
+    allowed = _allowed_origins()
+    if not allowed or "*" in allowed:
+        logger.warning(
+            "WebSocket origin check rejecting connection — cors_origin is "
+            "empty or wildcard (%r); refusing to fail-open.",
+            allowed,
+        )
+        await websocket.close(code=1008, reason="origin not allowed")
+        return
+    if not origin or origin not in allowed:
+        logger.warning(
+            "WebSocket origin %r rejected (allowed=%r)", origin, allowed
+        )
+        await websocket.close(code=1008, reason="origin not allowed")
+        return
+
     # Accept first so close codes are sent inside a proper WS frame.
     await websocket.accept()
 

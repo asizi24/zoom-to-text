@@ -85,7 +85,6 @@ def test_default_provider_methods_raise_unsupported():
     asyncio.run(s.cleanup_audio(AudioRef("stub", "x")))
 
 
-@pytest.mark.asyncio
 async def test_with_retry_succeeds_after_transient_error():
     from app.services.llm_providers.base import _with_retry
 
@@ -105,7 +104,6 @@ async def test_with_retry_succeeds_after_transient_error():
     assert calls["n"] == 3
 
 
-@pytest.mark.asyncio
 async def test_with_retry_does_not_retry_auth_errors():
     from app.services.llm_providers.base import _with_retry
 
@@ -206,7 +204,6 @@ def test_get_provider_caches_instance(monkeypatch):
 
 # ── GeminiProvider ────────────────────────────────────────────────────────────
 
-@pytest.mark.asyncio
 async def test_gemini_provider_generate_text_uses_existing_helper(monkeypatch):
     """GeminiProvider.generate_text reuses summarizer._generate_with_retry."""
     from app.services.llm_providers.gemini import GeminiProvider
@@ -234,7 +231,6 @@ async def test_gemini_provider_generate_text_uses_existing_helper(monkeypatch):
     assert captured["contents"] == "hello prompt"
 
 
-@pytest.mark.asyncio
 async def test_gemini_provider_supports_audio_upload():
     from app.services.llm_providers.gemini import GeminiProvider
     p = GeminiProvider()
@@ -245,7 +241,6 @@ async def test_gemini_provider_supports_audio_upload():
 
 # ── OpenRouterProvider ────────────────────────────────────────────────────────
 
-@pytest.mark.asyncio
 async def test_openrouter_generate_text_builds_correct_request(monkeypatch):
     """OpenRouter sends a chat-completions POST with the right shape."""
     import httpx
@@ -285,7 +280,6 @@ async def test_openrouter_generate_text_builds_correct_request(monkeypatch):
     assert captured["json"]["messages"] == [{"role": "user", "content": "hello"}]
 
 
-@pytest.mark.asyncio
 async def test_openrouter_audio_upload_raises_unsupported():
     from app.services.llm_providers.openrouter import OpenRouterProvider
     p = OpenRouterProvider()
@@ -293,7 +287,6 @@ async def test_openrouter_audio_upload_raises_unsupported():
         await p.upload_audio("/tmp/x.mp3")
 
 
-@pytest.mark.asyncio
 async def test_openrouter_classifies_401_as_auth_error(monkeypatch):
     import httpx
     from app.services.llm_providers.openrouter import OpenRouterProvider
@@ -324,7 +317,6 @@ async def test_openrouter_classifies_401_as_auth_error(monkeypatch):
 
 # ── OllamaProvider ────────────────────────────────────────────────────────────
 
-@pytest.mark.asyncio
 async def test_ollama_generate_text_builds_correct_request(monkeypatch):
     import httpx
     from app.services.llm_providers.ollama import OllamaProvider
@@ -362,7 +354,6 @@ async def test_ollama_generate_text_builds_correct_request(monkeypatch):
     assert captured["json"]["stream"] is False
 
 
-@pytest.mark.asyncio
 async def test_ollama_audio_upload_raises_unsupported():
     from app.services.llm_providers.ollama import OllamaProvider
     p = OllamaProvider()
@@ -372,7 +363,6 @@ async def test_ollama_audio_upload_raises_unsupported():
 
 # ── summarizer.py provider dispatch ──────────────────────────────────────────
 
-@pytest.mark.asyncio
 async def test_summarize_transcript_uses_openrouter_when_configured(monkeypatch):
     """When LLM_PROVIDER=openrouter, summarize_transcript goes via the provider."""
     from app.config import settings
@@ -408,7 +398,6 @@ async def test_summarize_transcript_uses_openrouter_when_configured(monkeypatch)
     assert result.summary == "סיכום בדיקה"
 
 
-@pytest.mark.asyncio
 async def test_summarize_audio_with_openrouter_raises_unsupported(monkeypatch):
     from app.config import settings
     from app.services import summarizer

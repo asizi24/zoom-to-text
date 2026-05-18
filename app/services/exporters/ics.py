@@ -14,9 +14,14 @@ default reads well in calendar UIs).
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta, timezone
 
 from app.models import TaskResponse
+
+# ASCII control chars that break Outlook/Google Calendar ICS parsers.
+# Keep \t (\x09) and \n (\x0a) — those are legal/handled by _escape.
+_ICS_CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f]")
 
 # iCalendar requires CRLF line endings (§3.1).
 _CRLF = "\r\n"
@@ -108,7 +113,12 @@ def _task_url(task: TaskResponse) -> str:
 
 
 def _escape(text: str) -> str:
-    """Escape text fields per RFC 5545 §3.3.11 (TEXT)."""
+    """Escape text fields per RFC 5545 §3.3.11 (TEXT).
+
+    Strips ASCII control chars first — Outlook/Google Calendar refuse
+    to parse VEVENTs whose SUMMARY/DESCRIPTION contain NUL/BEL/etc.
+    """
+    text = _ICS_CONTROL_RE.sub("", text)
     return (
         text.replace("\\", "\\\\")
         .replace(",", "\\,")

@@ -113,7 +113,6 @@ def test_admin_bypasses_ip_rate_limit(client, monkeypatch):
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_is_admin_user_checks_email_membership(client, monkeypatch):
     """is_admin_user() reads admin_emails fresh on every call (lowercase compared)."""
     from app import state
@@ -127,7 +126,6 @@ async def test_is_admin_user_checks_email_membership(client, monkeypatch):
     assert await state.is_admin_user(user_uid) is False
 
 
-@pytest.mark.asyncio
 async def test_reset_admin_flags_clears_block_and_ban(client, monkeypatch):
     """reset_admin_flags() unblocks any admin row even if already permanently banned."""
     from app import state

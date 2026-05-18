@@ -11,12 +11,20 @@
  *   • Static assets under /static/* and /manifest.webmanifest → cache-first
  *   • Everything else (the SPA root, /login, /api/*, /ws/*, /share/*, /clips/*)
  *     → bypass the SW entirely, default network behavior.
+ *
+ * Update behavior:
+ *   On version bump (CACHE_NAME below), a fresh SW installs as "waiting" —
+ *   we do NOT call skipWaiting() in install. Instead, the page can post
+ *   {type: 'SKIP_WAITING'} to apply the update only when the user accepts
+ *   a refresh prompt. This avoids ripping the shell out from under a
+ *   user mid-transcription.
  */
-const CACHE_NAME = 'z2t-shell-v1';
+const CACHE_NAME = 'z2t-shell-v2';
 const SHELL = [
-  '/static/style.css',
-  '/static/js/sse.js',
   '/static/js/export-utils.js',
+  '/static/js/tabs.js',
+  '/static/js/theme.js',
+  '/static/js/modals.js',
   '/static/icon.svg',
   '/manifest.webmanifest',
 ];
@@ -27,7 +35,14 @@ self.addEventListener('install', (event) => {
       Promise.allSettled(SHELL.map((url) => cache.add(url)))
     )
   );
-  self.skipWaiting();
+  // Intentionally NOT skipWaiting — the page controls when to swap in
+  // a new shell via the SKIP_WAITING message below.
+});
+
+self.addEventListener('message', (event) => {
+  if (event.data && event.data.type === 'SKIP_WAITING') {
+    self.skipWaiting();
+  }
 });
 
 self.addEventListener('activate', (event) => {

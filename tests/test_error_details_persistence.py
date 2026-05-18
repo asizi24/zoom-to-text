@@ -4,7 +4,6 @@ Phase C tests for Task 1.5 — error_details JSON persistence in SQLite.
 import pytest
 
 
-@pytest.mark.asyncio
 async def test_fail_task_persists_error_details_dict(client):
     """state.fail_task accepts a dict and stores it; get_task returns it."""
     from app import state
@@ -29,7 +28,6 @@ async def test_fail_task_persists_error_details_dict(client):
     assert task.error_details["technical_details"] == "HTTP 429"
 
 
-@pytest.mark.asyncio
 async def test_fail_task_without_error_details_works(client):
     """Backward-compat: fail_task with no error_details kwarg sets it None."""
     from app import state
@@ -43,7 +41,6 @@ async def test_fail_task_without_error_details_works(client):
     assert task.error_details is None
 
 
-@pytest.mark.asyncio
 async def test_old_rows_without_column_return_none(client):
     """Rows that pre-date the migration (column NULL) return error_details=None."""
     from app import state
@@ -63,7 +60,6 @@ async def test_old_rows_without_column_return_none(client):
     assert task.error_details is None
 
 
-@pytest.mark.asyncio
 async def test_task_response_serializes_error_details(client):
     """The Pydantic TaskResponse round-trips error_details through JSON."""
     from app import state

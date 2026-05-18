@@ -9,16 +9,36 @@ Key design decisions:
 - raising=False on setattr calls that target attributes added in later tasks,
   so the fixture doesn't crash if run before those tasks are complete.
 """
+import asyncio
 import pytest
 import app.state as state_module
 from app.config import settings
+
+
+@pytest.fixture(autouse=True)
+def _reset_state_module_singletons(monkeypatch):
+    """
+    Reset module-level event-loop-bound singletons in app.state before EVERY
+    test, regardless of whether the test uses the `client` fixture.
+
+    Why autouse? pytest-asyncio creates a fresh event loop per test. Locks
+    and the cached aiosqlite connection bind to the loop they were first
+    awaited on. Without this reset, the FIRST test that touches state.* in
+    a session warms `_db` against loop-1; the SECOND test (in loop-2) then
+    hangs forever on its first await against that stale connection —
+    aiosqlite's worker thread is stuck calling Future.set_result() on a
+    closed loop.
+    """
+    monkeypatch.setattr(state_module, "_db", None, raising=False)
+    monkeypatch.setattr(state_module, "_db_lock", asyncio.Lock(), raising=False)
+    monkeypatch.setattr(state_module, "_speaker_map_lock", asyncio.Lock(), raising=False)
+    monkeypatch.setattr(state_module, "_chat_history_lock", asyncio.Lock(), raising=False)
 
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     """FastAPI TestClient with an isolated temp database."""
     monkeypatch.setattr(state_module, "DB_PATH", tmp_path / "test.db")
-    monkeypatch.setattr(state_module, "_db", None, raising=False)  # added in Task 3
     monkeypatch.setattr(settings, "allowed_emails", "allowed@example.com", raising=False)  # added in Task 2
     monkeypatch.setattr(settings, "resend_api_key", "test_key", raising=False)  # added in Task 2
     monkeypatch.setattr(settings, "base_url", "http://testserver")

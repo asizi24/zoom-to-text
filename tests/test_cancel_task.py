@@ -82,7 +82,6 @@ def test_cancel_is_idempotent(authed_client):
 
 # ── is_task_cancelled helper ───────────────────────────────────────────────────
 
-@pytest.mark.asyncio
 async def test_is_task_cancelled_returns_true_after_cancel(monkeypatch, tmp_path):
     monkeypatch.setattr(state_module, "DB_PATH", tmp_path / "cancel_flag.db")
     monkeypatch.setattr(state_module, "_db", None, raising=False)
@@ -94,7 +93,6 @@ async def test_is_task_cancelled_returns_true_after_cancel(monkeypatch, tmp_path
     await state_module.close_db()
 
 
-@pytest.mark.asyncio
 async def test_is_task_cancelled_returns_false_for_pending(monkeypatch, tmp_path):
     monkeypatch.setattr(state_module, "DB_PATH", tmp_path / "cancel_pending.db")
     monkeypatch.setattr(state_module, "_db", None, raising=False)

@@ -241,3 +241,103 @@ def test_lesson_result_content_type_is_optional():
 
     r = LessonResult()
     assert r.content_type is None
+
+
+# ── B1 batch backward-compat — highlights + mindmap ───────────────────────────
+#
+# These two fields were added in batch B1. Every result_json row written
+# before that batch shipped must still deserialize cleanly today — the
+# History tab calls LessonResult.model_validate_json on raw SQLite blobs
+# from every era.
+
+
+def test_lesson_result_loads_pre_b1_json_without_highlights_or_mindmap():
+    """LessonResult must default highlights/mindmap when the blob predates B1."""
+    from app.models import LessonResult
+
+    pre_b1_blob = {
+        "summary": "pre-B1 summary",
+        "chapters": [],
+        "quiz": [],
+        "flashcards": [],
+        "language": "he",
+        # All B1 fields deliberately absent.
+    }
+    r = LessonResult.model_validate(pre_b1_blob)
+    assert r.highlights == []
+    assert r.mindmap is None
+
+
+def test_highlight_minimal_only_quote_and_why():
+    from app.models import Highlight
+
+    h = Highlight(quote="The key insight is X", why="explains everything")
+    assert h.timestamp is None
+    assert h.speaker is None
+
+
+def test_highlight_full_shape():
+    from app.models import Highlight
+
+    h = Highlight(
+        quote="The key insight is X",
+        why="explains everything",
+        timestamp="[12:34]",
+        speaker="Speaker A",
+    )
+    assert h.timestamp == "[12:34]"
+    assert h.speaker == "Speaker A"
+
+
+def test_mindmap_loads_recursive_children():
+    """MindMap must accept arbitrary depth via the self-referencing schema."""
+    from app.models import LessonResult
+
+    blob = {
+        "summary": "s",
+        "chapters": [],
+        "quiz": [],
+        "flashcards": [],
+        "language": "he",
+        "mindmap": {
+            "root": {
+                "label": "Root",
+                "children": [
+                    {
+                        "label": "Branch A",
+                        "children": [
+                            {"label": "Leaf A1", "children": []},
+                            {"label": "Leaf A2", "children": []},
+                        ],
+                    },
+                    {"label": "Branch B", "children": []},
+                ],
+            }
+        },
+    }
+    r = LessonResult.model_validate(blob)
+    assert r.mindmap is not None
+    assert r.mindmap.root.label == "Root"
+    assert len(r.mindmap.root.children) == 2
+    assert r.mindmap.root.children[0].children[1].label == "Leaf A2"
+
+
+def test_lesson_result_round_trips_b1_fields_through_json():
+    """B1 fields must survive a model_dump → JSON → model_validate cycle."""
+    from app.models import LessonResult, Highlight, MindMap, MindMapNode
+
+    r = LessonResult(
+        summary="s",
+        highlights=[
+            Highlight(quote="Q1", why="W1"),
+            Highlight(quote="Q2", why="W2", timestamp="[01:00]", speaker="Asaf"),
+        ],
+        mindmap=MindMap(
+            root=MindMapNode(label="Root", children=[MindMapNode(label="Child")])
+        ),
+    )
+    blob = r.model_dump(mode="json")
+    parsed = LessonResult.model_validate(json.loads(json.dumps(blob)))
+    assert len(parsed.highlights) == 2
+    assert parsed.highlights[1].speaker == "Asaf"
+    assert parsed.mindmap.root.children[0].label == "Child"

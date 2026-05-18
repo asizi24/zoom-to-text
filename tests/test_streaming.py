@@ -25,7 +25,11 @@ from app.config import settings
 
 # ── Shared helpers ─────────────────────────────────────────────────────────────
 
-AUTH_HEADERS = {"Cookie": "session_id=fake-session-id"}
+AUTH_HEADERS = {
+    "Cookie": "session_id=fake-session-id",
+    # cors_origin is set to http://testserver by the `client` fixture (conftest.py).
+    "origin": "http://testserver",
+}
 
 
 @pytest.fixture
@@ -54,11 +58,14 @@ def test_streaming_gate_closes_when_disabled(client):
 # ── Auth tests ─────────────────────────────────────────────────────────────────
 
 def test_streaming_rejects_missing_session(client, monkeypatch):
-    """Enabled but no session cookie → close with code 3401."""
+    """Enabled, valid origin, but no session cookie → close with code 3401."""
     monkeypatch.setattr(settings, "enable_streaming", True, raising=False)
-    # No Cookie header → session_id=None → get_session_user short-circuits to None
+    # No Cookie header → session_id=None → get_session_user short-circuits to None.
+    # Origin header IS required (the origin check runs before the auth check).
     with pytest.raises(WebSocketDisconnect) as exc_info:
-        with client.websocket_connect("/ws/transcribe") as ws:
+        with client.websocket_connect(
+            "/ws/transcribe", headers={"origin": "http://testserver"}
+        ) as ws:
             ws.receive_text()  # triggers close detection after server sends close(3401)
     assert exc_info.value.code == 3401
 

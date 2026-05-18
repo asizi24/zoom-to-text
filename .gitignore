@@ -59,7 +59,8 @@ key.json
 !tsconfig.json
 
 # GCP Service Account keys (NEVER commit these!)
-key.json
+# (key.json already listed under "SSH keys" above — kept there for proximity
+# to the broader `*.pem` pattern.)
 # *.json — do NOT add this; it would block package.json etc.
 
 # Database & state files
@@ -69,11 +70,9 @@ data/
 # Log files
 *.log
 
+# Environment files (note: `.env` is already listed under "Environment variables"
+# at the top; *.env catches `.env.local`, `.env.production`, etc.)
 *.env
-
-.env
-*.env
- (2).env
 
 # Legacy archive & Claude internal
 _legacy_archive/

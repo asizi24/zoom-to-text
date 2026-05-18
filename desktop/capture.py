@@ -342,6 +342,17 @@ def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    if args.cookie:
+        # Anything passed via argv is visible to other local users via `ps -ef`
+        # / Task Manager's command-line column. Warn the first time the flag is
+        # used. The recommended pattern is the ZTT_SESSION env var.
+        print(
+            "WARNING: --cookie passes the session token via argv, visible in "
+            "'ps -ef' / Task Manager. Prefer the ZTT_SESSION environment "
+            "variable instead.",
+            file=sys.stderr,
+        )
+
     # --list-devices
     if args.list_devices:
         print(sd.query_devices())

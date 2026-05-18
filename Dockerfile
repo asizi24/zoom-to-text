@@ -11,13 +11,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /build
 COPY requirements.txt .
 
-# Install torch CPU-only first (separate layer = cached separately).
-# Installing to /usr/local (system-wide), NOT --user, so appuser can read it.
-RUN pip install --no-cache-dir \
-    torch==2.3.0 torchaudio==2.3.0 \
-    --index-url https://download.pytorch.org/whl/cpu
-
-# Install the rest
+# torch / torchaudio moved to requirements-heavy.txt — NEVER installed in
+# the production light image. The pyannote diarization path (DIARIZATION_PROVIDER
+# =pyannote) needs heavy + a home-server. Production stays on text diarization.
 RUN pip install --no-cache-dir -r requirements.txt
 
 # ==============================================================================
@@ -28,17 +24,10 @@ FROM python:3.11-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     curl \
-    # WeasyPrint system dependencies (Pango, Cairo, GLib)
-    # fonts-dejavu: ~7 MB installed, covers Hebrew + Latin adequately.
-    # Deliberately NOT fonts-noto (500 MB+) or fonts-noto-cjk (1 GB+).
-    libpango-1.0-0 \
-    libharfbuzz0b \
-    libpangoft2-1.0-0 \
-    libcairo2 \
-    libgdk-pixbuf-2.0-0 \
-    shared-mime-info \
-    fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
+# WeasyPrint system libs (libpango, libcairo, libharfbuzz, libgdk-pixbuf,
+# fonts-dejavu, shared-mime-info) were removed when weasyprint moved to
+# requirements-heavy.txt. Add them back in the heavy/home-server image only.
 
 # Copy system-wide packages from builder (accessible by all users)
 COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages

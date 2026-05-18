@@ -11,7 +11,6 @@ import pytest
 from app import state
 
 
-@pytest.mark.asyncio
 async def test_store_then_consume_returns_matching_record(client):
     await state.store_lti_oidc_state(
         state="state-1",
@@ -28,7 +27,6 @@ async def test_store_then_consume_returns_matching_record(client):
     }
 
 
-@pytest.mark.asyncio
 async def test_consume_is_one_time_use(client):
     await state.store_lti_oidc_state(
         state="state-2", nonce="n", issuer="i", client_id="c", ttl_seconds=300
@@ -39,12 +37,10 @@ async def test_consume_is_one_time_use(client):
     assert second is None
 
 
-@pytest.mark.asyncio
 async def test_consume_unknown_state_returns_none(client):
     assert await state.consume_lti_oidc_state("never-stored") is None
 
 
-@pytest.mark.asyncio
 async def test_expired_state_returns_none_and_is_deleted(client):
     """ttl_seconds=-1 → row is already past expiry the moment it lands."""
     await state.store_lti_oidc_state(

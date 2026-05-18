@@ -24,7 +24,6 @@ def _login(client, monkeypatch) -> str:
     return resp.cookies["session_id"]
 
 
-@pytest.mark.asyncio
 async def test_update_speaker_map_sets_field(client):
     from app import state
     await state.create_task("sp1", "https://zoom.us/sp", user_id="u")
@@ -38,7 +37,6 @@ async def test_update_speaker_map_sets_field(client):
     assert task.result.speaker_map == {"Speaker A": "Asaf"}
 
 
-@pytest.mark.asyncio
 async def test_update_speaker_map_drops_empty_values(client):
     """Empty string / whitespace-only values delete the key (rename → undo)."""
     from app import state
@@ -53,7 +51,6 @@ async def test_update_speaker_map_drops_empty_values(client):
     assert task.result.speaker_map == {"Speaker A": "Asaf"}
 
 
-@pytest.mark.asyncio
 async def test_update_speaker_map_caps_long_names(client):
     """Speaker names are capped at 80 chars to avoid DB bloat / rendering issues."""
     from app import state
@@ -67,7 +64,6 @@ async def test_update_speaker_map_caps_long_names(client):
     assert len(task.result.speaker_map["Speaker A"]) == 80
 
 
-@pytest.mark.asyncio
 async def test_update_speaker_map_rejects_foreign_owner(client):
     from app import state
     await state.create_task("sp4", "https://zoom.us/sp", user_id="real-owner")
@@ -77,7 +73,6 @@ async def test_update_speaker_map_rejects_foreign_owner(client):
     assert ok is False
 
 
-@pytest.mark.asyncio
 async def test_update_speaker_map_no_result_yet(client):
     """If task has no result_json (still pending), update returns False."""
     from app import state
@@ -97,7 +92,6 @@ def test_speakers_patch_requires_auth(client):
     assert r.status_code == 401
 
 
-@pytest.mark.asyncio
 async def test_speakers_patch_updates_and_returns_task(client, monkeypatch):
     from app import state
     sid = _login(client, monkeypatch)
@@ -120,7 +114,6 @@ async def test_speakers_patch_updates_and_returns_task(client, monkeypatch):
     assert body["result"]["speaker_map"] == {"Speaker A": "אסף"}
 
 
-@pytest.mark.asyncio
 async def test_speakers_patch_404_for_foreign_task(client, monkeypatch):
     from app import state
     sid = _login(client, monkeypatch)

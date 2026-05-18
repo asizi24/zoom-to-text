@@ -40,9 +40,31 @@ jobs:
           node-version: '20'
           cache: npm
 
-      - run: npm install
+      # `npm ci` is strict: it requires package-lock.json, fails on drift,
+      # and skips the dependency-graph reconciliation that `npm install`
+      # performs. Net result: 2-3x faster on cold cache, and CI cannot
+      # silently float versions away from what was committed.
+      - run: npm ci
+
+      # Cache the Playwright browser binaries (~250MB chromium) keyed on
+      # the package-lock hash. Without this, `playwright install` pulls
+      # the binary fresh on every CI run, dominating wall-clock time.
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            playwright-${{ runner.os }}-
 
       - run: npx playwright install --with-deps chromium
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+
+      # Even on a cache hit we still install OS-level deps (system libs
+      # change with Ubuntu image versions; browser binaries don't).
+      - run: npx playwright install-deps chromium
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
 
       - run: npx playwright test tests-a11y/
         env:
@@ -73,7 +95,7 @@ jobs:
           node-version: '20'
           cache: npm
 
-      - run: npm install
+      - run: npm ci
 
       - run: npx lhci autorun
         env:

@@ -1,4 +1,11 @@
 <!DOCTYPE html>
+<!--
+  TODO(csp): this file ships ~60 inline onclick / onsubmit / onchange
+  handlers, which blocks adopting a strict Content-Security-Policy
+  (script-src 'self' without 'unsafe-inline'). Migration path: rewrite
+  inline handlers as delegated listeners keyed off data-action attributes,
+  then add the strict CSP header from app.main.
+-->
 <html lang="he" dir="rtl">
 <head>
   <meta charset="UTF-8" />
@@ -4192,6 +4199,37 @@
 
 <script>
   // ══════════════════════════════════════════════════════════════════════════
+  // Auth-aware fetch wrapper — intercept 401s from /api/* and redirect to
+  // /login so a silently expired session doesn't surface as a series of
+  // "JSON parse error" toasts. Skips the public /api/share/* endpoint and
+  // the public /api/health probe — those legitimately work without auth.
+  // ══════════════════════════════════════════════════════════════════════════
+  (function () {
+    const _origFetch = window.fetch.bind(window);
+    function _isApiCall(input) {
+      const url = typeof input === 'string' ? input : (input && input.url) || '';
+      if (!url) return false;
+      if (!url.startsWith('/api/') && !url.includes(location.host + '/api/')) {
+        return false;
+      }
+      if (url.includes('/api/share/') || url.includes('/api/health')) {
+        return false;
+      }
+      return true;
+    }
+    window.fetch = async function (input, init) {
+      const response = await _origFetch(input, init);
+      if (response.status === 401 && _isApiCall(input)) {
+        // One-shot redirect — don't loop if already on /login.
+        if (!location.pathname.startsWith('/login')) {
+          location.replace('/login?expired=1');
+        }
+      }
+      return response;
+    };
+  })();
+
+  // ══════════════════════════════════════════════════════════════════════════
   // State
   // ══════════════════════════════════════════════════════════════════════════
   let currentTab    = 'url';
@@ -8071,10 +8109,43 @@
 <script>
   // B6.1: register the PWA service worker. Failures are non-fatal — the app
   // still works without offline shell caching.
+  //
+  // Update flow: the SW no longer calls skipWaiting() in install (see
+  // service-worker.js). When a new SW is waiting, we offer a non-blocking
+  // refresh prompt and only apply the update when the user accepts.
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
       navigator.serviceWorker
         .register('/service-worker.js', { scope: '/' })
+        .then((reg) => {
+          // Listen for a new SW installing.
+          reg.addEventListener('updatefound', () => {
+            const installing = reg.installing;
+            if (!installing) return;
+            installing.addEventListener('statechange', () => {
+              if (
+                installing.state === 'installed' &&
+                navigator.serviceWorker.controller
+              ) {
+                // A new version is waiting. Defer the swap so we don't
+                // wipe the shell out from under an active transcription.
+                const apply = window.confirm(
+                  'גרסה חדשה זמינה. לרענן עכשיו?'
+                );
+                if (apply && reg.waiting) {
+                  reg.waiting.postMessage({ type: 'SKIP_WAITING' });
+                }
+              }
+            });
+          });
+          // When the new SW takes over, reload once so the page uses it.
+          let _reloaded = false;
+          navigator.serviceWorker.addEventListener('controllerchange', () => {
+            if (_reloaded) return;
+            _reloaded = true;
+            location.reload();
+          });
+        })
         .catch((err) => console.warn('SW registration failed:', err));
     });
   }

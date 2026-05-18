@@ -17,7 +17,6 @@ import pytest
 from app.models import LessonResult, ProcessingMode
 
 
-@pytest.mark.asyncio
 async def test_find_cached_task_returns_completed(client):
     """The most recent COMPLETED task with same url+user is returned."""
     from app import state
@@ -31,7 +30,6 @@ async def test_find_cached_task_returns_completed(client):
     assert cached.result.summary == "hello"
 
 
-@pytest.mark.asyncio
 async def test_find_cached_task_scopes_per_user(client):
     """User B does NOT see user A's cached results."""
     from app import state
@@ -44,7 +42,6 @@ async def test_find_cached_task_scopes_per_user(client):
     assert cached_for_b is None
 
 
-@pytest.mark.asyncio
 async def test_find_cached_task_ignores_pending(client):
     """A pending/failed task with same URL must NOT be served as cache."""
     from app import state
@@ -53,7 +50,6 @@ async def test_find_cached_task_ignores_pending(client):
     assert cached is None
 
 
-@pytest.mark.asyncio
 async def test_find_cached_task_skips_uploads(client):
     """upload:filename URLs are never cached (file content can vary)."""
     from app import state
@@ -63,7 +59,6 @@ async def test_find_cached_task_skips_uploads(client):
     assert cached is None
 
 
-@pytest.mark.asyncio
 async def test_copy_result_from_cached_clones_independently(client):
     """
     After cloning, deleting the source must NOT remove the clone's result.
@@ -96,7 +91,6 @@ async def test_copy_result_from_cached_clones_independently(client):
     assert clone_after.result.summary == "source content"
 
 
-@pytest.mark.asyncio
 async def test_pipeline_short_circuits_on_cache_hit(client, monkeypatch):
     """
     processor.run_pipeline() must bail out before the download stage when a
@@ -139,7 +133,6 @@ async def test_pipeline_short_circuits_on_cache_hit(client, monkeypatch):
     assert final.result.summary == "cached output"
 
 
-@pytest.mark.asyncio
 async def test_pipeline_runs_downloader_when_cache_miss(client, monkeypatch):
     """Mirror test: when no cached task exists, the downloader IS invoked."""
     from app import state

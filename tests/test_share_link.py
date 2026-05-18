@@ -100,13 +100,61 @@ def test_invalid_share_token_returns_404(client):
 
 
 def test_share_token_does_not_expose_audio(authed_client, client):
-    """has_audio must always be False in shared responses."""
+    """Audio-flag and audio source must not be present in shared responses."""
     _seed_completed_task("share-no-audio")
     share_url = authed_client.post("/api/tasks/share-no-audio/share").json()["share_url"]
     token = share_url.rstrip("/").rsplit("/", 1)[-1]
 
     body = client.get(f"/api/share/{token}").json()
-    assert body["has_audio"] is False
+    # Stripped response — has_audio is not even surfaced.
+    assert "has_audio" not in body
+
+
+def test_share_response_strips_internal_lesson_fields(authed_client, client):
+    """The public share response must omit transcript / debug payloads."""
+    from datetime import datetime, timezone
+    import app.state as s
+
+    # Seed a task whose result has every "owner-only" lesson field populated.
+    async def _setup():
+        await state_module.create_task(
+            "share-strip-1", url="http://test/rec", user_id="test-user"
+        )
+        result = LessonResult(
+            summary="Public summary",
+            language="he",
+            transcript="SECRET raw transcript — should never be shared",
+            diarized_transcript="Speaker A: SECRET — should never be shared",
+            exam_critique_log={"debug": "internal LLM scores"},
+        )
+        await state_module.complete_task("share-strip-1", result)
+
+    asyncio.run(_setup())
+
+    share_url = authed_client.post("/api/tasks/share-strip-1/share").json()["share_url"]
+    token = share_url.rstrip("/").rsplit("/", 1)[-1]
+
+    body = client.get(f"/api/share/{token}").json()
+
+    # Lesson body should still carry the public surface.
+    assert body["result"]["summary"] == "Public summary"
+
+    # But never the source-material or internal-debug fields.
+    assert "transcript" not in body["result"]
+    assert "diarized_transcript" not in body["result"]
+    assert "exam_critique_log" not in body["result"]
+    assert "raw_llm_response" not in body["result"]
+
+    # And never owner-only top-level metadata.
+    assert "error_details" not in body
+    assert "error" not in body
+    assert "failed_at" not in body
+    assert "has_audio" not in body
+
+    # Whole-response string check — defense in depth against future regressions
+    # that re-introduce a field carrying the raw transcript.
+    raw = json.dumps(body)
+    assert "SECRET" not in raw
 
 
 def test_share_response_includes_expires_at(authed_client):

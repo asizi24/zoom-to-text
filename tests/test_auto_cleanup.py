@@ -25,7 +25,6 @@ async def _set_failed_at_directly(task_id: str, iso_value: str) -> None:
     await db.commit()
 
 
-@pytest.mark.asyncio
 async def test_cleanup_removes_old_failed_tasks(client):
     """A failed task older than the threshold is deleted."""
     from app import state
@@ -40,7 +39,6 @@ async def test_cleanup_removes_old_failed_tasks(client):
     assert await state.get_task_for_user("old1", "u") is None
 
 
-@pytest.mark.asyncio
 async def test_cleanup_keeps_recent_failures(client):
     """A task that failed only an hour ago survives the 24h cleanup."""
     from app import state
@@ -55,7 +53,6 @@ async def test_cleanup_keeps_recent_failures(client):
     assert await state.get_task_for_user("recent1", "u") is not None
 
 
-@pytest.mark.asyncio
 async def test_cleanup_ignores_non_failed_tasks(client):
     """Pending/completed tasks are never auto-cleaned even with old created_at."""
     from app import state
@@ -81,7 +78,6 @@ async def test_cleanup_ignores_non_failed_tasks(client):
     assert "done1" not in ids
 
 
-@pytest.mark.asyncio
 async def test_cleanup_returns_audio_paths(client):
     """The return list carries audio_path so the caller can unlink files."""
     from app import state
@@ -96,7 +92,6 @@ async def test_cleanup_returns_audio_paths(client):
     assert paths == ["/data/downloads/aud1.m4a"]
 
 
-@pytest.mark.asyncio
 async def test_cleanup_skips_legacy_failed_without_failed_at(client):
     """
     Legacy rows that failed before failed_at existed have NULL failed_at.
@@ -117,7 +112,6 @@ async def test_cleanup_skips_legacy_failed_without_failed_at(client):
     assert await state.get_task_for_user("legacy1", "u") is not None
 
 
-@pytest.mark.asyncio
 async def test_fail_task_sets_failed_at(client):
     """fail_task() must populate failed_at automatically (without it cleanup is impossible)."""
     from app import state

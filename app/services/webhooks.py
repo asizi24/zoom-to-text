@@ -14,8 +14,11 @@ Design choices:
 """
 from __future__ import annotations
 
+import ipaddress
 import logging
+import socket
 from typing import Optional
+from urllib.parse import urlparse
 
 import httpx
 
@@ -31,6 +34,76 @@ _HTTP_TIMEOUT = 5.0
 # Cap on summary preview included in the webhook body so we don't dump a
 # 50 KB lesson into Slack.
 _PREVIEW_CHARS = 600
+
+# Well-known managed webhook providers — trusted regardless of resolved IP.
+# DNS spoofing against these public hostnames is not a realistic threat
+# model for this app; allowlisting avoids a getaddrinfo round-trip and
+# prevents false positives if a CDN frontend resolves to an unusual range.
+_WEBHOOK_ALLOWLIST_HOSTS = frozenset({
+    "hooks.slack.com",
+    "discord.com",
+    "discordapp.com",
+})
+
+# Block common internal service ports outright even if the destination
+# resolves to a public IP. These are never legitimate webhook targets and
+# blocking them defends against DNS-rebinding-style attacks that map a
+# public name onto an internal port.
+_BLOCKED_PORTS = frozenset({22, 25, 3306, 5432, 6379})
+
+
+def _is_safe_webhook_url(url: str) -> bool:
+    """Reject URLs that could be used for SSRF against internal services.
+
+    Returns True only when the URL:
+      * parses cleanly with an http/https scheme,
+      * has a hostname that is either on the trusted allowlist OR resolves
+        exclusively to public IPs,
+      * does not target a blocked internal-service port.
+    """
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    if parsed.scheme not in ("http", "https"):
+        return False
+    host = parsed.hostname
+    if not host:
+        return False
+
+    # Reject well-known internal-service ports regardless of host.
+    port = parsed.port
+    if port is not None and port in _BLOCKED_PORTS:
+        return False
+
+    # Allowlist trusted managed providers — skip DNS resolution.
+    if host.lower() in _WEBHOOK_ALLOWLIST_HOSTS:
+        return True
+
+    # Resolve and confirm every returned address is publicly routable.
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        return False
+    if not infos:
+        return False
+    for info in infos:
+        sockaddr = info[4]
+        addr = sockaddr[0]
+        try:
+            ip = ipaddress.ip_address(addr)
+        except ValueError:
+            return False
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+        ):
+            return False
+    return True
 
 
 def _summary_preview(task: TaskResponse) -> str:
@@ -115,6 +188,14 @@ async def _send_one(
     kind = hook.get("kind") or "slack"
     if not url.startswith("https://"):
         logger.warning("webhook %s rejected: non-https URL", hook.get("id"))
+        return None
+    if not _is_safe_webhook_url(url):
+        # Truncate the URL in the log to avoid persisting secrets that may
+        # be embedded in the path (e.g. Slack hooks include a per-channel token).
+        logger.warning(
+            "webhook %s rejected: SSRF-unsafe destination (%.40s…)",
+            hook.get("id"), url,
+        )
         return None
     try:
         payload = _build_payload(kind, task)

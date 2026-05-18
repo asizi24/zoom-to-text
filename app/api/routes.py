@@ -60,6 +60,14 @@ router = APIRouter()
 _ALLOWED_EXTENSIONS = {".mp3", ".mp4", ".m4a", ".wav", ".mkv", ".webm", ".avi"}
 
 
+def _safe_unlink(path: Path) -> None:
+    """Best-effort delete — never raises. Caller wraps via asyncio.to_thread."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning("safe unlink: failed to delete %s: %s", path, exc)
+
+
 # ── Rate-limit string helper ──────────────────────────────────────────────────────
 # Returns a slowapi limit string like "10/minute". Read at request time so that
 # tests can monkeypatch settings.rate_limit_per_minute without restarting.
@@ -204,8 +212,10 @@ async def create_task_from_upload(
                     )
                 await f.write(chunk)
     except HTTPException:
-        if file_path.exists():
-            file_path.unlink()
+        # Don't block the event loop on filesystem cleanup. On Windows in
+        # particular, file_path.unlink() can stall briefly if the OS still
+        # holds the handle from the aiofiles write that just failed.
+        await asyncio.to_thread(_safe_unlink, file_path)
         raise
 
     supplementary_context = await prepare_supplementary_context(task_id, supplementary_files)
@@ -1160,7 +1170,7 @@ async def get_topic_mastery(user_id: str = Depends(get_current_user)):
 
 async def _list_review_rows_for_task(user_id: str, task_id: str) -> list[dict]:
     """Tiny helper for /mastery — load all review rows for one task in one query."""
-    db = await state._get_db()
+    db = await state.get_db()
     async with db.execute(
         "SELECT card_index, easiness, interval, repetitions, due_at "
         "FROM flashcard_reviews WHERE user_id = ? AND task_id = ?",
@@ -1323,12 +1333,38 @@ async def revoke_share_link(
 async def get_shared_task(token: str):
     """
     Public endpoint — no auth required.
-    Returns the lesson result for a share token so the frontend can render it.
+
+    Returns a stripped-down lesson result for a share token. We deliberately
+    omit fields that could leak the owner's full source material or internal
+    debug state:
+      • transcript / diarized_transcript — full source text of the recording
+      • exam_critique_log / raw_llm_response — internal LLM debug payloads
+      • error / error_details / failed_at / has_audio — owner-only metadata
     """
     task = await state.get_task_by_share_token(token)
     if task is None:
         raise HTTPException(status_code=404, detail="Share link not found or task incomplete")
-    return task
+
+    shared_result: Optional[dict] = None
+    if task.result is not None:
+        shared_result = task.result.model_dump(
+            exclude={
+                "transcript",
+                "diarized_transcript",
+                "exam_critique_log",
+                "raw_llm_response",
+            }
+        )
+
+    return {
+        "task_id": task.task_id,
+        "status": task.status,
+        "progress": task.progress,
+        "message": task.message,
+        "created_at": task.created_at,
+        "url": task.url,
+        "result": shared_result,
+    }
 
 
 # ── Provider capabilities (UI uses this to filter the mode dropdown) ──────────
