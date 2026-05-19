@@ -90,3 +90,7 @@ node_modules/
 playwright-report/
 test-results/
 .lighthouseci/
+
+# Google Drive desktop client upload staging (orphan artifacts)
+.tmp.driveupload/
+Clean
