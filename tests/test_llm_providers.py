@@ -352,6 +352,8 @@ async def test_ollama_generate_text_builds_correct_request(monkeypatch):
     assert captured["json"]["model"] == "test-llama"
     assert captured["json"]["prompt"] == "hi"
     assert captured["json"]["stream"] is False
+    # num_ctx must be sent so long transcripts aren't truncated by Ollama's default.
+    assert captured["json"]["options"]["num_ctx"] == settings.ollama_num_ctx
 
 
 async def test_ollama_audio_upload_raises_unsupported():

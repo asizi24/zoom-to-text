@@ -75,6 +75,7 @@ class OllamaProvider(LLMProvider):
             "options": {
                 "temperature": temperature,
                 "num_predict": max_tokens,
+                "num_ctx": settings.ollama_num_ctx,
             },
         }
         try:
@@ -120,7 +121,7 @@ class OllamaProvider(LLMProvider):
             "model": settings.ollama_model,
             "messages": _contents_to_messages(contents),
             "stream": True,
-            "options": {"temperature": temperature},
+            "options": {"temperature": temperature, "num_ctx": settings.ollama_num_ctx},
         }
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:

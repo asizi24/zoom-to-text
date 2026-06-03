@@ -1,0 +1,8 @@
+# Build:  ollama create qwen2.5-16k -f scripts\ollama\qwen2.5-16k.Modelfile
+#
+# Faster variant: 16k context stays (mostly) resident on the 12GB GPU, so
+# summaries run at full GPU speed. Covers ~1h lectures. For longer recordings
+# that would exceed ~16k tokens, use qwen2.5-32k instead (spills ~half to CPU
+# but never truncates). Switch by changing OLLAMA_MODEL in .env.
+FROM qwen2.5:14b
+PARAMETER num_ctx 16384

@@ -18,8 +18,34 @@ Whisper transcription service — two backends:
 import asyncio
 import gc
 import logging
+import os
+import sys
 import time
 from pathlib import Path
+
+
+# ── Windows CUDA DLL discovery ─────────────────────────────────────────────────
+# faster-whisper (CTranslate2) needs the CUDA runtime DLLs (cublas, cudnn) on the
+# loader path when WHISPER_DEVICE=cuda. The pip `nvidia-*-cu12` wheels install
+# them under site-packages/nvidia/<lib>/bin, which Windows does NOT search
+# automatically — so a GPU load fails with "cublas64_12.dll is not found".
+# Register those bin dirs explicitly. No-op on Linux/Docker (torch handles it).
+if sys.platform == "win32":
+    import importlib.util
+
+    for _nv_pkg in ("nvidia.cublas", "nvidia.cudnn", "nvidia.cuda_nvrtc"):
+        try:
+            _spec = importlib.util.find_spec(_nv_pkg)
+            if _spec and _spec.submodule_search_locations:
+                _bin = os.path.join(_spec.submodule_search_locations[0], "bin")
+                if os.path.isdir(_bin):
+                    os.add_dll_directory(_bin)
+                    # CTranslate2 loads cublas/cudnn lazily via LoadLibrary, which
+                    # consults PATH but not the add_dll_directory list — so prepend
+                    # to PATH too, otherwise GPU encode() still can't find the DLL.
+                    os.environ["PATH"] = _bin + os.pathsep + os.environ.get("PATH", "")
+        except Exception:  # pragma: no cover - best-effort DLL discovery
+            pass
 
 
 def _rss_mb() -> float:

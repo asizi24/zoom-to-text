@@ -104,6 +104,12 @@ class Settings(BaseSettings):
     # used by self-hosted setups that want privacy / offline operation.
     ollama_base_url: str = "http://localhost:11434"
     ollama_model:    str = "llama3.1:70b"
+    # Context window for Ollama requests. Ollama's own default is small (~4k) and
+    # silently truncates long lecture transcripts — the summarizer sends the whole
+    # transcript in one prompt, so we raise the window to fit it. 32768 suits
+    # qwen2.5 (32k native). Lower to 16384 if GPU VRAM is tight (less KV cache
+    # resident on the GPU); a value above the model's native context degrades it.
+    ollama_num_ctx: int = 32768
 
     # ── LLM debugging ──────────────────────────────────────────────────────────
     # When True, persist raw LLM responses (synthesis + extraction) into
