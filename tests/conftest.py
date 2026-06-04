@@ -35,6 +35,25 @@ def _reset_state_module_singletons(monkeypatch):
     monkeypatch.setattr(state_module, "_chat_history_lock", asyncio.Lock(), raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _reset_llm_provider_cache():
+    """
+    Clear the cached LLM provider before AND after every test.
+
+    get_provider() memoizes the active provider in a module-level singleton. Tests
+    that flip settings.llm_provider (e.g. to "openrouter"/"ollama") and call
+    _reset_provider_cache() leave that singleton populated; monkeypatch reverts the
+    setting but not the cache, so the stale provider leaks into later tests — e.g.
+    /api/capabilities then reports the wrong provider. Resetting on both sides keeps
+    every test hermetic regardless of execution order.
+    """
+    from app.services.llm_providers import _reset_provider_cache
+
+    _reset_provider_cache()
+    yield
+    _reset_provider_cache()
+
+
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     """FastAPI TestClient with an isolated temp database."""
