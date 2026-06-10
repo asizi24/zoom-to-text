@@ -9,7 +9,7 @@ import logging
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter, Cookie, HTTPException
+from fastapi import APIRouter, Cookie, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
@@ -59,6 +59,48 @@ async def verify_magic_link(token: str):
         raise HTTPException(status_code=400, detail="קישור לא תקין או פג תוקף. בקש קישור חדש.")
 
     session_id = await state.create_session(user_id)
+
+    response = RedirectResponse(url="/", status_code=302)
+    response.set_cookie(
+        key="session_id",
+        value=session_id,
+        httponly=True,
+        secure=not settings.base_url.startswith("http://localhost"),
+        samesite="lax",
+        max_age=30 * 24 * 60 * 60,
+    )
+    return response
+
+
+@router.get("/auth/dev-login")
+async def dev_login(request: Request):
+    """
+    Loopback-only convenience login for local development.
+
+    Skips the magic-link email entirely (no Resend key needed). Active ONLY when
+    ENABLE_DEV_LOGIN=true AND base_url is http://localhost — any real deployment
+    sets a domain base_url, so this 404s in production even if the flag is left
+    on. Logs in as the first ADMIN_EMAILS entry (else the first ALLOWED_EMAILS).
+    """
+    if not (settings.enable_dev_login and settings.base_url.startswith("http://localhost")):
+        raise HTTPException(status_code=404, detail="Not found")
+
+    admins = [e.strip().lower() for e in settings.admin_emails.split(",") if e.strip()]
+    allowed = [e.strip().lower() for e in settings.allowed_emails.split(",") if e.strip()]
+    candidates = admins or allowed
+    if not candidates:
+        raise HTTPException(
+            status_code=400,
+            detail="dev-login needs ADMIN_EMAILS or ALLOWED_EMAILS to be set",
+        )
+    email = candidates[0]
+
+    user_id = await state.get_or_create_user(email)
+    session_id = await state.create_session(user_id)
+    logger.warning(
+        f"DEV-LOGIN used — issued a 30-day session for {email} "
+        f"(client={request.client.host if request.client else '?'}, loopback-only)"
+    )
 
     response = RedirectResponse(url="/", status_code=302)
     response.set_cookie(

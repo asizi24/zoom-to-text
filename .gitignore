@@ -69,6 +69,7 @@ data/
 
 # Log files
 *.log
+*.log.err
 
 # Environment files (note: `.env` is already listed under "Environment variables"
 # at the top; *.env catches `.env.local`, `.env.production`, etc.)

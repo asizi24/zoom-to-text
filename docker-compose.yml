@@ -13,13 +13,38 @@ services:
       # ── Whisper model cache ─────────────────────────────────────────────────
       # The large-v3 model (~3 GB) is downloaded once and reused across rebuilds.
       # Without this, every `docker-compose up --build` re-downloads the model.
-      - whisper_model_cache:/root/.cache/faster_whisper
+      # The app runs as appuser (uid 1000), so its HOME is /home/appuser — the
+      # cache must mount there, NOT /root, or the model re-downloads every run.
+      - whisper_model_cache:/home/appuser/.cache/faster_whisper
 
     env_file:
       - .env
 
     environment:
       - PYTHONUNBUFFERED=1
+      # This container has no GPU passthrough (no `--gpus`, and the light image
+      # ships no CUDA libs), so faster-whisper crashes if it tries cuda/float16.
+      # Force CPU here — this OVERRIDES the .env (which keeps cuda/float16 for the
+      # GPU home-server). int8 is the correct CPU compute type.
+      - WHISPER_DEVICE=cpu
+      - WHISPER_COMPUTE_TYPE=int8
+      # ── Fully-local LLM (no external API) ─────────────────────────────────
+      # Route summary / exam / flashcards / chat through Ollama on the HOST,
+      # which uses the RTX 4070 Ti. Inside the container `localhost` is the
+      # container itself, so the host's Ollama must be reached via
+      # host.docker.internal (verified reachable). This OVERRIDES the .env,
+      # where LLM_PROVIDER defaults to gemini and OLLAMA_BASE_URL=localhost.
+      - LLM_PROVIDER=ollama
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      # mistral-nemo:12b chosen over .env's qwen2.5:14b after Hebrew testing:
+      # qwen2.5 code-switches into Chinese mid-sentence on Hebrew reasoning
+      # prompts (unusable here); mistral-nemo stays clean Hebrew, fits 100% on
+      # the 4070 Ti, and has a 128k context so a full-length lecture transcript
+      # is never silently truncated (gemma2:9b is cleaner Hebrew but only 8k).
+      - OLLAMA_MODEL=mistral-nemo:12b
+      # Loopback-only one-click login — no Resend email key needed locally.
+      # Honored only because BASE_URL is http://localhost (see auth.dev_login).
+      - ENABLE_DEV_LOGIN=true
       # Override these per-environment as needed:
       # - WHISPER_MODEL=medium
       # - AUTO_SHUTDOWN_IDLE_MINUTES=30
@@ -31,8 +56,12 @@ services:
     deploy:
       resources:
         limits:
-          memory: 6g
-          cpus: '3.5'
+          # Host is an i7-13700K (24 threads) / 128 GB RAM. The old 3.5-core /
+          # 6 GB cap throttled CPU Whisper to a fraction of the machine. The LLM
+          # now runs on the host GPU via Ollama, so the container only needs CPU
+          # for transcription — give it plenty.
+          memory: 12g
+          cpus: '12'
         reservations:
           memory: 512m
 

@@ -54,6 +54,25 @@ def _reset_llm_provider_cache():
     _reset_provider_cache()
 
 
+@pytest.fixture(autouse=True)
+def _reset_ip_rate_limiter():
+    """
+    Clear the in-memory IP rate-limiter window before AND after every test.
+
+    app.rate_limit.limiter is a module-level singleton; its _windows deque is
+    keyed by client IP ("testclient" under TestClient) and persists across
+    tests. Task-creation tests that exhaust the per-minute window otherwise
+    leak a 429 into unrelated later tests (e.g. the supplementary-file upload
+    test, which expects a 400). Resetting on both sides keeps tests hermetic
+    regardless of execution order.
+    """
+    from app.rate_limit import limiter
+
+    limiter._windows.clear()
+    yield
+    limiter._windows.clear()
+
+
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     """FastAPI TestClient with an isolated temp database."""

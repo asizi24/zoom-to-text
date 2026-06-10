@@ -2108,7 +2108,9 @@ async def create_recipe(
 async def list_recipes_for_user(user_id: str) -> list[dict]:
     db = await _get_db()
     async with db.execute(
-        "SELECT * FROM lesson_recipes WHERE user_id = ? ORDER BY created_at DESC",
+        # rowid tiebreaker keeps ordering stable when several recipes share the
+        # same created_at timestamp (inserts within the same millisecond).
+        "SELECT * FROM lesson_recipes WHERE user_id = ? ORDER BY created_at DESC, rowid DESC",
         [user_id],
     ) as cur:
         rows = await cur.fetchall()

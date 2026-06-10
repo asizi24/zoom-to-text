@@ -24,6 +24,7 @@ FROM python:3.11-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     curl \
+    gosu \
     && rm -rf /var/lib/apt/lists/*
 # WeasyPrint system libs (libpango, libcairo, libharfbuzz, libgdk-pixbuf,
 # fonts-dejavu, shared-mime-info) were removed when weasyprint moved to
@@ -48,11 +49,18 @@ RUN mkdir -p data/downloads
 
 # Non-root user for security
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
-USER appuser
+
+# Entrypoint fixes ownership of the /app/data bind-mount at runtime (a host
+# mount overrides the image's chown and arrives root-owned, which made the
+# app crash with PermissionError on data/downloads). It runs as root, chowns
+# the mounted dir, then drops to appuser via gosu before exec'ing the app.
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

@@ -86,6 +86,13 @@ class Settings(BaseSettings):
     # set ADMIN_EMAILS in your `.env` (see `.env.example`).
     admin_emails: str = ""
     resend_api_key: str = ""
+    # When True (and base_url is http://localhost), exposes GET
+    # /api/auth/dev-login — a one-click loopback login that skips the magic-link
+    # email entirely (no Resend key needed for local dev). It logs in as the
+    # first ADMIN_EMAILS entry (falling back to the first ALLOWED_EMAILS entry).
+    # NEVER enable in production: any real deployment uses a domain base_url, so
+    # the endpoint 404s there even if this flag is accidentally left on.
+    enable_dev_login: bool = False
     # Allowed CORS origin — set to your Fly.io domain in production
     cors_origin: str = "http://localhost:8000"
 
