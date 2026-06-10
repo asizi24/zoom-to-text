@@ -188,6 +188,10 @@ def _run_ydl(opts: dict, url: str):
 
 def _raise_user_friendly_error(raw_error: str, had_cookies: bool) -> None:
     """Convert yt-dlp error strings into helpful messages for the user."""
+    # Always log the raw yt-dlp error — the user-facing message below is lossy
+    # (e.g. several distinct failures all collapse to "404"), so this is the only
+    # place the true cause is preserved for diagnosis.
+    logger.error(f"yt-dlp download failed (had_cookies={had_cookies}): {raw_error}")
     err = raw_error.lower()
 
     if any(k in err for k in ("password", "passcode", "403", "401", "forbidden", "login")):

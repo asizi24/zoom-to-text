@@ -24,13 +24,45 @@ _FFMPEG_TIMEOUT = 600
 
 logger = logging.getLogger(__name__)
 
-CHUNK_SECONDS = 13 * 60   # 13 minutes per chunk
-SILENCE_DB    = -40        # dBFS threshold — below this is treated as silence
-SILENCE_MIN_S = 1.0        # minimum silence duration to remove (seconds)
-PAD_S         = 0.2        # seconds of silence to keep around speech (natural transitions)
+CHUNK_SECONDS        = 13 * 60   # 13 minutes per chunk
+SILENCE_DB           = -40        # dBFS threshold — below this is treated as silence
+SILENCE_MIN_S        = 1.0        # minimum silence duration to remove (seconds)
+PAD_S                = 0.2        # seconds of silence to keep around speech (natural transitions)
+MIN_LECTURE_SECONDS  = 30         # files shorter than this are rejected pre-flight
+SILENT_THRESHOLD_DB  = -80.0      # mean volume below this is treated as complete silence
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
+
+def validate_audio(path: str) -> None:
+    """
+    Fail-fast pre-flight check. Raises ValueError with a user-visible message
+    when the file cannot be meaningfully transcribed.
+
+    Checks (in order):
+      1. Empty file           — os.path.getsize == 0
+      2. Invalid format       — ffprobe cannot parse the file
+      3. Too short            — duration < MIN_LECTURE_SECONDS
+      4. Completely silent    — mean volume < SILENT_THRESHOLD_DB
+    """
+    if os.path.getsize(path) == 0:
+        raise ValueError("File is empty")
+
+    try:
+        duration = _get_duration(path)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError, OSError):
+        raise ValueError("Invalid or unrecognizable audio format")
+
+    if duration < MIN_LECTURE_SECONDS:
+        raise ValueError(
+            f"Audio is too short ({duration:.0f}s) — "
+            f"minimum {MIN_LECTURE_SECONDS}s required for transcription"
+        )
+
+    mean_db = _get_mean_volume(path)
+    if mean_db < SILENT_THRESHOLD_DB:
+        raise ValueError("Audio is completely silent")
+
 
 def preprocess(audio_path: str) -> list[str]:
     """
@@ -42,7 +74,12 @@ def preprocess(audio_path: str) -> list[str]:
 
     Returns a list of new temp file paths. The caller must delete all of them.
     If any step fails, falls back gracefully so transcription can still proceed.
+
+    Raises ValueError (via validate_audio) for files that should never enter the
+    pipeline — empty, corrupt, too short, or silent.
     """
+    validate_audio(audio_path)   # propagates ValueError; NOT caught by the fallback below
+
     try:
         original_duration = _get_duration(audio_path)
         logger.info(
@@ -88,6 +125,25 @@ def cleanup_chunks(chunk_paths: list[str]) -> None:
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
+
+def _get_mean_volume(path: str) -> float:
+    """
+    Return mean volume in dBFS via ffmpeg's volumedetect filter.
+    Returns 0.0 (non-silent default) if the filter output cannot be parsed.
+    """
+    null_sink = "NUL" if os.name == "nt" else "/dev/null"
+    result = subprocess.run(
+        ["ffmpeg", "-i", path, "-af", "volumedetect", "-f", "null", null_sink],
+        capture_output=True, text=True, timeout=_FFMPEG_TIMEOUT,
+    )
+    for line in result.stderr.splitlines():
+        if "mean_volume:" in line:
+            try:
+                return float(line.split("mean_volume:")[1].split("dB")[0].strip())
+            except (ValueError, IndexError):
+                pass
+    return 0.0   # parse failure → assume non-silent (safe default)
+
 
 def _get_duration(path: str) -> float:
     """Return audio duration in seconds via ffprobe."""

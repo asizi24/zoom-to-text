@@ -27,6 +27,7 @@ TRIVIAL_QUESTION = QuizQuestion(
     options=["א. 2024", "ב. 2023", "ג. 2025", "ד. 2026"],
     correct_answer="א. 2024",
     explanation="שנת 2024 הייתה השנה הנוכחית בזמן ההרצאה",
+    bloom_level=1,
 )
 
 GOOD_QUESTION = QuizQuestion(
@@ -39,6 +40,7 @@ GOOD_QUESTION = QuizQuestion(
     ],
     correct_answer="א. מונע יצירת חיבורים חדשים לכל בקשה ומנצל חיבורים קיימים",
     explanation="יצירת TCP connection + TLS handshake + auth עולה 50-200ms. Pool שומר חיבורים פתוחים.",
+    bloom_level=4,
 )
 
 SAMPLE_SUMMARY = "השיעור עסק בארכיטקטורת מסדי נתונים ואופטימיזציית ביצועים."
@@ -62,7 +64,7 @@ def _mock_response(text: str) -> MagicMock:
     return mock
 
 
-def _critique_json(questions: list[QuizQuestion], scores: list[float]) -> str:
+def _critique_json(questions: list[QuizQuestion], scores: list[float], bloom_alignments=None) -> str:
     """Build a valid critique JSON string for mocking."""
     items = []
     for i, (q, avg) in enumerate(zip(questions, scores)):
@@ -75,6 +77,7 @@ def _critique_json(questions: list[QuizQuestion], scores: list[float]) -> str:
             "difficulty": s,
             "distractors": s,
             "accuracy": s,
+            "bloom_alignment": bloom_alignments[i] if bloom_alignments is not None else s,
             "avg": avg,
             "feedback": "טריוויאלית — שינון ישיר" if avg < 3.5 else "שאלה טובה",
         })
@@ -87,6 +90,31 @@ def _revised_exam_json(questions: list[QuizQuestion]) -> str:
         {"quiz": [q.model_dump() for q in questions]},
         ensure_ascii=False,
     )
+
+
+# ── Backward-compat tests for bloom_level ─────────────────────────────────────
+
+class TestBloomLevelBackwardCompat:
+    """bloom_level is Optional — old JSON without it must still parse cleanly."""
+
+    def test_quiz_question_without_bloom_level_loads(self):
+        q = QuizQuestion(
+            question="מה הוא TCP?",
+            options=["א. פרוטוקול", "ב. שפה", "ג. מסד נתונים", "ד. חומרה"],
+            correct_answer="א. פרוטוקול",
+            explanation="TCP הוא פרוטוקול תקשורת.",
+        )
+        assert q.bloom_level is None
+
+    def test_quiz_question_with_bloom_level_loads(self):
+        q = QuizQuestion(
+            question="מה הוא TCP?",
+            options=["א. פרוטוקול", "ב. שפה", "ג. מסד נתונים", "ד. חומרה"],
+            correct_answer="א. פרוטוקול",
+            explanation="TCP הוא פרוטוקול תקשורת.",
+            bloom_level=4,
+        )
+        assert q.bloom_level == 4
 
 
 # ── Unit tests for critique_exam ──────────────────────────────────────────────
@@ -122,6 +150,43 @@ class TestCritiqueExam:
         avgs = [q["avg"] for q in result["questions"]]
         assert avgs[0] < 3.5, f"Trivial question avg should be < 3.5, got {avgs[0]}"
         assert avgs[1] >= 3.5, f"Good question avg should be >= 3.5, got {avgs[1]}"
+
+    def test_critique_includes_bloom_alignment_field(self, monkeypatch):
+        """critique_exam result must include bloom_alignment in each question entry."""
+        import json
+        from app.services.summarizer import critique_exam
+
+        exam = [TRIVIAL_QUESTION, GOOD_QUESTION]
+        critique_items = [
+            {
+                "index": 0,
+                "question": TRIVIAL_QUESTION.question,
+                "clarity": 5, "difficulty": 1, "distractors": 2,
+                "accuracy": 5, "bloom_alignment": 1,
+                "avg": 2.8,
+                "feedback": "שאלת שינון — bloom_level=4 לא מוצדק",
+            },
+            {
+                "index": 1,
+                "question": GOOD_QUESTION.question,
+                "clarity": 5, "difficulty": 5, "distractors": 4,
+                "accuracy": 5, "bloom_alignment": 5,
+                "avg": 4.8,
+                "feedback": "שאלת ניתוח מצוינת",
+            },
+        ]
+        critique_text = json.dumps({"questions": critique_items}, ensure_ascii=False)
+
+        with patch("app.services.summarizer._generate_with_retry") as mock_gen:
+            mock_gen.return_value = _mock_response(critique_text)
+            result = critique_exam(exam, SAMPLE_SUMMARY)
+
+        questions = result["questions"]
+        assert "bloom_alignment" in questions[0], (
+            "critique_exam result must include bloom_alignment field"
+        )
+        assert questions[0]["bloom_alignment"] == 1
+        assert questions[1]["bloom_alignment"] == 5
 
 
 # ── Unit tests for revise_exam ────────────────────────────────────────────────
@@ -193,7 +258,7 @@ class TestExamCritiquePipeline:
         from app.config import settings
 
         monkeypatch.setattr(settings, "enable_exam_critique", True, raising=False)
-        monkeypatch.setattr(settings, "exam_critique_threshold", 3.5, raising=False)
+        monkeypatch.setattr(settings, "exam_critique_threshold", 3.8, raising=False)
 
         # Build the three Gemini responses in sequence:
         # 1. Initial generation → exam with trivial question

@@ -9,7 +9,7 @@ import logging
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter, Cookie, HTTPException
+from fastapi import APIRouter, Cookie, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
@@ -72,6 +72,48 @@ async def verify_magic_link(token: str):
     return response
 
 
+@router.get("/auth/dev-login")
+async def dev_login(request: Request):
+    """
+    Loopback-only convenience login for local development.
+
+    Skips the magic-link email entirely (no Resend key needed). Active ONLY when
+    ENABLE_DEV_LOGIN=true AND base_url is http://localhost — any real deployment
+    sets a domain base_url, so this 404s in production even if the flag is left
+    on. Logs in as the first ADMIN_EMAILS entry (else the first ALLOWED_EMAILS).
+    """
+    if not (settings.enable_dev_login and settings.base_url.startswith("http://localhost")):
+        raise HTTPException(status_code=404, detail="Not found")
+
+    admins = [e.strip().lower() for e in settings.admin_emails.split(",") if e.strip()]
+    allowed = [e.strip().lower() for e in settings.allowed_emails.split(",") if e.strip()]
+    candidates = admins or allowed
+    if not candidates:
+        raise HTTPException(
+            status_code=400,
+            detail="dev-login needs ADMIN_EMAILS or ALLOWED_EMAILS to be set",
+        )
+    email = candidates[0]
+
+    user_id = await state.get_or_create_user(email)
+    session_id = await state.create_session(user_id)
+    logger.warning(
+        f"DEV-LOGIN used — issued a 30-day session for {email} "
+        f"(client={request.client.host if request.client else '?'}, loopback-only)"
+    )
+
+    response = RedirectResponse(url="/", status_code=302)
+    response.set_cookie(
+        key="session_id",
+        value=session_id,
+        httponly=True,
+        secure=not settings.base_url.startswith("http://localhost"),
+        samesite="lax",
+        max_age=30 * 24 * 60 * 60,
+    )
+    return response
+
+
 @router.post("/auth/logout")
 async def logout(session_id: Optional[str] = Cookie(default=None)):
     """Delete the current session and clear the cookie."""
@@ -80,6 +122,32 @@ async def logout(session_id: Optional[str] = Cookie(default=None)):
     response = RedirectResponse(url="/login", status_code=302)
     response.delete_cookie("session_id")
     return response
+
+
+async def _send_rate_limit_warning_email(email: str) -> None:
+    """Call the Resend API to warn a user that their account has been blocked."""
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {settings.resend_api_key}"},
+            json={
+                "from": "Zoom to Text <onboarding@resend.dev>",
+                "to": [email],
+                "subject": "Zoom to Text — חשבונך נחסם זמנית",
+                "html": (
+                    "<div dir='rtl' style='font-family:sans-serif;max-width:420px;margin:auto'>"
+                    "<h2>⚠️ חשבונך נחסם זמנית</h2>"
+                    "<p>חרגת ממכסת <strong>2 בקשות עיבוד</strong> ב-24 שעות.</p>"
+                    "<p>חשבונך חסום למשך <strong>24 שעות</strong>.</p>"
+                    "<p style='color:#c0392b'><strong>שים לב:</strong> ניסיון נוסף בזמן החסימה "
+                    "יגרום לחסימה <em>קבועה</em> של החשבון.</p>"
+                    "<p><small>לפניות: צור קשר עם מנהל המערכת.</small></p>"
+                    "</div>"
+                ),
+            },
+            timeout=10.0,
+        )
+        resp.raise_for_status()
 
 
 async def _send_magic_link_email(email: str, token: str) -> None:

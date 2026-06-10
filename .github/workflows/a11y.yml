@@ -1,0 +1,102 @@
+name: a11y
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'static/**'
+      - 'tests-a11y/**'
+      - 'app/**'
+      - 'package.json'
+      - 'playwright.config.ts'
+      - 'lighthouserc.json'
+      - '.github/workflows/a11y.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'static/**'
+      - 'tests-a11y/**'
+      - 'app/**'
+      - 'package.json'
+      - 'playwright.config.ts'
+      - 'lighthouserc.json'
+
+jobs:
+  playwright:
+    name: Playwright + axe-core
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      # `npm ci` is strict: it requires package-lock.json, fails on drift,
+      # and skips the dependency-graph reconciliation that `npm install`
+      # performs. Net result: 2-3x faster on cold cache, and CI cannot
+      # silently float versions away from what was committed.
+      - run: npm ci
+
+      # Cache the Playwright browser binaries (~250MB chromium) keyed on
+      # the package-lock hash. Without this, `playwright install` pulls
+      # the binary fresh on every CI run, dominating wall-clock time.
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            playwright-${{ runner.os }}-
+
+      - run: npx playwright install --with-deps chromium
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+
+      # Even on a cache hit we still install OS-level deps (system libs
+      # change with Ubuntu image versions; browser binaries don't).
+      - run: npx playwright install-deps chromium
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+
+      - run: npx playwright test tests-a11y/
+        env:
+          CI: 'true'
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7
+
+  lighthouse:
+    name: Lighthouse CI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - run: npm ci
+
+      - run: npx lhci autorun
+        env:
+          LHCI_GITHUB_APP_TOKEN: ${{ secrets.LHCI_GITHUB_APP_TOKEN }}

@@ -86,7 +86,7 @@ def _seed_task_with_audio(audio_root: Path, task_id: str, body: bytes) -> Path:
         await state_module.create_task(task_id, url="http://test/rec", user_id=None)
         await state_module.set_audio_path(task_id, str(p))
 
-    asyncio.get_event_loop().run_until_complete(_setup())
+    asyncio.run(_setup())
     return p
 
 
@@ -104,7 +104,7 @@ def test_task_without_audio_returns_404(authed_client):
     async def setup():
         await state_module.create_task("t-no-audio", url="x", user_id=None)
 
-    asyncio.get_event_loop().run_until_complete(setup())
+    asyncio.run(setup())
     r = client.get("/api/tasks/t-no-audio/audio")
     assert r.status_code == 404
 
@@ -119,7 +119,7 @@ def test_audio_path_outside_root_is_rejected(authed_client, tmp_path):
         await state_module.create_task("t-escape", url="x", user_id=None)
         await state_module.set_audio_path("t-escape", str(evil))
 
-    asyncio.get_event_loop().run_until_complete(setup())
+    asyncio.run(setup())
     r = client.get("/api/tasks/t-escape/audio")
     assert r.status_code == 404
     assert b"PWNED" not in r.content

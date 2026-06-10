@@ -1,0 +1,24 @@
+{
+  "ci": {
+    "collect": {
+      "startServerCommand": "python -m uvicorn app.main:app --host 127.0.0.1 --port 8000",
+      "startServerReadyPattern": "Application startup complete",
+      "url": ["http://127.0.0.1:8000/static/index.html"],
+      "numberOfRuns": 1,
+      "settings": {
+        "preset": "desktop",
+        "chromeFlags": "--no-sandbox --disable-dev-shm-usage"
+      }
+    },
+    "assert": {
+      "assertions": {
+        "categories:accessibility": ["error", { "minScore": 0.95 }],
+        "categories:best-practices": ["warn", { "minScore": 0.90 }],
+        "categories:performance":   ["warn", { "minScore": 0.80 }]
+      }
+    },
+    "upload": {
+      "target": "temporary-public-storage"
+    }
+  }
+}

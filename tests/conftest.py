@@ -9,16 +9,74 @@ Key design decisions:
 - raising=False on setattr calls that target attributes added in later tasks,
   so the fixture doesn't crash if run before those tasks are complete.
 """
+import asyncio
 import pytest
 import app.state as state_module
 from app.config import settings
+
+
+@pytest.fixture(autouse=True)
+def _reset_state_module_singletons(monkeypatch):
+    """
+    Reset module-level event-loop-bound singletons in app.state before EVERY
+    test, regardless of whether the test uses the `client` fixture.
+
+    Why autouse? pytest-asyncio creates a fresh event loop per test. Locks
+    and the cached aiosqlite connection bind to the loop they were first
+    awaited on. Without this reset, the FIRST test that touches state.* in
+    a session warms `_db` against loop-1; the SECOND test (in loop-2) then
+    hangs forever on its first await against that stale connection —
+    aiosqlite's worker thread is stuck calling Future.set_result() on a
+    closed loop.
+    """
+    monkeypatch.setattr(state_module, "_db", None, raising=False)
+    monkeypatch.setattr(state_module, "_db_lock", asyncio.Lock(), raising=False)
+    monkeypatch.setattr(state_module, "_speaker_map_lock", asyncio.Lock(), raising=False)
+    monkeypatch.setattr(state_module, "_chat_history_lock", asyncio.Lock(), raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _reset_llm_provider_cache():
+    """
+    Clear the cached LLM provider before AND after every test.
+
+    get_provider() memoizes the active provider in a module-level singleton. Tests
+    that flip settings.llm_provider (e.g. to "openrouter"/"ollama") and call
+    _reset_provider_cache() leave that singleton populated; monkeypatch reverts the
+    setting but not the cache, so the stale provider leaks into later tests — e.g.
+    /api/capabilities then reports the wrong provider. Resetting on both sides keeps
+    every test hermetic regardless of execution order.
+    """
+    from app.services.llm_providers import _reset_provider_cache
+
+    _reset_provider_cache()
+    yield
+    _reset_provider_cache()
+
+
+@pytest.fixture(autouse=True)
+def _reset_ip_rate_limiter():
+    """
+    Clear the in-memory IP rate-limiter window before AND after every test.
+
+    app.rate_limit.limiter is a module-level singleton; its _windows deque is
+    keyed by client IP ("testclient" under TestClient) and persists across
+    tests. Task-creation tests that exhaust the per-minute window otherwise
+    leak a 429 into unrelated later tests (e.g. the supplementary-file upload
+    test, which expects a 400). Resetting on both sides keeps tests hermetic
+    regardless of execution order.
+    """
+    from app.rate_limit import limiter
+
+    limiter._windows.clear()
+    yield
+    limiter._windows.clear()
 
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     """FastAPI TestClient with an isolated temp database."""
     monkeypatch.setattr(state_module, "DB_PATH", tmp_path / "test.db")
-    monkeypatch.setattr(state_module, "_db", None, raising=False)  # added in Task 3
     monkeypatch.setattr(settings, "allowed_emails", "allowed@example.com", raising=False)  # added in Task 2
     monkeypatch.setattr(settings, "resend_api_key", "test_key", raising=False)  # added in Task 2
     monkeypatch.setattr(settings, "base_url", "http://testserver")
@@ -42,3 +100,51 @@ def mock_email(monkeypatch):
     import app.api.auth as auth_module
     monkeypatch.setattr(auth_module, "_send_magic_link_email", fake_send)
     return sent
+
+
+@pytest.fixture
+def lti_env(client, tmp_path, monkeypatch):
+    """
+    LTI test isolation. Layered on top of `client` so the test DB is already
+    initialised (the lti_oidc_state table is created in app.state.init_db()).
+
+    Redirects:
+      * keys module → tmp_path/lti_keys/{private,public}.pem
+      * config module → tmp_path/lti_platforms.json
+      * oidc module → fresh JWKS cache
+
+    Clears each module's singleton caches so prior tests don't leak state.
+
+    Returns a small env object with .write_platforms(records) so the test
+    can drop platform records into the JSON file and force a config reload.
+    """
+    import json as _json
+    from app.services.lti import config as lti_config
+    from app.services.lti import keys as lti_keys
+    from app.services.lti import oidc as lti_oidc
+
+    keys_dir = tmp_path / "lti_keys"
+    monkeypatch.setattr(lti_keys, "KEYS_DIR", keys_dir)
+    monkeypatch.setattr(lti_keys, "PRIVATE_PATH", keys_dir / "private.pem")
+    monkeypatch.setattr(lti_keys, "PUBLIC_PATH", keys_dir / "public.pem")
+    monkeypatch.setattr(lti_keys, "_private_key", None)
+    monkeypatch.setattr(lti_keys, "_public_key", None)
+
+    platforms_file = tmp_path / "lti_platforms.json"
+    monkeypatch.setattr(lti_config, "PLATFORMS_FILE", platforms_file)
+    monkeypatch.setattr(lti_config, "_platforms", None)
+
+    monkeypatch.setattr(lti_oidc, "_jwks_cache", {})
+
+    class _LtiEnv:
+        def __init__(self):
+            self.platforms_file = platforms_file
+            self.keys_dir = keys_dir
+
+        def write_platforms(self, records: list[dict]) -> None:
+            self.platforms_file.write_text(
+                _json.dumps(records), encoding="utf-8"
+            )
+            lti_config.reset_cache()
+
+    return _LtiEnv()

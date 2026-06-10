@@ -11,13 +11,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /build
 COPY requirements.txt .
 
-# Install torch CPU-only first (separate layer = cached separately).
-# Installing to /usr/local (system-wide), NOT --user, so appuser can read it.
-RUN pip install --no-cache-dir \
-    torch==2.3.0 torchaudio==2.3.0 \
-    --index-url https://download.pytorch.org/whl/cpu
-
-# Install the rest
+# torch / torchaudio moved to requirements-heavy.txt — NEVER installed in
+# the production light image. The pyannote diarization path (DIARIZATION_PROVIDER
+# =pyannote) needs heavy + a home-server. Production stays on text diarization.
 RUN pip install --no-cache-dir -r requirements.txt
 
 # ==============================================================================
@@ -28,7 +24,11 @@ FROM python:3.11-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     curl \
+    gosu \
     && rm -rf /var/lib/apt/lists/*
+# WeasyPrint system libs (libpango, libcairo, libharfbuzz, libgdk-pixbuf,
+# fonts-dejavu, shared-mime-info) were removed when weasyprint moved to
+# requirements-heavy.txt. Add them back in the heavy/home-server image only.
 
 # Copy system-wide packages from builder (accessible by all users)
 COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
@@ -49,11 +49,18 @@ RUN mkdir -p data/downloads
 
 # Non-root user for security
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
-USER appuser
+
+# Entrypoint fixes ownership of the /app/data bind-mount at runtime (a host
+# mount overrides the image's chown and arrives root-owned, which made the
+# app crash with PermissionError on data/downloads). It runs as root, chowns
+# the mounted dir, then drops to appuser via gosu before exec'ing the app.
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

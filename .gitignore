@@ -42,6 +42,7 @@ zoom to text/
 # Text files (except specific ones)
 *.txt
 !requirements.txt
+!requirements-heavy.txt
 !LICENSE.txt
 
 # OS files
@@ -52,9 +53,14 @@ Thumbs.db
 *.pem
 key.json
 *.json
+!package.json
+!package-lock.json
+!lighthouserc.json
+!tsconfig.json
 
 # GCP Service Account keys (NEVER commit these!)
-key.json
+# (key.json already listed under "SSH keys" above — kept there for proximity
+# to the broader `*.pem` pattern.)
 # *.json — do NOT add this; it would block package.json etc.
 
 # Database & state files
@@ -63,12 +69,11 @@ data/
 
 # Log files
 *.log
+*.log.err
 
+# Environment files (note: `.env` is already listed under "Environment variables"
+# at the top; *.env catches `.env.local`, `.env.production`, etc.)
 *.env
-
-.env
-*.env
- (2).env
 
 # Legacy archive & Claude internal
 _legacy_archive/
@@ -76,3 +81,17 @@ _legacy_archive/
 
 # Brainstorm session artifacts
 .superpowers/
+
+# RuFlo / Claude-flow tooling (generated, never committed)
+.claude-flow/
+.swarm/
+
+# Node / Playwright / Lighthouse CI
+node_modules/
+playwright-report/
+test-results/
+.lighthouseci/
+
+# Google Drive desktop client upload staging (orphan artifacts)
+.tmp.driveupload/
+Clean

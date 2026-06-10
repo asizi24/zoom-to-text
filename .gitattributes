@@ -1,0 +1,4 @@
+# Shell scripts MUST keep LF endings — CRLF breaks the container's /bin/sh
+# (docker-entrypoint.sh is run by sh, and a CR byte makes it fail to exec).
+*.sh text eol=lf
+docker-entrypoint.sh text eol=lf

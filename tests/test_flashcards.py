@@ -68,7 +68,6 @@ def test_parse_returns_empty_on_garbage():
 
 # ── Generation wiring ─────────────────────────────────────────────────────────
 
-@pytest.mark.asyncio
 async def test_generate_flashcards_returns_cards(monkeypatch):
     """Monkeypatch the sync helper so we don't hit Gemini."""
     def fake_sync(summary, transcript):
@@ -82,7 +81,6 @@ async def test_generate_flashcards_returns_cards(monkeypatch):
     assert cards[0].tags == ["t"]
 
 
-@pytest.mark.asyncio
 async def test_generate_flashcards_empty_summary_short_circuits():
     cards = await summarizer.generate_flashcards("", "x")
     assert cards == []

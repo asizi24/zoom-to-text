@@ -1,198 +1,177 @@
-# Zoom Transcriber — AI Study Assistant
+# Zoom to Text — AI Study Assistant
 
-Automatically transcribe and summarize Zoom lecture recordings using AI.  
-Upload a recording URL or an audio/video file → get a structured summary, chapter breakdown, and a 10-question quiz — in under 5 minutes.
+FastAPI service that turns a Zoom or YouTube recording into a structured summary, chapters, an American-style exam, flashcards, action items, and a fully searchable transcript — in a few minutes.
 
----
-
-## How It Works
-
-1. **Download** — The server downloads the Zoom recording audio via yt-dlp + ffmpeg
-2. **Process** — Three modes available (see [Processing Modes](#processing-modes) below)
-3. **Results** — Structured output: summary, chapters with key points, 8–10 multiple-choice questions
+**Live deployment:** https://zoom-to-text.fly.dev (closed beta — magic-link allowlist)
 
 ---
 
-## Requirements
+## Highlights
 
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed and running
-- A **Gemini API key** (free) from [Google AI Studio](https://aistudio.google.com/app/apikey)
-- Windows 10/11, macOS, or Linux
-
-> **RAM:** Gemini Direct mode needs ~1 GB. Whisper Local (medium model) needs ~3 GB.
+- **3 transcription modes** — Gemini Direct (audio → LLM), Whisper Local, Whisper API. Plus an **ivrit-ai** mode tuned for Hebrew.
+- **3 LLM backends** — Gemini 2.5 Flash, OpenRouter, Ollama. Switch with one env var.
+- **Two-call pipeline** — synthesis (summary + chapters + exam) ‖ extraction (action items, decisions, open questions, sentiment, objections) run in parallel.
+- **Diarization** — text-based via Gemini (default) or acoustic via Pyannote (home-server only).
+- **Study tools** — Anki / CSV flashcard export, SM-2 spaced repetition, Socratic AI tutor, transcript search, mind maps, smart highlights, cross-lecture glossary, topic-mastery dashboard.
+- **Collaboration** — public share links, cohort per-task sharing, ask-across-lectures, weekly email digest, outgoing webhooks (Slack/Discord).
+- **Exports** — Obsidian-flavored Markdown, PDF, ICS calendar, Anki `.apkg`, AI-generated podcast script.
+- **Auth** — Magic-link via Resend.com (closed allowlist) **or** LTI 1.3 SSO (Canvas / Moodle).
+- **PWA** — installable on desktop and mobile.
 
 ---
 
-## Setup — Step by Step
+## Architecture
 
-### 1. Clone the repository
+```
+                       ┌─────────────────────┐
+URL or upload ─────────┤ download (yt-dlp)   │
+                       └──────────┬──────────┘
+                                  │
+                       ┌──────────▼──────────┐
+                       │ transcribe          │   Gemini Direct │ Whisper Local
+                       │                     │   Whisper API   │ ivrit-ai
+                       └──────────┬──────────┘
+                                  │
+                  ┌───────────────┼───────────────┐
+                  │               │               │
+        ┌─────────▼─────┐ ┌───────▼──────┐ ┌──────▼──────┐
+        │ diarization   │ │ synthesis    │ │ extraction  │
+        │ (Gemini /     │ │ summary +    │ │ actions,    │
+        │  Pyannote)    │ │ chapters +   │ │ decisions,  │
+        │               │ │ exam         │ │ sentiment   │
+        └───────────────┘ └──────┬───────┘ └──────┬──────┘
+                                 │                │
+                                 └───────┬────────┘
+                                         │
+                                ┌────────▼────────┐
+                                │ SQLite + UI     │
+                                └─────────────────┘
+```
+
+Synthesis and extraction run in parallel via `asyncio.gather`. Synthesis failure fails the task; extraction and diarization degrade gracefully.
+
+---
+
+## Quick Start (Local Docker)
+
+### 1. Clone
 
 ```bash
 git clone https://github.com/asizi24/zoom-to-text.git
 cd zoom-to-text
 ```
 
-### 2. Create your `.env` file
-
-Copy the example and fill in your API key:
+### 2. Configure
 
 ```bash
 cp .env.example .env
 ```
 
-Open `.env` and set your Gemini API key:
+At minimum set `GOOGLE_API_KEY` (free key from [Google AI Studio](https://aistudio.google.com/app/apikey)).
 
-```env
-GOOGLE_API_KEY=your-gemini-api-key-here
-```
-
-Get a free key at: https://aistudio.google.com/app/apikey
-
-**Optional — OpenAI Whisper API mode:**
-
-```env
-OPENAI_API_KEY=sk-...
-```
-
-### 3. Start the server
+### 3. Run
 
 ```bash
 docker compose up -d
 ```
 
-First run takes **3–5 minutes** (builds the Docker image and downloads dependencies).  
-Subsequent starts take ~5 seconds.
+First build takes 3–5 minutes; subsequent starts ~5 seconds.
 
-### 4. Open the web interface
+### 4. Use
 
-```
-http://localhost:8000
-```
-
-Paste a Zoom recording URL or upload an audio/video file and click **Start**.
+Open http://localhost:8000 and paste a Zoom / YouTube URL or upload a file.
 
 ---
 
-## Chrome Extension (for private recordings)
+## Authentication
 
-If your Zoom recordings require authentication (e.g. university portal), use the Chrome extension:
+Two modes are supported:
 
-### Install
+**Magic-link (default).** Set `ALLOWED_EMAILS=alice@x.com,bob@y.com` and `RESEND_API_KEY=...`. The user enters their email at `/login` and receives a one-time link. Session is an opaque cookie in SQLite — revoke with `DELETE FROM sessions WHERE id = ?`.
 
-1. Open Chrome → go to `chrome://extensions/`
-2. Enable **Developer mode** (top right toggle)
-3. Click **Load unpacked**
-4. Select the `extension/` folder from this project
+**LTI 1.3 SSO.** For institutions running Canvas / Moodle / similar. Seed `/data/lti_platforms.json` with the platform registration JSON; users launch from the LMS course. Endpoints: `GET /lti/jwks`, `POST /lti/login`, `POST /lti/launch`.
 
-### Use
-
-1. Open the Zoom recording page in Chrome while logged in
-2. Click the extension icon
-3. Click **Send to Transcriber** — it automatically extracts session cookies and sends the URL to your local server
-
-> The extension communicates with `http://localhost:8000` by default.  
-> You can change the server URL in the extension settings panel.
-
----
-
-## Useful Commands
-
-```bash
-# Start the server (background)
-docker compose up -d
-
-# Stop the server
-docker compose down
-
-# View live logs
-docker logs -f zoom_transcriber
-
-# Rebuild after code changes
-docker compose up -d --build
-
-# Force full rebuild (clears pip cache)
-docker compose build --no-cache
-docker compose up -d
-
-# Check server health
-curl http://localhost:8000/health
-```
+`ADMIN_EMAILS` bypasses per-user 24h quotas and per-IP rate limits.
 
 ---
 
 ## Processing Modes
 
-| Mode | Speed | Privacy | Requirements | Best For |
-|------|-------|---------|--------------|----------|
-| **Gemini Direct** | ~3 min for 3h lecture | Audio sent to Google | `GOOGLE_API_KEY` | Most use cases |
-| **Whisper Local** | ~15 min for 3h lecture (CPU) | Audio stays on your machine | None | Sensitive content |
-| **OpenAI Whisper** | ~5 min for 3h lecture | Audio sent to OpenAI | `OPENAI_API_KEY` | Fast + accurate transcription |
-| **ivrit-ai** ⭐ | ~25 min for 3h lecture (CPU) | Audio stays on your machine | None (auto-downloads model) | **Hebrew content** (best accuracy) |
+| Mode | Speed (3 h lecture) | Privacy | Requires | Best for |
+|---|---|---|---|---|
+| **Gemini Direct** | ~3 min | Audio uploaded to Google | `GOOGLE_API_KEY` | Most cases |
+| **Whisper Local** | ~15 min (CPU) | Stays on your machine | nothing | Sensitive content |
+| **Whisper API** | ~5 min | Audio uploaded to OpenAI | `OPENAI_API_KEY` | Speed + accuracy |
+| **ivrit-ai** ⭐ | ~25 min (CPU) | Stays on your machine | nothing | Hebrew lectures |
 
-### ivrit-ai mode — Hebrew-tuned Whisper
+Whisper Local model size via `WHISPER_MODEL` (`tiny` / `base` / `small` / `medium` / `large-v3`).
 
-[ivrit-ai](https://github.com/ivrit-ai/ivrit.ai) is a Hebrew-focused fine-tune of OpenAI's Whisper, trained on thousands of hours of spoken Hebrew. On Hebrew lectures (especially with medical/technical jargon or fast speech) it typically outperforms vanilla Whisper Local.
-
-- First use downloads ~1.5 GB of CT2 model weights into the `whisper_model_cache` Docker volume (one-time).
-- Runs entirely on your machine — same privacy guarantees as Whisper Local.
-- Override the model via `IVRIT_AI_MODEL=ivrit-ai/whisper-v3-ct2` in `.env`.
-
-### OpenAI Whisper mode — how it works
-
-Because the OpenAI API has a 25 MB file size limit (~22 min of audio at 96 kbps), the audio is preprocessed automatically before sending:
-
-1. **Silence removal** — strips dead air using ffmpeg's `silenceremove` filter (threshold: −40 dBFS, minimum 1 second)
-2. **Chunking** — splits into ≤13-minute pieces that safely fit under the API limit
-3. **Transcription** — each chunk is sent to `whisper-1` in sequence
-4. **Merge** — transcripts are joined in order and sent to Gemini for summarization
+Whisper API handles long audio by removing silence + chunking to ≤13-minute pieces before upload (the OpenAI API has a 25 MB limit).
 
 ---
 
-## Whisper Model Sizes
+## LLM Provider Abstraction
 
-Relevant only for **Whisper Local** mode. Set `WHISPER_MODEL` in your `.env`:
+Summarization, chat, flashcards, critique, podcast generation — all route through `app/services/llm_providers/`. Switch backends with:
 
-| Model | RAM | Speed | Accuracy |
-|-------|-----|-------|----------|
-| `tiny` | ~400 MB | Fastest | Low |
-| `base` | ~600 MB | Fast | OK |
-| `small` | ~1 GB | Moderate | Good |
-| `medium` | ~2 GB | Slow | **Recommended** |
-| `large-v3` | ~4 GB | Slowest | Best |
+```env
+LLM_PROVIDER=gemini      # default — supports audio upload (GEMINI_DIRECT mode)
+LLM_PROVIDER=openrouter  # OPENROUTER_API_KEY + OPENROUTER_MODEL
+LLM_PROVIDER=ollama      # OLLAMA_BASE_URL + OLLAMA_MODEL (local; not deployed on Fly.io)
+```
 
----
-
-## Supported File Formats
-
-Direct upload supports: `mp3`, `mp4`, `m4a`, `wav`, `mkv`, `webm`  
-Maximum upload size: **600 MB**
+The frontend calls `GET /api/capabilities` on load and hides options the active provider can't support (e.g. `gemini_direct` is hidden under `ollama`).
 
 ---
 
-## UI Features
+## Feature Tour
 
-- **Export Markdown** — download the full summary, chapters, and quiz as a `.md` file
-- **Copy to clipboard** — copy the full result or individual sections
-- **History panel** — browse and reload past results without reprocessing
-- **Estimated time** — live countdown calculated from processing progress
-- **Keyboard shortcuts** — `Enter` to submit, `Esc` to return to the home screen
+**Study**
+- Summary + chapters + American-style exam (Bloom-tagged questions)
+- Flashcards with **SM-2 spaced repetition** and Anki `.apkg` export
+- **Socratic AI tutor** — chat that probes rather than answers
+- **Cross-lecture glossary** + **topic-mastery dashboard**
+- **Smart Highlights** + lazy-rendered **Mind Map**
+- Transcript search, multi-lecture cram guide
+
+**Collaboration**
+- Public share links per lesson
+- Cohort per-task sharing
+- Ask-across-lectures
+- Weekly email digest
+- Outgoing webhooks (Slack / Discord)
+
+**Live capture**
+- WebSocket streaming endpoint at `/ws/transcribe` (home-server only)
+- Desktop loopback capture POC (`desktop/capture.py` — records WASAPI loopback + mic, posts to the server)
+
+**Exports**
+- Obsidian-flavored Markdown (YAML frontmatter, `#action/<owner>` tags, collapsible exam)
+- PDF
+- ICS calendar (action items → calendar events)
+- AI-generated podcast script
+- Anki `.apkg` and CSV
+
+**UX**
+- PWA install on desktop & mobile
+- Live tasks panel on home (cancel running jobs)
+- Bulk delete + auto-cleanup
+- Chat with recording (diarized)
+- Timestamp player (click `[MM:SS]` → seek)
+- Lesson recipes (saved processing presets)
+- Slide alignment (sync slide deck to transcript)
+- Multi-language synthesis (`LECTURE_LANGUAGE=auto|he|en|...`)
 
 ---
 
-## Troubleshooting
+## Chrome Extension (private Zoom recordings)
 
-| Problem | Solution |
-|---------|----------|
-| `docker: command not found` | Install [Docker Desktop](https://www.docker.com/products/docker-desktop/) |
-| Port 8000 already in use | Change port in `docker-compose.yml`: `"8001:8000"` |
-| Download fails (403 / auth error) | Use the Chrome extension to send cookies with the request |
-| Recording not found (404) | The Zoom link may have expired |
-| AI returns malformed JSON | Transient Gemini error — the system retries automatically (up to 3x) |
-| Whisper not loading | Not enough RAM — switch to a smaller model in `.env` |
-| OpenAI mode: "API key not configured" | Add `OPENAI_API_KEY=sk-...` to your `.env` file |
-| OpenAI mode: file too large | This shouldn't happen — the preprocessor chunks to ≤13 min automatically |
-| `docker compose up` very slow | First run downloads the image (~3 GB) — wait it out |
-| No space left on device | Run `docker system prune -af` to clear unused images |
+If your recordings require Zoom auth, install the extension from `extension/`:
+
+1. `chrome://extensions/` → Developer mode → Load unpacked → select `extension/`
+2. Open the Zoom recording page (logged in) → click the extension → **Send to Transcriber**
+
+The extension extracts Netscape-format cookies and posts the URL + cookies to the server, which feeds them to `yt-dlp`.
 
 ---
 
@@ -201,25 +180,47 @@ Maximum upload size: **600 MB**
 ```
 zoom-to-text/
 ├── app/
-│   ├── api/routes.py              # REST API endpoints
+│   ├── api/
+│   │   ├── routes.py            # REST endpoints
+│   │   ├── auth.py              # Magic-link + session cookie
+│   │   ├── lti.py               # LTI 1.3 SSO
+│   │   ├── streaming.py         # WebSocket /ws/transcribe
+│   │   └── deps.py              # Shared dependencies
 │   ├── services/
-│   │   ├── transcriber.py         # Faster-Whisper (local) + OpenAI Whisper API
-│   │   ├── audio_preprocessor.py  # Silence removal + chunking (used by OpenAI mode)
-│   │   ├── summarizer.py          # Gemini AI summarization + quiz
-│   │   ├── zoom_downloader.py     # yt-dlp audio extraction
-│   │   └── processor.py           # Pipeline orchestrator
-│   ├── config.py                  # Settings (loaded from .env)
-│   ├── models.py                  # Pydantic schemas
-│   ├── state.py                   # SQLite task state manager
-│   └── main.py                    # FastAPI app + startup
+│   │   ├── processor.py         # Pipeline orchestrator
+│   │   ├── transcriber.py       # Faster-Whisper + OpenAI Whisper
+│   │   ├── summarizer.py        # Synthesis ‖ extraction + diarization
+│   │   ├── audio_preprocessor.py
+│   │   ├── zoom_downloader.py
+│   │   ├── llm_providers/       # gemini / openrouter / ollama
+│   │   ├── diarization/         # gemini text + pyannote acoustic
+│   │   ├── exporters/markdown.py
+│   │   ├── lti/                 # LTI 1.3 modules
+│   │   ├── anki_export.py
+│   │   ├── clip_extractor.py
+│   │   ├── glossary.py
+│   │   ├── sm2.py               # Spaced repetition
+│   │   ├── podcast_script.py
+│   │   ├── webhooks.py
+│   │   ├── email_digest.py
+│   │   └── text_extractor.py
+│   ├── config.py
+│   ├── models.py
+│   ├── state.py
+│   ├── errors.py                # ProcessingError + classifier
+│   └── main.py
 ├── static/
-│   ├── index.html                 # Web UI
-│   └── style.css
-├── extension/                     # Chrome extension
-├── data/                          # SQLite DB + temp downloads (gitignored)
+│   ├── index.html               # SPA
+│   └── ...
+├── extension/                   # Chrome extension
+├── desktop/                     # Loopback capture POC
+├── tests/                       # 261 server + 9 desktop tests
+├── docs/                        # Design docs, specs, plans
 ├── Dockerfile
 ├── docker-compose.yml
+├── fly.toml
 ├── requirements.txt
+├── requirements-heavy.txt       # torch + pyannote (home-server only)
 └── .env.example
 ```
 
@@ -227,17 +228,115 @@ zoom-to-text/
 
 ## API Reference
 
-The server exposes a REST API at `http://localhost:8000`.  
-Interactive docs (Swagger UI): `http://localhost:8000/docs`
+Swagger UI at http://localhost:8000/docs (or set `ENABLE_DOCS=false` for production).
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/api/tasks` | Start job from a Zoom URL |
-| `POST` | `/api/tasks/upload` | Start job from an uploaded file |
-| `GET` | `/api/tasks/{id}` | Poll job status and progress |
-| `GET` | `/api/tasks` | List recent jobs |
-| `DELETE` | `/api/tasks/{id}` | Delete a job record |
-| `GET` | `/health` | Server health check |
+**Tasks**
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `POST` | `/api/tasks` | Submit a URL |
+| `POST` | `/api/tasks/upload` | Submit an uploaded file |
+| `GET` | `/api/tasks` | List recent tasks |
+| `GET` | `/api/tasks/{id}` | Poll status / get result |
+| `GET` | `/api/tasks/{id}/events` | SSE progress stream |
+| `POST` | `/api/tasks/{id}/cancel` | Cancel in-flight task |
+| `POST` | `/api/tasks/{id}/retry` | Retry failed task |
+| `DELETE` | `/api/tasks/{id}` | Delete |
+| `POST` | `/api/tasks/bulk_delete` | Bulk delete |
+
+**Study**
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `GET` | `/api/tasks/{id}/transcript` | Full transcript |
+| `GET` | `/api/tasks/{id}/search` | Search inside transcript |
+| `POST` | `/api/tasks/{id}/ask` | Q&A on a single lesson |
+| `POST` | `/api/ask` | Ask across all lessons |
+| `POST` | `/api/tasks/{id}/chat` | Chat history |
+| `POST` | `/api/tasks/{id}/tutor` | Socratic tutor turn |
+| `POST` | `/api/tasks/{id}/mindmap` | Generate mind map |
+| `GET` | `/api/tasks/{id}/flashcards` | Get flashcards |
+| `POST` | `/api/tasks/{id}/flashcards/{idx}/review` | SM-2 review |
+| `GET` | `/api/flashcards/due` | Cards due across all lessons |
+| `GET` | `/api/glossary` | Cross-lecture glossary |
+| `GET` | `/api/mastery` | Topic-mastery dashboard |
+| `POST` | `/api/study-guide` | Multi-lesson cram guide |
+
+**Exports & sharing**
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `GET` | `/api/tasks/{id}/export/obsidian` | Obsidian Markdown |
+| `GET` | `/api/tasks/{id}/export/pdf` | PDF |
+| `GET` | `/api/tasks/{id}/export/ics` | ICS calendar |
+| `GET` | `/api/tasks/{id}/flashcards/export.apkg` | Anki package |
+| `GET` | `/api/tasks/{id}/flashcards/export.csv` | CSV |
+| `GET` | `/api/tasks/{id}/podcast-script` | AI podcast script |
+| `POST` | `/api/tasks/{id}/share` | Create public share link |
+| `GET` | `/share/{token}` | Public share viewer |
+| `POST` | `/api/tasks/{id}/shares` | Share with a cohort user |
+| `GET` | `/api/shared-tasks` | Tasks shared with me |
+
+**Integrations & auth**
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `GET`/`POST`/`DELETE` | `/api/webhooks` | Outgoing webhooks CRUD |
+| `GET` | `/api/capabilities` | What the active provider supports |
+| `POST` | `/api/auth/request` | Send magic link |
+| `GET` | `/api/auth/verify` | Verify magic link |
+| `POST` | `/api/auth/logout` | Logout |
+| `GET` | `/lti/jwks` | LTI 1.3 JWKS |
+| `POST` | `/lti/login` `/lti/launch` | LTI handshake |
+| `WS` | `/ws/transcribe` | Live transcription (home-server only) |
+| `GET` | `/health` | Health check |
+
+---
+
+## Deployment (Fly.io)
+
+```bash
+fly deploy --remote-only          # build on Fly's depot builder
+fly logs                          # tail server logs
+fly status                        # machine state
+fly ssh console                   # shell into the machine
+```
+
+Secrets:
+
+```bash
+fly secrets set GOOGLE_API_KEY=...
+fly secrets set RESEND_API_KEY=... ALLOWED_EMAILS="a@x.com,b@y.com"
+```
+
+Windows + Git Bash: prefix path values with `MSYS_NO_PATHCONV=1` to stop path mangling, e.g. `MSYS_NO_PATHCONV=1 fly secrets set DATA_DIR="/data"`.
+
+---
+
+## Development
+
+```bash
+pytest tests/ -q                  # 261 server tests
+pytest tests/desktop/ -v          # 9 desktop tests (needs desktop/requirements.txt)
+uvicorn app.main:app --reload     # hot reload
+```
+
+**Don't run `pytest .` from repo root** — it picks up `_legacy_archive/` and errors.
+
+Contributing context lives in [`CLAUDE.md`](CLAUDE.md). The strategic roadmap is in [`docs/UPGRADE_PROMPT.md`](docs/UPGRADE_PROMPT.md).
+
+---
+
+## Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| `docker: command not found` | Install [Docker Desktop](https://www.docker.com/products/docker-desktop/) |
+| Port 8000 busy | Edit `docker-compose.yml`: `"8001:8000"` |
+| Zoom download fails (403) | Use the Chrome extension to send cookies |
+| Whisper OOM | Smaller model (`WHISPER_MODEL=small`) |
+| "No space left" | `docker system prune -af` |
+| Fly TLS cert error on deploy | Transient — re-run `fly deploy --remote-only` |
 
 ---
 

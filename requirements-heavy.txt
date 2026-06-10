@@ -1,0 +1,22 @@
+# Heavy dependencies for optional components.
+# NEVER install on Fly.io — the production machine is 512MB shared-cpu-1x.
+# Install on a home server / GPU machine only.
+#
+# Pinned `==` everywhere (was `>=` previously) so home-server installs match
+# what production was last tested with. Lockstep with Dockerfile pins.
+
+# ── Pyannote speaker diarization (Task 2.2) ──────────────────────────────────
+pyannote.audio==3.1.1
+torch==2.3.0
+torchaudio==2.3.0
+
+# ── PDF export ───────────────────────────────────────────────────────────────
+# WeasyPrint needs system libs (Pango, Cairo) — install via OS package mgr.
+# Markdown converts Obsidian MD → HTML before WeasyPrint renders to PDF.
+weasyprint==62.3
+
+# ── Supplementary-material text extraction ───────────────────────────────────
+# Used by app/services/text_extractor.py to pull plain text from uploaded
+# PDF / DOCX files before injecting them into the Gemini prompt.
+pdfplumber==0.11.4
+python-docx==1.1.2

@@ -16,7 +16,7 @@ import asyncio
 import uuid
 import aiosqlite
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -27,9 +27,21 @@ logger = logging.getLogger(__name__)
 
 DB_PATH = settings.data_dir / "tasks.db"
 
+
+def _now() -> datetime:
+    """Return current UTC time. Isolated so tests can monkeypatch it."""
+    return datetime.now(timezone.utc)
+
 # ── Shared connection ────────────────────────────────────────────────────────
 _db: aiosqlite.Connection | None = None
 _db_lock = asyncio.Lock()
+
+# Serialize read-modify-write blocks on JSON-encoded columns. Without these,
+# two concurrent SELECT result_json → mutate → UPDATE flows would race and
+# the second UPDATE silently overwrites the first (lost-update). At ~5
+# concurrent users the contention is negligible, but correctness is not.
+_speaker_map_lock = asyncio.Lock()
+_chat_history_lock = asyncio.Lock()
 
 # ── Schema ───────────────────────────────────────────────────────────────────────
 
@@ -48,6 +60,10 @@ CREATE TABLE IF NOT EXISTS tasks (
 
 CREATE_TASKS_INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks (user_id)
+"""
+
+CREATE_TASKS_URL_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_tasks_user_url_status ON tasks (user_id, url, status)
 """
 
 CREATE_USERS_TABLE_SQL = """
@@ -77,6 +93,130 @@ CREATE TABLE IF NOT EXISTS sessions (
 )
 """
 
+CREATE_LTI_OIDC_STATE_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS lti_oidc_state (
+    state      TEXT PRIMARY KEY,
+    nonce      TEXT NOT NULL,
+    issuer     TEXT NOT NULL,
+    client_id  TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+)
+"""
+
+CREATE_FLASHCARD_REVIEWS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS flashcard_reviews (
+    user_id          TEXT NOT NULL REFERENCES users(id),
+    task_id          TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    card_index       INTEGER NOT NULL,
+    easiness         REAL    NOT NULL DEFAULT 2.5,
+    interval         INTEGER NOT NULL DEFAULT 0,
+    repetitions      INTEGER NOT NULL DEFAULT 0,
+    last_reviewed_at TEXT    NOT NULL,
+    due_at           TEXT    NOT NULL,
+    PRIMARY KEY (user_id, task_id, card_index)
+)
+"""
+
+CREATE_FLASHCARD_REVIEWS_DUE_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_flashcard_reviews_user_due
+ON flashcard_reviews (user_id, due_at)
+"""
+
+# ── B4: audio clips + user glossaries ───────────────────────────────────────
+
+CREATE_AUDIO_CLIPS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS audio_clips (
+    id         TEXT PRIMARY KEY,
+    task_id    TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    user_id    TEXT NOT NULL REFERENCES users(id),
+    start_sec  REAL NOT NULL,
+    end_sec    REAL NOT NULL,
+    label      TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+)
+"""
+
+CREATE_AUDIO_CLIPS_TASK_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_audio_clips_task ON audio_clips (task_id)
+"""
+
+CREATE_USER_GLOSSARIES_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS user_glossaries (
+    user_id       TEXT PRIMARY KEY REFERENCES users(id),
+    glossary_json TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+)
+"""
+
+# ── B5: outgoing webhooks + task sharing (cohort) ────────────────────────────
+
+CREATE_USER_WEBHOOKS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS user_webhooks (
+    id         TEXT PRIMARY KEY,
+    user_id    TEXT NOT NULL REFERENCES users(id),
+    kind       TEXT NOT NULL,
+    url        TEXT NOT NULL,
+    enabled    INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL
+)
+"""
+
+CREATE_USER_WEBHOOKS_USER_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_user_webhooks_user ON user_webhooks (user_id)
+"""
+
+CREATE_TASK_SHARES_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS task_shares (
+    task_id            TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    user_id            TEXT NOT NULL REFERENCES users(id),
+    granted_by_user_id TEXT NOT NULL REFERENCES users(id),
+    granted_at         TEXT NOT NULL,
+    PRIMARY KEY (task_id, user_id)
+)
+"""
+
+CREATE_TASK_SHARES_USER_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_task_shares_user ON task_shares (user_id)
+"""
+
+# ── B6.2: lesson recipes (saved processing presets) ──────────────────────────
+
+CREATE_LESSON_RECIPES_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS lesson_recipes (
+    id          TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL REFERENCES users(id),
+    name        TEXT NOT NULL,
+    mode        TEXT NOT NULL,
+    language    TEXT NOT NULL DEFAULT 'he',
+    tags_json   TEXT NOT NULL DEFAULT '[]',
+    notes       TEXT,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+)
+"""
+
+CREATE_LESSON_RECIPES_USER_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_lesson_recipes_user ON lesson_recipes (user_id, created_at DESC)
+"""
+
+# ── B6.3: slide decks + per-slide alignment to chapters ──────────────────────
+
+CREATE_LESSON_SLIDES_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS lesson_slides (
+    id              TEXT PRIMARY KEY,
+    task_id         TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    page_index      INTEGER NOT NULL,
+    title           TEXT NOT NULL DEFAULT '',
+    body            TEXT NOT NULL DEFAULT '',
+    chapter_index   INTEGER,
+    created_at      TEXT NOT NULL
+)
+"""
+
+CREATE_LESSON_SLIDES_TASK_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_lesson_slides_task ON lesson_slides (task_id, page_index)
+"""
+
 
 # ── Lifecycle ─────────────────────────────────────────────────────────────────────
 
@@ -99,6 +239,14 @@ async def _get_db() -> aiosqlite.Connection:
     return _db
 
 
+# Public alias for external callers (routes, ad-hoc raw SQL outside this module).
+# Tests still use _get_db directly since they need the same connection the
+# autouse singleton-reset fixture targets, but production callers should not
+# reach across the private-name boundary.
+async def get_db() -> aiosqlite.Connection:
+    return await _get_db()
+
+
 async def close_db():
     """Close the shared connection (called during shutdown)."""
     global _db
@@ -115,6 +263,20 @@ async def init_db():
     await db.execute(CREATE_USERS_TABLE_SQL)
     await db.execute(CREATE_MAGIC_TOKENS_TABLE_SQL)
     await db.execute(CREATE_SESSIONS_TABLE_SQL)
+    await db.execute(CREATE_LTI_OIDC_STATE_TABLE_SQL)
+    await db.execute(CREATE_FLASHCARD_REVIEWS_TABLE_SQL)
+    await db.execute(CREATE_FLASHCARD_REVIEWS_DUE_INDEX_SQL)
+    await db.execute(CREATE_AUDIO_CLIPS_TABLE_SQL)
+    await db.execute(CREATE_AUDIO_CLIPS_TASK_INDEX_SQL)
+    await db.execute(CREATE_USER_GLOSSARIES_TABLE_SQL)
+    await db.execute(CREATE_USER_WEBHOOKS_TABLE_SQL)
+    await db.execute(CREATE_USER_WEBHOOKS_USER_INDEX_SQL)
+    await db.execute(CREATE_TASK_SHARES_TABLE_SQL)
+    await db.execute(CREATE_TASK_SHARES_USER_INDEX_SQL)
+    await db.execute(CREATE_LESSON_RECIPES_TABLE_SQL)
+    await db.execute(CREATE_LESSON_RECIPES_USER_INDEX_SQL)
+    await db.execute(CREATE_LESSON_SLIDES_TABLE_SQL)
+    await db.execute(CREATE_LESSON_SLIDES_TASK_INDEX_SQL)
     await db.commit()
 
     # Add index on user_id for fast per-user task listings
@@ -140,13 +302,106 @@ async def init_db():
         await db.execute("ALTER TABLE tasks ADD COLUMN audio_path TEXT")
         await db.commit()
         logger.info("Migrated tasks table: added audio_path column")
+    if "error_details" not in cols:
+        await db.execute("ALTER TABLE tasks ADD COLUMN error_details TEXT")
+        await db.commit()
+        logger.info("Migrated tasks table: added error_details column (Task 1.5)")
+    if "share_token" not in cols:
+        await db.execute("ALTER TABLE tasks ADD COLUMN share_token TEXT")
+        await db.commit()
+        logger.info("Migrated tasks table: added share_token column")
+    if "share_token_expires_at" not in cols:
+        await db.execute("ALTER TABLE tasks ADD COLUMN share_token_expires_at TEXT")
+        await db.commit()
+        logger.info("Migrated tasks table: added share_token_expires_at column")
+    if "failed_at" not in cols:
+        await db.execute("ALTER TABLE tasks ADD COLUMN failed_at TEXT")
+        await db.commit()
+        logger.info("Migrated tasks table: added failed_at column (auto-cleanup TTL)")
+    if "notes" not in cols:
+        await db.execute("ALTER TABLE tasks ADD COLUMN notes TEXT NOT NULL DEFAULT ''")
+        await db.commit()
+        logger.info("Migrated tasks table: added notes column (Live Notepad)")
 
-    # Create index now that user_id column is guaranteed to exist
+    # Create indexes now that user_id column is guaranteed to exist
     await db.execute(CREATE_TASKS_INDEX_SQL)
+    await db.execute(CREATE_TASKS_URL_INDEX_SQL)
     await db.commit()
 
+    # Migrate: add rate-limiting columns to users table if needed
+    async with db.execute("PRAGMA table_info(users)") as cursor:
+        user_cols = [row[1] for row in await cursor.fetchall()]
+    if "request_timestamps" not in user_cols:
+        await db.execute("ALTER TABLE users ADD COLUMN request_timestamps TEXT DEFAULT '[]'")
+        await db.commit()
+        logger.info("Migrated users table: added request_timestamps column")
+    if "block_until" not in user_cols:
+        await db.execute("ALTER TABLE users ADD COLUMN block_until TEXT")
+        await db.commit()
+        logger.info("Migrated users table: added block_until column")
+    if "is_banned" not in user_cols:
+        await db.execute("ALTER TABLE users ADD COLUMN is_banned INTEGER NOT NULL DEFAULT 0")
+        await db.commit()
+        logger.info("Migrated users table: added is_banned column")
+    if "email_digest_opt_in" not in user_cols:
+        await db.execute(
+            "ALTER TABLE users ADD COLUMN email_digest_opt_in INTEGER NOT NULL DEFAULT 0"
+        )
+        await db.commit()
+        logger.info("Migrated users table: added email_digest_opt_in column (weekly digest)")
+    if "last_digest_at" not in user_cols:
+        await db.execute("ALTER TABLE users ADD COLUMN last_digest_at TEXT")
+        await db.commit()
+        logger.info("Migrated users table: added last_digest_at column (weekly digest)")
+
     await _mark_interrupted_tasks_failed()
+    await _purge_expired_lti_state()
     logger.info(f"Database ready: {DB_PATH}")
+
+
+async def _purge_expired_lti_state() -> None:
+    """Delete OIDC state rows whose TTL has lapsed (flows that never reached /launch)."""
+    db = await _get_db()
+    result = await db.execute(
+        "DELETE FROM lti_oidc_state WHERE expires_at < ?",
+        [datetime.now(timezone.utc).isoformat()],
+    )
+    if result.rowcount:
+        logger.info("Purged %d expired LTI OIDC state row(s)", result.rowcount)
+    await db.commit()
+
+
+async def cancel_task(task_id: str) -> bool:
+    """
+    Mark a task as cancelled. Only acts on in-flight tasks (pending/downloading/
+    transcribing/summarizing). Returns True if the task was cancelled, False if it
+    was already finished or not found.
+    """
+    cancellable = [
+        TaskStatus.PENDING.value,
+        TaskStatus.DOWNLOADING.value,
+        TaskStatus.TRANSCRIBING.value,
+        TaskStatus.SUMMARIZING.value,
+    ]
+    placeholders = ",".join("?" * len(cancellable))
+    db = await _get_db()
+    result = await db.execute(
+        f"UPDATE tasks SET status=?, progress=0, message=? "
+        f"WHERE id=? AND status IN ({placeholders})",
+        [TaskStatus.CANCELLED.value, "❌ המשימה בוטלה על ידי המשתמש", task_id] + cancellable,
+    )
+    await db.commit()
+    return result.rowcount > 0
+
+
+async def is_task_cancelled(task_id: str) -> bool:
+    """Return True if the task has been cancelled (used by the pipeline to abort early)."""
+    db = await _get_db()
+    async with db.execute(
+        "SELECT status FROM tasks WHERE id=?", [task_id]
+    ) as cursor:
+        row = await cursor.fetchone()
+    return row is not None and row["status"] == TaskStatus.CANCELLED.value
 
 
 async def _mark_interrupted_tasks_failed():
@@ -164,8 +419,14 @@ async def _mark_interrupted_tasks_failed():
     placeholders = ",".join("?" * len(in_flight))
     db = await _get_db()
     result = await db.execute(
-        f"UPDATE tasks SET status=?, progress=0, message=?, error=? WHERE status IN ({placeholders})",
-        [TaskStatus.FAILED.value, "השרת הופעל מחדש — המשימה הופסקה", "השרת הופעל מחדש — נסה שוב"] + in_flight,
+        f"UPDATE tasks SET status=?, progress=0, message=?, error=?, failed_at=? "
+        f"WHERE status IN ({placeholders})",
+        [
+            TaskStatus.FAILED.value,
+            "השרת הופעל מחדש — המשימה הופסקה",
+            "השרת הופעל מחדש — נסה שוב",
+            _now().isoformat(),
+        ] + in_flight,
     )
     if result.rowcount:
         logger.warning(f"Marked {result.rowcount} interrupted task(s) as failed on startup")
@@ -213,15 +474,85 @@ async def complete_task(task_id: str, result: LessonResult):
     await db.commit()
 
 
-async def fail_task(task_id: str, error: str):
-    # Truncate long error messages so they fit cleanly in the DB
-    short_error = error[:500] if len(error) > 500 else error
+async def update_result(task_id: str, result: LessonResult) -> None:
+    """Overwrite result_json without touching status/progress/message.
+
+    Used for lazy enrichments (e.g. on-demand mind-map generation) that mutate
+    a completed task's LessonResult after the fact.
+    """
     db = await _get_db()
     await db.execute(
-        "UPDATE tasks SET status=?, message=?, error=? WHERE id=?",
-        [TaskStatus.FAILED.value, f"Failed: {short_error}", short_error, task_id],
+        "UPDATE tasks SET result_json=? WHERE id=?",
+        [result.model_dump_json(), task_id],
     )
     await db.commit()
+
+
+async def fail_task(
+    task_id: str,
+    error: str,
+    error_details: Optional[dict] = None,
+):
+    """
+    Mark a task failed.
+
+    `error_details` is the structured ProcessingError.to_dict() blob
+    (stage, code, user_message, technical_details). Persisted as JSON
+    in the error_details column (Task 1.5). Pass None for callers that
+    don't yet emit structured errors — backward compat.
+    """
+    import json as _json
+    short_error = error[:500] if len(error) > 500 else error
+    details_json: Optional[str] = None
+    if error_details is not None:
+        try:
+            details_json = _json.dumps(error_details, ensure_ascii=False)
+        except (TypeError, ValueError) as exc:
+            logger.warning(f"fail_task: error_details not JSON-serializable: {exc}")
+            details_json = None
+    db = await _get_db()
+    await db.execute(
+        "UPDATE tasks SET status=?, message=?, error=?, error_details=?, failed_at=? WHERE id=?",
+        [
+            TaskStatus.FAILED.value,
+            f"Failed: {short_error}",
+            short_error,
+            details_json,
+            _now().isoformat(),
+            task_id,
+        ],
+    )
+    await db.commit()
+
+
+def _row_failed_at(row) -> Optional[str]:
+    """Read failed_at from a row defensively (column may be absent on legacy DBs)."""
+    if "failed_at" not in row.keys():
+        return None
+    return row["failed_at"]
+
+
+def _row_notes(row) -> str:
+    """Read notes from a row defensively (column may be absent on legacy DBs)."""
+    if "notes" not in row.keys():
+        return ""
+    return row["notes"] or ""
+
+
+async def update_notes(task_id: str, user_id: str, notes: str) -> bool:
+    """Update the user's notes for a task. Returns True if the row was updated.
+
+    Scoped to user_id so one user can't overwrite another user's notes via task
+    ID enumeration. Legacy NULL-owned tasks remain writeable by any logged-in
+    user (matches get_task_for_user semantics).
+    """
+    db = await _get_db()
+    result = await db.execute(
+        "UPDATE tasks SET notes=? WHERE id=? AND (user_id=? OR user_id IS NULL)",
+        [notes, task_id, user_id],
+    )
+    await db.commit()
+    return result.rowcount > 0
 
 
 async def get_task(task_id: str) -> Optional[TaskResponse]:
@@ -248,7 +579,10 @@ async def get_task(task_id: str) -> Optional[TaskResponse]:
         url=row["url"],
         result=result,
         error=row["error"],
+        error_details=_decode_error_details(row),
         has_audio=has_audio,
+        failed_at=_row_failed_at(row),
+        notes=_row_notes(row),
     )
 
 
@@ -284,26 +618,78 @@ async def get_task_for_user(task_id: str, user_id: str) -> Optional[TaskResponse
         url=row["url"],
         result=result,
         error=row["error"],
+        error_details=_decode_error_details(row),
         has_audio=has_audio,
+        failed_at=_row_failed_at(row),
+        notes=_row_notes(row),
     )
 
 
-async def list_tasks(limit: int = 50, user_id: Optional[str] = None) -> list[dict]:
+def _decode_error_details(row) -> Optional[dict]:
+    """Read row['error_details'] (TEXT column) and parse as JSON. Defensive — old
+    rows pre-migration return None; bad JSON also returns None with a log warning."""
+    import json as _json
+    if "error_details" not in row.keys():
+        return None
+    raw = row["error_details"]
+    if not raw:
+        return None
+    try:
+        out = _json.loads(raw)
+        return out if isinstance(out, dict) else None
+    except (TypeError, ValueError) as exc:
+        logger.warning(f"failed to parse error_details JSON for task: {exc}")
+        return None
+
+
+async def list_tasks(
+    limit: int = 20,
+    user_id: Optional[str] = None,
+    search: Optional[str] = None,
+    offset: int = 0,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+) -> list[dict]:
+    """
+    Return tasks ordered by created_at DESC with optional search and pagination.
+
+    search   — case-insensitive LIKE match against the url and result_json columns
+    offset   — number of rows to skip (for cursor-based pagination)
+    since    — ISO 8601 lower bound: created_at >= since (inclusive)
+    until    — ISO 8601 upper bound: created_at <= until (inclusive)
+    """
     db = await _get_db()
+    conditions: list[str] = []
+    params: list = []
+
     if user_id:
-        async with db.execute(
-            "SELECT id, status, progress, message, created_at, url FROM tasks "
-            "WHERE user_id=? ORDER BY created_at DESC LIMIT ?",
-            [user_id, limit],
-        ) as cursor:
-            rows = await cursor.fetchall()
-    else:
-        async with db.execute(
-            "SELECT id, status, progress, message, created_at, url FROM tasks "
-            "ORDER BY created_at DESC LIMIT ?",
-            [limit],
-        ) as cursor:
-            rows = await cursor.fetchall()
+        conditions.append("user_id=?")
+        params.append(user_id)
+
+    if search:
+        pattern = f"%{search}%"
+        # url holds the recording source; result_json embeds the full transcript
+        conditions.append("(url LIKE ? OR result_json LIKE ?)")
+        params.extend([pattern, pattern])
+
+    if since:
+        conditions.append("created_at >= ?")
+        params.append(since)
+
+    if until:
+        conditions.append("created_at <= ?")
+        params.append(until)
+
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    params.extend([limit, offset])
+
+    async with db.execute(
+        f"SELECT id, status, progress, message, created_at, url, failed_at FROM tasks "
+        f"{where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        params,
+    ) as cursor:
+        rows = await cursor.fetchall()
+
     return [dict(row) for row in rows]
 
 
@@ -313,7 +699,220 @@ async def delete_task(task_id: str):
     await db.commit()
 
 
+async def list_completed_tasks_with_results(
+    user_id: str, limit: int = 20
+) -> list[TaskResponse]:
+    """Return completed tasks for a user, ordered newest-first, with full result.
+
+    Used by the Ask-Across-Lectures endpoint to build a cross-lecture prompt.
+    """
+    db = await _get_db()
+    async with db.execute(
+        "SELECT * FROM tasks WHERE status=? AND (user_id=? OR user_id IS NULL) "
+        "ORDER BY created_at DESC LIMIT ?",
+        [TaskStatus.COMPLETED.value, user_id, limit],
+    ) as cursor:
+        rows = await cursor.fetchall()
+
+    out: list[TaskResponse] = []
+    for row in rows:
+        if not row["result_json"]:
+            continue
+        try:
+            result = LessonResult.model_validate_json(row["result_json"])
+        except Exception:
+            continue
+        out.append(
+            TaskResponse(
+                task_id=row["id"],
+                status=TaskStatus(row["status"]),
+                progress=row["progress"],
+                message=row["message"],
+                created_at=row["created_at"],
+                url=row["url"],
+                result=result,
+                error=row["error"],
+                error_details=_decode_error_details(row),
+                has_audio=False,
+                failed_at=_row_failed_at(row),
+                notes=_row_notes(row),
+            )
+        )
+    return out
+
+
 # ── Auth CRUD ─────────────────────────────────────────────────────────────────────
+
+async def get_user_preferences(user_id: str) -> dict:
+    """Return user preference flags. New users default to all-off."""
+    db = await _get_db()
+    async with db.execute(
+        "SELECT email_digest_opt_in, last_digest_at, email FROM users WHERE id=?",
+        [user_id],
+    ) as cursor:
+        row = await cursor.fetchone()
+    if not row:
+        return {"email_digest_opt_in": False, "last_digest_at": None, "email": ""}
+    return {
+        "email_digest_opt_in": bool(row["email_digest_opt_in"]),
+        "last_digest_at": row["last_digest_at"],
+        "email": row["email"],
+    }
+
+
+async def set_email_digest_opt_in(user_id: str, opt_in: bool) -> bool:
+    """Toggle the weekly-digest opt-in flag. Returns True iff the row was updated."""
+    db = await _get_db()
+    result = await db.execute(
+        "UPDATE users SET email_digest_opt_in=? WHERE id=?",
+        [1 if opt_in else 0, user_id],
+    )
+    await db.commit()
+    return result.rowcount > 0
+
+
+async def mark_digest_sent(user_id: str) -> None:
+    """Record that a digest was successfully sent now (UTC ISO)."""
+    db = await _get_db()
+    await db.execute(
+        "UPDATE users SET last_digest_at=? WHERE id=?",
+        [datetime.now(timezone.utc).isoformat(), user_id],
+    )
+    await db.commit()
+
+
+# ── Flashcard reviews (SM-2 spaced repetition) ───────────────────────────────
+
+async def get_card_review_state(
+    user_id: str, task_id: str, card_index: int
+) -> Optional[dict]:
+    """Return the SM-2 state for one card, or None if never reviewed."""
+    db = await _get_db()
+    async with db.execute(
+        "SELECT easiness, interval, repetitions, last_reviewed_at, due_at "
+        "FROM flashcard_reviews WHERE user_id=? AND task_id=? AND card_index=?",
+        [user_id, task_id, card_index],
+    ) as cursor:
+        row = await cursor.fetchone()
+    if row is None:
+        return None
+    return {
+        "easiness": row["easiness"],
+        "interval": row["interval"],
+        "repetitions": row["repetitions"],
+        "last_reviewed_at": row["last_reviewed_at"],
+        "due_at": row["due_at"],
+    }
+
+
+async def save_card_review(
+    user_id: str,
+    task_id: str,
+    card_index: int,
+    easiness: float,
+    interval: int,
+    repetitions: int,
+    last_reviewed_at: str,
+    due_at: str,
+) -> None:
+    """Upsert a card's SM-2 state after a review."""
+    db = await _get_db()
+    await db.execute(
+        """
+        INSERT INTO flashcard_reviews
+            (user_id, task_id, card_index, easiness, interval, repetitions,
+             last_reviewed_at, due_at)
+        VALUES (?,?,?,?,?,?,?,?)
+        ON CONFLICT(user_id, task_id, card_index) DO UPDATE SET
+            easiness=excluded.easiness,
+            interval=excluded.interval,
+            repetitions=excluded.repetitions,
+            last_reviewed_at=excluded.last_reviewed_at,
+            due_at=excluded.due_at
+        """,
+        [
+            user_id, task_id, card_index, easiness, interval, repetitions,
+            last_reviewed_at, due_at,
+        ],
+    )
+    await db.commit()
+
+
+async def list_due_card_states(user_id: str, *, now_iso: str) -> list[dict]:
+    """Return every (task_id, card_index) the user has reviewed that is due now.
+
+    Newly-generated, never-reviewed cards are NOT in this table — the route
+    layer surfaces those separately (every fresh card is implicitly due).
+    """
+    db = await _get_db()
+    async with db.execute(
+        "SELECT task_id, card_index, easiness, interval, repetitions, "
+        "       last_reviewed_at, due_at "
+        "FROM flashcard_reviews WHERE user_id=? AND due_at <= ? "
+        "ORDER BY due_at ASC",
+        [user_id, now_iso],
+    ) as cursor:
+        rows = await cursor.fetchall()
+    return [dict(r) for r in rows]
+
+
+async def list_reviewed_card_indices(user_id: str, task_id: str) -> set[int]:
+    """Return the set of card indices the user has ever reviewed for this task."""
+    db = await _get_db()
+    async with db.execute(
+        "SELECT card_index FROM flashcard_reviews WHERE user_id=? AND task_id=?",
+        [user_id, task_id],
+    ) as cursor:
+        rows = await cursor.fetchall()
+    return {row["card_index"] for row in rows}
+
+
+async def list_digest_subscribers() -> list[dict]:
+    """Return users who opted into the weekly digest. Each row: id, email, last_digest_at."""
+    db = await _get_db()
+    async with db.execute(
+        "SELECT id, email, last_digest_at FROM users WHERE email_digest_opt_in=1"
+    ) as cursor:
+        rows = await cursor.fetchall()
+    return [dict(r) for r in rows]
+
+
+async def list_tasks_completed_since(user_id: str, since_iso: str) -> list[TaskResponse]:
+    """Return completed tasks for the user with created_at >= since_iso."""
+    db = await _get_db()
+    async with db.execute(
+        "SELECT * FROM tasks WHERE status=? AND (user_id=? OR user_id IS NULL) "
+        "AND created_at >= ? ORDER BY created_at DESC",
+        [TaskStatus.COMPLETED.value, user_id, since_iso],
+    ) as cursor:
+        rows = await cursor.fetchall()
+
+    out: list[TaskResponse] = []
+    for row in rows:
+        if not row["result_json"]:
+            continue
+        try:
+            result = LessonResult.model_validate_json(row["result_json"])
+        except Exception:
+            continue
+        out.append(
+            TaskResponse(
+                task_id=row["id"],
+                status=TaskStatus(row["status"]),
+                progress=row["progress"],
+                message=row["message"],
+                created_at=row["created_at"],
+                url=row["url"],
+                result=result,
+                error=row["error"],
+                error_details=_decode_error_details(row),
+                has_audio=False,
+                failed_at=_row_failed_at(row),
+                notes=_row_notes(row),
+            )
+        )
+    return out
+
 
 async def get_or_create_user(email: str) -> str:
     """Return user_id for the email, creating the user row if this is their first login."""
@@ -404,6 +1003,176 @@ async def delete_session(session_id: str):
     await db.commit()
 
 
+# ── Per-user rate limiting ─────────────────────────────────────────────────────
+
+async def get_user_email(user_id: str) -> Optional[str]:
+    """Return the email address for a user_id, or None if not found."""
+    db = await _get_db()
+    async with db.execute("SELECT email FROM users WHERE id=?", [user_id]) as cursor:
+        row = await cursor.fetchone()
+    return row["email"] if row else None
+
+
+def _admin_emails_set() -> set[str]:
+    """Parse settings.admin_emails into a normalized lowercase set."""
+    return {
+        e.strip().lower()
+        for e in settings.admin_emails.split(",")
+        if e.strip()
+    }
+
+
+async def is_admin_user(user_id: str) -> bool:
+    """True iff the user's email is listed in settings.admin_emails."""
+    email = await get_user_email(user_id)
+    if not email:
+        return False
+    return email.lower() in _admin_emails_set()
+
+
+async def reset_admin_flags() -> int:
+    """
+    Clear block_until and is_banned for every admin email at startup.
+    Idempotent — safe to call on every boot. Returns rowcount of affected
+    users (0 when no admin row exists yet, which is normal pre-first-login).
+    """
+    admins = _admin_emails_set()
+    if not admins:
+        return 0
+    db = await _get_db()
+    placeholders = ",".join("?" * len(admins))
+    result = await db.execute(
+        f"UPDATE users SET block_until=NULL, is_banned=0, request_timestamps='[]' "
+        f"WHERE LOWER(email) IN ({placeholders})",
+        list(admins),
+    )
+    await db.commit()
+    return result.rowcount or 0
+
+
+async def check_and_record_request(user_id: str) -> str:
+    """
+    Atomically check rate-limit status and record a new request.
+
+    State machine:
+      is_banned=1           → "reject_banned"  (403)
+      blocked and not expired → ban now         → "ban_now"    (403)
+      block expired / no block, count >= limit  → block now    → "block_now"  (429)
+      count < limit         → record timestamp  → "allow"      (proceed)
+
+    Returns one of: "allow", "block_now", "ban_now", "reject_banned".
+    """
+    import json as _json
+
+    if settings.user_daily_task_limit <= 0:
+        return "allow"
+
+    db = await _get_db()
+    async with db.execute(
+        "SELECT request_timestamps, block_until, is_banned FROM users WHERE id=?",
+        [user_id],
+    ) as cursor:
+        row = await cursor.fetchone()
+
+    if row is None:
+        # Unknown user_id (e.g. test dependency override) — session already validated.
+        return "allow"
+
+    if row["is_banned"]:
+        return "reject_banned"
+
+    now = _now()
+
+    # Check active block
+    if row["block_until"]:
+        block_until_dt = datetime.fromisoformat(row["block_until"])
+        if now < block_until_dt:
+            # Still within block window → permanent ban
+            await db.execute("UPDATE users SET is_banned=1 WHERE id=?", [user_id])
+            await db.commit()
+            return "ban_now"
+        # Block has expired — fall through; old timestamps will be pruned below
+
+    # Prune timestamps older than 24 hours
+    cutoff = now - timedelta(hours=24)
+    raw = row["request_timestamps"] or "[]"
+    try:
+        timestamps: list[str] = _json.loads(raw)
+    except (ValueError, TypeError):
+        timestamps = []
+
+    fresh = [ts for ts in timestamps if datetime.fromisoformat(ts) > cutoff]
+
+    if len(fresh) >= settings.user_daily_task_limit:
+        # Quota exhausted → 24-hour block
+        block_until = (now + timedelta(hours=24)).isoformat()
+        await db.execute(
+            "UPDATE users SET block_until=?, request_timestamps=? WHERE id=?",
+            [block_until, _json.dumps(fresh, ensure_ascii=False), user_id],
+        )
+        await db.commit()
+        return "block_now"
+
+    # Within quota → record timestamp
+    fresh.append(now.isoformat())
+    await db.execute(
+        "UPDATE users SET request_timestamps=?, block_until=NULL WHERE id=?",
+        [_json.dumps(fresh, ensure_ascii=False), user_id],
+    )
+    await db.commit()
+    return "allow"
+
+
+# ── LTI 1.3 OIDC state (anti-replay; one-time use, ~5 min TTL) ───────────────
+
+async def store_lti_oidc_state(
+    state: str,
+    nonce: str,
+    issuer: str,
+    client_id: str,
+    ttl_seconds: int = 300,
+) -> None:
+    """Persist a fresh OIDC state row issued at /lti/login."""
+    from datetime import timedelta
+    expires_at = (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).isoformat()
+    db = await _get_db()
+    await db.execute(
+        "INSERT INTO lti_oidc_state (state, nonce, issuer, client_id, expires_at) "
+        "VALUES (?,?,?,?,?)",
+        [state, nonce, issuer, client_id, expires_at],
+    )
+    await db.commit()
+
+
+async def consume_lti_oidc_state(state: str) -> Optional[dict]:
+    """
+    One-time-use lookup. Returns {'nonce', 'issuer', 'client_id'} on success,
+    None if state is unknown / already consumed / expired.
+
+    Uses DELETE ... RETURNING so the read and delete are a single atomic
+    operation — concurrent /lti/launch replays see no row on the second call.
+    (SQLite RETURNING requires SQLite >= 3.35, bundled with Python 3.10+.)
+    """
+    db = await _get_db()
+    async with db.execute(
+        "DELETE FROM lti_oidc_state WHERE state=? "
+        "RETURNING nonce, issuer, client_id, expires_at",
+        [state],
+    ) as cursor:
+        row = await cursor.fetchone()
+    await db.commit()
+    if row is None:
+        return None
+    expires_at = datetime.fromisoformat(row["expires_at"])
+    if datetime.now(timezone.utc) > expires_at:
+        return None
+    return {
+        "nonce": row["nonce"],
+        "issuer": row["issuer"],
+        "client_id": row["client_id"],
+    }
+
+
 # ── Live transcript preview ───────────────────────────────────────────────────────
 
 # Maximum characters stored in partial_transcript (~500 KB of Hebrew text).
@@ -492,17 +1261,20 @@ async def append_chat_message(task_id: str, role: str, content: str) -> None:
     Trims the history to _MAX_CHAT_MESSAGES (oldest messages dropped first).
     """
     import json as _json
-    history = await get_chat_history(task_id)
-    history.append({"role": role, "content": content})
-    # Trim from front to keep within the message cap
-    if len(history) > _MAX_CHAT_MESSAGES:
-        history = history[-_MAX_CHAT_MESSAGES:]
-    db = await _get_db()
-    await db.execute(
-        "UPDATE tasks SET chat_history=? WHERE id=?",
-        [_json.dumps(history, ensure_ascii=False), task_id],
-    )
-    await db.commit()
+    # Serialize SELECT-modify-UPDATE so two concurrent POSTs don't both read
+    # the same baseline history and clobber each other on UPDATE.
+    async with _chat_history_lock:
+        history = await get_chat_history(task_id)
+        history.append({"role": role, "content": content})
+        # Trim from front to keep within the message cap
+        if len(history) > _MAX_CHAT_MESSAGES:
+            history = history[-_MAX_CHAT_MESSAGES:]
+        db = await _get_db()
+        await db.execute(
+            "UPDATE tasks SET chat_history=? WHERE id=?",
+            [_json.dumps(history, ensure_ascii=False), task_id],
+        )
+        await db.commit()
 
 
 async def clear_chat_history(task_id: str) -> None:
@@ -512,6 +1284,81 @@ async def clear_chat_history(task_id: str) -> None:
         "UPDATE tasks SET chat_history=NULL WHERE id=?", [task_id]
     )
     await db.commit()
+
+
+# ── Per-task content search ────────────────────────────────────────────────────────
+
+async def search_task_content(
+    task_id: str,
+    user_id: Optional[str],
+    query: str,
+    max_results: int = 20,
+) -> Optional[list[dict]]:
+    """
+    Search within a task's summary, chapters, and transcript for `query`.
+
+    Returns None if the task doesn't exist (or is not owned by user_id when
+    user_id is provided).  Returns an empty list when the task exists but has
+    no matches.  Each hit dict has:
+      type        — "summary" | "chapter" | "transcript"
+      context     — up to 200 chars around the match
+      position    — character offset of the match in the source string
+      chapter_title      (chapter hits only)
+      chapter_index      (chapter hits only)
+      chapter_start_time (chapter hits only, may be None)
+    """
+    if user_id:
+        task = await get_task_for_user(task_id, user_id)
+    else:
+        task = await get_task(task_id)
+
+    if task is None or task.result is None:
+        return None if (task is None) else []
+
+    q = query.lower()
+    hits: list[dict] = []
+    ctx_radius = 100  # chars of context on each side
+
+    def _excerpt(text: str, idx: int) -> str:
+        start = max(0, idx - ctx_radius)
+        end = min(len(text), idx + len(query) + ctx_radius)
+        return text[start:end]
+
+    # Summary
+    if task.result.summary:
+        src = task.result.summary
+        pos = src.lower().find(q)
+        if pos != -1:
+            hits.append({"type": "summary", "context": _excerpt(src, pos), "position": pos})
+
+    # Chapters (title + content + key_points joined)
+    for i, ch in enumerate(task.result.chapters or []):
+        src = f"{ch.title}\n{ch.content}\n" + "\n".join(ch.key_points or [])
+        pos = src.lower().find(q)
+        if pos != -1:
+            hits.append({
+                "type": "chapter",
+                "context": _excerpt(src, pos),
+                "position": pos,
+                "chapter_title": ch.title,
+                "chapter_index": i,
+                "chapter_start_time": ch.start_time,
+            })
+        if len(hits) >= max_results:
+            return hits
+
+    # Transcript (cap at multiple matches)
+    transcript = task.result.diarized_transcript or task.result.transcript or ""
+    if transcript:
+        search_from = 0
+        while len(hits) < max_results:
+            pos = transcript.lower().find(q, search_from)
+            if pos == -1:
+                break
+            hits.append({"type": "transcript", "context": _excerpt(transcript, pos), "position": pos})
+            search_from = pos + 1
+
+    return hits
 
 
 # ── Audio path tracking (Feature 7) ───────────────────────────────────────────────
@@ -535,3 +1382,884 @@ async def get_audio_path(task_id: str) -> Optional[str]:
     if row is None:
         return None
     return row["audio_path"]
+
+
+# ── Share tokens ──────────────────────────────────────────────────────────────────
+
+_SHARE_TOKEN_TTL_DAYS = 90
+
+
+async def create_share_token(task_id: str) -> tuple[str, str]:
+    """
+    Create (or return existing) a share token for a completed task.
+    Idempotent: calling twice returns the same token.
+    Returns (token, expires_at_iso).
+    """
+    db = await _get_db()
+    async with db.execute(
+        "SELECT share_token, share_token_expires_at FROM tasks WHERE id=?", [task_id]
+    ) as cursor:
+        row = await cursor.fetchone()
+    if row and row["share_token"]:
+        return row["share_token"], row["share_token_expires_at"]
+    token = uuid.uuid4().hex  # 32-char hex, no hyphens — clean URLs
+    expires_at = (datetime.now(timezone.utc) + timedelta(days=_SHARE_TOKEN_TTL_DAYS)).isoformat()
+    await db.execute(
+        "UPDATE tasks SET share_token=?, share_token_expires_at=? WHERE id=?",
+        [token, expires_at, task_id],
+    )
+    await db.commit()
+    return token, expires_at
+
+
+async def revoke_share_token(task_id: str) -> None:
+    """Remove the share token for a task, invalidating any existing share links."""
+    db = await _get_db()
+    await db.execute(
+        "UPDATE tasks SET share_token=NULL, share_token_expires_at=NULL WHERE id=?",
+        [task_id],
+    )
+    await db.commit()
+
+
+async def get_task_by_share_token(token: str) -> Optional[TaskResponse]:
+    """Return a completed task by its public share token. Returns None if expired."""
+    db = await _get_db()
+    async with db.execute(
+        "SELECT * FROM tasks WHERE share_token=?", [token]
+    ) as cursor:
+        row = await cursor.fetchone()
+    if row is None or not row["result_json"]:
+        return None
+    expires_at = row["share_token_expires_at"]
+    if expires_at and datetime.fromisoformat(expires_at) < datetime.now(timezone.utc):
+        return None
+    result = LessonResult.model_validate_json(row["result_json"])
+    return TaskResponse(
+        task_id=row["id"],
+        status=TaskStatus(row["status"]),
+        progress=row["progress"],
+        message=row["message"],
+        created_at=row["created_at"],
+        url=row["url"],
+        result=result,
+        error=row["error"],
+        error_details=_decode_error_details(row),
+        has_audio=False,  # audio requires auth; not exposed in public share
+        failed_at=_row_failed_at(row),
+    )
+
+
+# ── Bulk delete + Retry + URL cache + Speaker map + Auto-cleanup ─────────────
+
+async def bulk_delete_tasks(task_ids: list[str], user_id: str) -> dict:
+    """
+    Delete multiple tasks owned by user_id in one round-trip.
+
+    IDs not owned by the caller are silently skipped — same anti-enumeration
+    behavior as get_task_for_user. In-flight tasks are marked cancelled
+    first so any running pipeline coroutine aborts at its next checkpoint.
+
+    Returns:
+        {
+          "deleted": [task_id, ...]    — IDs actually removed,
+          "skipped": [task_id, ...]    — IDs not owned/found,
+          "audio_paths": [path, ...]   — disk paths to clean up (caller's job),
+        }
+    """
+    if not task_ids:
+        return {"deleted": [], "skipped": [], "audio_paths": []}
+
+    db = await _get_db()
+    placeholders = ",".join("?" * len(task_ids))
+    async with db.execute(
+        f"SELECT id, audio_path, status FROM tasks "
+        f"WHERE id IN ({placeholders}) AND (user_id=? OR user_id IS NULL)",
+        task_ids + [user_id],
+    ) as cursor:
+        rows = await cursor.fetchall()
+
+    owned_ids = [row["id"] for row in rows]
+    audio_paths = [row["audio_path"] for row in rows if row["audio_path"]]
+
+    if not owned_ids:
+        return {"deleted": [], "skipped": list(task_ids), "audio_paths": []}
+
+    in_flight = [
+        TaskStatus.PENDING.value,
+        TaskStatus.DOWNLOADING.value,
+        TaskStatus.TRANSCRIBING.value,
+        TaskStatus.SUMMARIZING.value,
+    ]
+    in_flight_ph = ",".join("?" * len(in_flight))
+    owned_ph = ",".join("?" * len(owned_ids))
+
+    # Cancel any in-flight tasks among owned_ids so their pipelines abort
+    await db.execute(
+        f"UPDATE tasks SET status=?, message=? "
+        f"WHERE id IN ({owned_ph}) AND status IN ({in_flight_ph})",
+        [TaskStatus.CANCELLED.value, "❌ נמחק (מחיקה מרובה)"]
+        + owned_ids
+        + in_flight,
+    )
+    await db.execute(
+        f"DELETE FROM tasks WHERE id IN ({owned_ph})",
+        owned_ids,
+    )
+    await db.commit()
+
+    owned_set = set(owned_ids)
+    skipped = [tid for tid in task_ids if tid not in owned_set]
+    return {"deleted": owned_ids, "skipped": skipped, "audio_paths": audio_paths}
+
+
+async def mark_task_for_retry(task_id: str, user_id: str) -> bool:
+    """
+    Reset a failed task back to 'pending' so the caller can re-run the pipeline.
+    Returns True iff the task was owned by user_id AND was in 'failed' status.
+    Clears error/error_details/failed_at and sets progress=0.
+    """
+    db = await _get_db()
+    result = await db.execute(
+        "UPDATE tasks SET status=?, progress=0, message=?, "
+        "error=NULL, error_details=NULL, failed_at=NULL "
+        "WHERE id=? AND user_id=? AND status=?",
+        [
+            TaskStatus.PENDING.value,
+            "🔁 ממתין להפעלה מחדש...",
+            task_id,
+            user_id,
+            TaskStatus.FAILED.value,
+        ],
+    )
+    await db.commit()
+    return result.rowcount > 0
+
+
+async def get_task_user_id(task_id: str) -> Optional[str]:
+    """Return the owning user_id for a task (None if task missing or unowned)."""
+    db = await _get_db()
+    async with db.execute(
+        "SELECT user_id FROM tasks WHERE id=?", [task_id]
+    ) as cursor:
+        row = await cursor.fetchone()
+    if row is None:
+        return None
+    return row["user_id"]
+
+
+async def find_cached_task(url: str, user_id: str) -> Optional[TaskResponse]:
+    """
+    Look up the most recent COMPLETED task with the same URL belonging to user_id.
+
+    Used by the pipeline for URL-based deduplication: if a user submits the same
+    Zoom recording twice, we surface the existing summary instead of redoing the
+    download + transcription + LLM calls.
+
+    Returns None if no completed task exists for this URL+user combination.
+    Empty/falsy URLs are not cached (file uploads use 'upload:filename' which
+    we don't dedupe — the file content can differ).
+    """
+    if not url or url.startswith("upload:"):
+        return None
+    db = await _get_db()
+    async with db.execute(
+        "SELECT * FROM tasks WHERE url=? AND user_id=? AND status=? "
+        "AND result_json IS NOT NULL ORDER BY created_at DESC LIMIT 1",
+        [url, user_id, TaskStatus.COMPLETED.value],
+    ) as cursor:
+        row = await cursor.fetchone()
+    if row is None:
+        return None
+
+    result = LessonResult.model_validate_json(row["result_json"])
+    audio_path = row["audio_path"] if "audio_path" in row.keys() else None
+    has_audio = bool(audio_path) and Path(audio_path).exists()
+    return TaskResponse(
+        task_id=row["id"],
+        status=TaskStatus(row["status"]),
+        progress=row["progress"],
+        message=row["message"],
+        created_at=row["created_at"],
+        url=row["url"],
+        result=result,
+        error=row["error"],
+        error_details=_decode_error_details(row),
+        has_audio=has_audio,
+        failed_at=_row_failed_at(row),
+    )
+
+
+async def copy_result_from_cached(task_id: str, source_result_json: str) -> None:
+    """
+    Mark a task complete by copying the result_json from a cached task.
+
+    Each task keeps its own row + its own copy of the JSON blob, so deleting
+    the cache source later does not cascade to the cloned tasks. We do NOT
+    copy the audio_path — only one task owns the persisted audio file, and
+    the playback button will be hidden for clones (has_audio=False).
+    """
+    db = await _get_db()
+    await db.execute(
+        "UPDATE tasks SET status=?, progress=100, message=?, "
+        "result_json=?, error=NULL, error_details=NULL, failed_at=NULL "
+        "WHERE id=?",
+        [
+            TaskStatus.COMPLETED.value,
+            "♻️ נטען מהמטמון (נחסכו זמן ועלות LLM)",
+            source_result_json,
+            task_id,
+        ],
+    )
+    await db.commit()
+
+
+async def get_result_json(task_id: str) -> Optional[str]:
+    """Return the raw result_json string for a task (used by the cache copier)."""
+    db = await _get_db()
+    async with db.execute(
+        "SELECT result_json FROM tasks WHERE id=?", [task_id]
+    ) as cursor:
+        row = await cursor.fetchone()
+    if row is None:
+        return None
+    return row["result_json"]
+
+
+async def cleanup_stale_failed_tasks(threshold_hours: int = 24) -> list[dict]:
+    """
+    Delete any failed task whose `failed_at` is older than the threshold.
+
+    Returns list of {"id": str, "audio_path": Optional[str]} for the rows that
+    were removed, so the caller can clean up disk artefacts. Tasks without
+    failed_at (legacy rows that failed before the column existed) are NOT
+    removed automatically — they need a manual delete.
+    """
+    db = await _get_db()
+    cutoff = (_now() - timedelta(hours=threshold_hours)).isoformat()
+    async with db.execute(
+        "SELECT id, audio_path FROM tasks "
+        "WHERE status=? AND failed_at IS NOT NULL AND failed_at < ?",
+        [TaskStatus.FAILED.value, cutoff],
+    ) as cursor:
+        rows = await cursor.fetchall()
+    if not rows:
+        return []
+    ids = [row["id"] for row in rows]
+    placeholders = ",".join("?" * len(ids))
+    await db.execute(
+        f"DELETE FROM tasks WHERE id IN ({placeholders})",
+        ids,
+    )
+    await db.commit()
+    return [{"id": r["id"], "audio_path": r["audio_path"]} for r in rows]
+
+
+async def update_speaker_map(
+    task_id: str,
+    user_id: str,
+    speaker_map: dict[str, str],
+) -> bool:
+    """
+    Update only the speaker_map field within result_json for a task.
+
+    The user provides corrected names ({"Speaker A": "Asaf", "Speaker B": "Lecturer"}),
+    which improves both the transcript display and the chat (the speaker_map is
+    embedded in the chat context so the LLM can answer "how many questions did
+    Asaf ask" using real names).
+
+    Returns False if task not owned/found, has no result yet, or result_json is
+    not valid JSON.
+    """
+    import json as _json
+
+    # Filter the map: keep only string→string entries with non-empty values.
+    # Empty values mean "remove this speaker name" — we delete the key.
+    cleaned: dict[str, str] = {}
+    for k, v in (speaker_map or {}).items():
+        if not isinstance(k, str):
+            continue
+        if v is None or (isinstance(v, str) and not v.strip()):
+            continue
+        if isinstance(v, str):
+            cleaned[k] = v.strip()[:80]  # cap individual names at 80 chars
+
+    db = await _get_db()
+    # Serialize SELECT-modify-UPDATE so a concurrent rename + diarization
+    # re-run don't both read the same baseline and clobber each other.
+    async with _speaker_map_lock:
+        async with db.execute(
+            "SELECT result_json FROM tasks WHERE id=? AND user_id=?",
+            [task_id, user_id],
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None or not row["result_json"]:
+            return False
+        try:
+            data = _json.loads(row["result_json"])
+        except (TypeError, ValueError):
+            logger.warning(f"update_speaker_map: result_json for {task_id} is not valid JSON")
+            return False
+        data["speaker_map"] = cleaned
+        new_json = _json.dumps(data, ensure_ascii=False)
+        await db.execute(
+            "UPDATE tasks SET result_json=? WHERE id=?",
+            [new_json, task_id],
+        )
+        await db.commit()
+        return True
+
+
+# ── B4: Audio clips ────────────────────────────────────────────────────────
+
+async def create_audio_clip(
+    clip_id: str,
+    task_id: str,
+    user_id: str,
+    start_sec: float,
+    end_sec: float,
+    label: str = "",
+) -> dict:
+    """Insert a new audio-clip share record. No ffmpeg; just metadata."""
+    db = await _get_db()
+    now = _now().isoformat()
+    await db.execute(
+        "INSERT INTO audio_clips (id, task_id, user_id, start_sec, end_sec, label, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [clip_id, task_id, user_id, float(start_sec), float(end_sec), label or "", now],
+    )
+    await db.commit()
+    return {
+        "id": clip_id,
+        "task_id": task_id,
+        "user_id": user_id,
+        "start_sec": float(start_sec),
+        "end_sec": float(end_sec),
+        "label": label or "",
+        "created_at": now,
+    }
+
+
+async def get_audio_clip(clip_id: str) -> Optional[dict]:
+    """Public read — used by the shareable /clips/{id}.mp3 route."""
+    db = await _get_db()
+    async with db.execute(
+        "SELECT id, task_id, user_id, start_sec, end_sec, label, created_at "
+        "FROM audio_clips WHERE id = ?",
+        [clip_id],
+    ) as cur:
+        row = await cur.fetchone()
+    if row is None:
+        return None
+    return dict(row)
+
+
+async def list_clips_for_task(task_id: str, user_id: str) -> list[dict]:
+    """List a user's clips for a given task, newest first."""
+    db = await _get_db()
+    async with db.execute(
+        "SELECT id, task_id, user_id, start_sec, end_sec, label, created_at "
+        "FROM audio_clips WHERE task_id = ? AND user_id = ? "
+        "ORDER BY created_at DESC",
+        [task_id, user_id],
+    ) as cur:
+        rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+async def delete_audio_clip(clip_id: str, user_id: str) -> bool:
+    """Delete a clip only if it belongs to the calling user. Returns True on hit."""
+    db = await _get_db()
+    result = await db.execute(
+        "DELETE FROM audio_clips WHERE id = ? AND user_id = ?",
+        [clip_id, user_id],
+    )
+    await db.commit()
+    return result.rowcount > 0
+
+
+# ── B4: Cross-lecture glossary cache ────────────────────────────────────────
+
+async def get_user_glossary(user_id: str) -> Optional[dict]:
+    """Return cached glossary {"terms": [...], "updated_at": "..."} or None."""
+    db = await _get_db()
+    async with db.execute(
+        "SELECT glossary_json, updated_at FROM user_glossaries WHERE user_id = ?",
+        [user_id],
+    ) as cur:
+        row = await cur.fetchone()
+    if row is None:
+        return None
+    import json as _json
+    try:
+        terms = _json.loads(row["glossary_json"])
+    except (ValueError, TypeError):
+        terms = []
+    return {"terms": terms, "updated_at": row["updated_at"]}
+
+
+async def set_user_glossary(user_id: str, terms: list[dict]) -> str:
+    """Upsert the glossary cache and return the new updated_at timestamp."""
+    import json as _json
+    db = await _get_db()
+    now = _now().isoformat()
+    await db.execute(
+        "INSERT INTO user_glossaries (user_id, glossary_json, updated_at) "
+        "VALUES (?, ?, ?) "
+        "ON CONFLICT(user_id) DO UPDATE SET "
+        "glossary_json = excluded.glossary_json, updated_at = excluded.updated_at",
+        [user_id, _json.dumps(terms, ensure_ascii=False), now],
+    )
+    await db.commit()
+    return now
+
+
+# ── B5: Outgoing webhooks (Slack / Discord) ─────────────────────────────────
+
+async def create_webhook(user_id: str, kind: str, url: str) -> dict:
+    """Insert a new webhook config for a user. Returns the inserted row as dict."""
+    db = await _get_db()
+    wid = uuid.uuid4().hex
+    now = _now().isoformat()
+    await db.execute(
+        "INSERT INTO user_webhooks (id, user_id, kind, url, enabled, created_at) "
+        "VALUES (?, ?, ?, ?, 1, ?)",
+        [wid, user_id, kind, url, now],
+    )
+    await db.commit()
+    return {
+        "id": wid,
+        "user_id": user_id,
+        "kind": kind,
+        "url": url,
+        "enabled": True,
+        "created_at": now,
+    }
+
+
+async def list_webhooks(user_id: str) -> list[dict]:
+    """Return all webhook configs for a user, newest first."""
+    db = await _get_db()
+    async with db.execute(
+        "SELECT id, kind, url, enabled, created_at FROM user_webhooks "
+        "WHERE user_id = ? ORDER BY created_at DESC",
+        [user_id],
+    ) as cur:
+        rows = await cur.fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["enabled"] = bool(d["enabled"])
+        out.append(d)
+    return out
+
+
+async def list_enabled_webhooks(user_id: str) -> list[dict]:
+    """Subset used by the post-completion fire-and-forget notifier."""
+    db = await _get_db()
+    async with db.execute(
+        "SELECT id, kind, url FROM user_webhooks WHERE user_id = ? AND enabled = 1",
+        [user_id],
+    ) as cur:
+        rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+async def set_webhook_enabled(webhook_id: str, user_id: str, enabled: bool) -> bool:
+    """Toggle a webhook's enabled flag. Returns True if a row was updated."""
+    db = await _get_db()
+    result = await db.execute(
+        "UPDATE user_webhooks SET enabled = ? WHERE id = ? AND user_id = ?",
+        [1 if enabled else 0, webhook_id, user_id],
+    )
+    await db.commit()
+    return result.rowcount > 0
+
+
+async def delete_webhook(webhook_id: str, user_id: str) -> bool:
+    """Delete a webhook config. Returns True if a row was removed."""
+    db = await _get_db()
+    result = await db.execute(
+        "DELETE FROM user_webhooks WHERE id = ? AND user_id = ?",
+        [webhook_id, user_id],
+    )
+    await db.commit()
+    return result.rowcount > 0
+
+
+async def get_webhook(webhook_id: str, user_id: str) -> Optional[dict]:
+    """Owner-gated read — used to check before PATCH/DELETE."""
+    db = await _get_db()
+    async with db.execute(
+        "SELECT id, kind, url, enabled, created_at FROM user_webhooks "
+        "WHERE id = ? AND user_id = ?",
+        [webhook_id, user_id],
+    ) as cur:
+        row = await cur.fetchone()
+    if row is None:
+        return None
+    d = dict(row)
+    d["enabled"] = bool(d["enabled"])
+    return d
+
+
+async def get_task_owner(task_id: str) -> Optional[str]:
+    """Return the user_id that owns this task, or None if the task doesn't exist."""
+    db = await _get_db()
+    async with db.execute(
+        "SELECT user_id FROM tasks WHERE id = ?", [task_id]
+    ) as cur:
+        row = await cur.fetchone()
+    return row["user_id"] if row else None
+
+
+# ── B5: Task sharing (cohort read-access) ────────────────────────────────────
+
+async def get_user_by_email(email: str) -> Optional[str]:
+    """Look up a user_id by email. Returns None if no such user."""
+    db = await _get_db()
+    async with db.execute(
+        "SELECT id FROM users WHERE email = ?", [email.lower()]
+    ) as cur:
+        row = await cur.fetchone()
+    return row["id"] if row else None
+
+
+async def share_task(task_id: str, target_user_id: str, granted_by_user_id: str) -> dict:
+    """Grant another user read-access to a task. Upserts if already shared."""
+    db = await _get_db()
+    now = _now().isoformat()
+    await db.execute(
+        "INSERT INTO task_shares (task_id, user_id, granted_by_user_id, granted_at) "
+        "VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(task_id, user_id) DO UPDATE SET "
+        "granted_by_user_id = excluded.granted_by_user_id, granted_at = excluded.granted_at",
+        [task_id, target_user_id, granted_by_user_id, now],
+    )
+    await db.commit()
+    return {
+        "task_id": task_id,
+        "user_id": target_user_id,
+        "granted_by_user_id": granted_by_user_id,
+        "granted_at": now,
+    }
+
+
+async def revoke_task_share(task_id: str, target_user_id: str) -> bool:
+    """Remove a single user's access to a task. Returns True if a row was removed."""
+    db = await _get_db()
+    result = await db.execute(
+        "DELETE FROM task_shares WHERE task_id = ? AND user_id = ?",
+        [task_id, target_user_id],
+    )
+    await db.commit()
+    return result.rowcount > 0
+
+
+async def list_task_collaborators(task_id: str) -> list[dict]:
+    """List every user with shared access to a task (excluding the owner)."""
+    db = await _get_db()
+    async with db.execute(
+        "SELECT ts.user_id, u.email, ts.granted_at "
+        "FROM task_shares ts JOIN users u ON u.id = ts.user_id "
+        "WHERE ts.task_id = ? ORDER BY ts.granted_at",
+        [task_id],
+    ) as cur:
+        rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+async def list_tasks_shared_with_user(user_id: str, limit: int = 50) -> list[dict]:
+    """Return tasks shared *with* this user (i.e. owned by someone else).
+    Mirrors `list_tasks` columns so the History tab can show a "Shared with me" list.
+    """
+    db = await _get_db()
+    async with db.execute(
+        "SELECT t.id, t.status, t.progress, t.message, t.created_at, t.url, t.failed_at, "
+        "       u.email AS owner_email "
+        "FROM task_shares ts "
+        "JOIN tasks t ON t.id = ts.task_id "
+        "JOIN users u ON u.id = t.user_id "
+        "WHERE ts.user_id = ? "
+        "ORDER BY t.created_at DESC LIMIT ?",
+        [user_id, limit],
+    ) as cur:
+        rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+async def user_can_read_task(task_id: str, user_id: str) -> bool:
+    """Return True if user_id owns the task OR has been granted a share."""
+    db = await _get_db()
+    async with db.execute(
+        "SELECT 1 FROM tasks WHERE id = ? AND user_id = ?", [task_id, user_id]
+    ) as cur:
+        if await cur.fetchone():
+            return True
+    async with db.execute(
+        "SELECT 1 FROM task_shares WHERE task_id = ? AND user_id = ?",
+        [task_id, user_id],
+    ) as cur:
+        return await cur.fetchone() is not None
+
+
+async def get_task_readable_by_user(task_id: str, user_id: str) -> Optional[TaskResponse]:
+    """Like get_task_for_user but also allows users with shared access."""
+    if not await user_can_read_task(task_id, user_id):
+        return None
+    # Re-fetch by id only — we've already cleared the gate.
+    db = await _get_db()
+    async with db.execute("SELECT * FROM tasks WHERE id = ?", [task_id]) as cur:
+        row = await cur.fetchone()
+    if row is None:
+        return None
+    result = None
+    if row["result_json"]:
+        result = LessonResult.model_validate_json(row["result_json"])
+    audio_path = row["audio_path"] if "audio_path" in row.keys() else None
+    has_audio = bool(audio_path) and Path(audio_path).exists()
+    return TaskResponse(
+        task_id=row["id"],
+        status=TaskStatus(row["status"]),
+        progress=row["progress"],
+        message=row["message"],
+        created_at=row["created_at"],
+        url=row["url"],
+        result=result,
+        error=row["error"],
+        error_details=_decode_error_details(row),
+        has_audio=has_audio,
+        failed_at=_row_failed_at(row),
+        notes=_row_notes(row),
+    )
+
+
+# ── B6.2: lesson recipe helpers ─────────────────────────────────────────────
+
+import json as _json
+
+
+_ALLOWED_RECIPE_MODES = {"gemini_direct", "whisper_local", "whisper_api"}
+
+
+def _row_to_recipe(row: aiosqlite.Row) -> dict:
+    try:
+        tags = _json.loads(row["tags_json"] or "[]")
+        if not isinstance(tags, list):
+            tags = []
+    except _json.JSONDecodeError:
+        tags = []
+    return {
+        "id": row["id"],
+        "user_id": row["user_id"],
+        "name": row["name"],
+        "mode": row["mode"],
+        "language": row["language"],
+        "tags": tags,
+        "notes": row["notes"] if row["notes"] is not None else "",
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+async def create_recipe(
+    user_id: str,
+    name: str,
+    mode: str,
+    language: str = "he",
+    tags: Optional[list[str]] = None,
+    notes: Optional[str] = None,
+) -> dict:
+    db = await _get_db()
+    recipe_id = uuid.uuid4().hex
+    now = _now().isoformat()
+    await db.execute(
+        """
+        INSERT INTO lesson_recipes
+            (id, user_id, name, mode, language, tags_json, notes, created_at, updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?)
+        """,
+        [
+            recipe_id,
+            user_id,
+            name,
+            mode,
+            language,
+            _json.dumps(tags or [], ensure_ascii=False),
+            notes,
+            now,
+            now,
+        ],
+    )
+    await db.commit()
+    return {
+        "id": recipe_id,
+        "user_id": user_id,
+        "name": name,
+        "mode": mode,
+        "language": language,
+        "tags": list(tags or []),
+        "notes": notes or "",
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+async def list_recipes_for_user(user_id: str) -> list[dict]:
+    db = await _get_db()
+    async with db.execute(
+        # rowid tiebreaker keeps ordering stable when several recipes share the
+        # same created_at timestamp (inserts within the same millisecond).
+        "SELECT * FROM lesson_recipes WHERE user_id = ? ORDER BY created_at DESC, rowid DESC",
+        [user_id],
+    ) as cur:
+        rows = await cur.fetchall()
+    return [_row_to_recipe(r) for r in rows]
+
+
+async def get_recipe_for_user(recipe_id: str, user_id: str) -> Optional[dict]:
+    db = await _get_db()
+    async with db.execute(
+        "SELECT * FROM lesson_recipes WHERE id = ? AND user_id = ?",
+        [recipe_id, user_id],
+    ) as cur:
+        row = await cur.fetchone()
+    return _row_to_recipe(row) if row else None
+
+
+async def update_recipe(
+    recipe_id: str,
+    user_id: str,
+    *,
+    name: Optional[str] = None,
+    mode: Optional[str] = None,
+    language: Optional[str] = None,
+    tags: Optional[list[str]] = None,
+    notes: Optional[str] = None,
+) -> Optional[dict]:
+    current = await get_recipe_for_user(recipe_id, user_id)
+    if current is None:
+        return None
+    new_name = name if name is not None else current["name"]
+    new_mode = mode if mode is not None else current["mode"]
+    new_lang = language if language is not None else current["language"]
+    new_tags = tags if tags is not None else current["tags"]
+    new_notes = notes if notes is not None else current["notes"]
+    now = _now().isoformat()
+    db = await _get_db()
+    await db.execute(
+        """
+        UPDATE lesson_recipes
+        SET name = ?, mode = ?, language = ?, tags_json = ?, notes = ?, updated_at = ?
+        WHERE id = ? AND user_id = ?
+        """,
+        [
+            new_name,
+            new_mode,
+            new_lang,
+            _json.dumps(new_tags, ensure_ascii=False),
+            new_notes,
+            now,
+            recipe_id,
+            user_id,
+        ],
+    )
+    await db.commit()
+    return await get_recipe_for_user(recipe_id, user_id)
+
+
+async def delete_recipe(recipe_id: str, user_id: str) -> bool:
+    db = await _get_db()
+    result = await db.execute(
+        "DELETE FROM lesson_recipes WHERE id = ? AND user_id = ?",
+        [recipe_id, user_id],
+    )
+    await db.commit()
+    return result.rowcount > 0
+
+
+# ── B6.3: lesson slide helpers ──────────────────────────────────────────────
+
+
+def _row_to_slide(row: aiosqlite.Row) -> dict:
+    return {
+        "id": row["id"],
+        "task_id": row["task_id"],
+        "page_index": row["page_index"],
+        "title": row["title"],
+        "body": row["body"],
+        "chapter_index": row["chapter_index"],
+        "created_at": row["created_at"],
+    }
+
+
+async def replace_slides_for_task(
+    task_id: str, slides: list[dict]
+) -> list[dict]:
+    """Overwrite the slide deck for a task with the provided list.
+
+    Each entry must have at least `page_index` and `title`; `body` and
+    `chapter_index` are optional. Returns the persisted rows.
+    """
+    db = await _get_db()
+    await db.execute("DELETE FROM lesson_slides WHERE task_id = ?", [task_id])
+    now = _now().isoformat()
+    rows: list[dict] = []
+    for slide in slides:
+        slide_id = uuid.uuid4().hex
+        page_index = int(slide["page_index"])
+        title = (slide.get("title") or "").strip()
+        body = (slide.get("body") or "").strip()
+        chapter_index = slide.get("chapter_index")
+        await db.execute(
+            """
+            INSERT INTO lesson_slides
+                (id, task_id, page_index, title, body, chapter_index, created_at)
+            VALUES (?,?,?,?,?,?,?)
+            """,
+            [slide_id, task_id, page_index, title, body, chapter_index, now],
+        )
+        rows.append(
+            {
+                "id": slide_id,
+                "task_id": task_id,
+                "page_index": page_index,
+                "title": title,
+                "body": body,
+                "chapter_index": chapter_index,
+                "created_at": now,
+            }
+        )
+    await db.commit()
+    return rows
+
+
+async def list_slides_for_task(task_id: str) -> list[dict]:
+    db = await _get_db()
+    async with db.execute(
+        "SELECT * FROM lesson_slides WHERE task_id = ? ORDER BY page_index ASC",
+        [task_id],
+    ) as cur:
+        rows = await cur.fetchall()
+    return [_row_to_slide(r) for r in rows]
+
+
+async def update_slide_chapter(
+    slide_id: str, task_id: str, chapter_index: Optional[int]
+) -> bool:
+    db = await _get_db()
+    result = await db.execute(
+        "UPDATE lesson_slides SET chapter_index = ? WHERE id = ? AND task_id = ?",
+        [chapter_index, slide_id, task_id],
+    )
+    await db.commit()
+    return result.rowcount > 0
+
+
+async def clear_slides_for_task(task_id: str) -> int:
+    db = await _get_db()
+    result = await db.execute(
+        "DELETE FROM lesson_slides WHERE task_id = ?", [task_id]
+    )
+    await db.commit()
+    return result.rowcount

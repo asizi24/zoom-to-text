@@ -18,8 +18,51 @@ Whisper transcription service — two backends:
 import asyncio
 import gc
 import logging
+import os
+import sys
 import time
 from pathlib import Path
+
+
+# ── Windows CUDA DLL discovery ─────────────────────────────────────────────────
+# faster-whisper (CTranslate2) needs the CUDA runtime DLLs (cublas, cudnn) on the
+# loader path when WHISPER_DEVICE=cuda. The pip `nvidia-*-cu12` wheels install
+# them under site-packages/nvidia/<lib>/bin, which Windows does NOT search
+# automatically — so a GPU load fails with "cublas64_12.dll is not found".
+# Register those bin dirs explicitly. No-op on Linux/Docker (torch handles it).
+if sys.platform == "win32":
+    import importlib.util
+
+    for _nv_pkg in ("nvidia.cublas", "nvidia.cudnn", "nvidia.cuda_nvrtc"):
+        try:
+            _spec = importlib.util.find_spec(_nv_pkg)
+            if _spec and _spec.submodule_search_locations:
+                _bin = os.path.join(_spec.submodule_search_locations[0], "bin")
+                if os.path.isdir(_bin):
+                    os.add_dll_directory(_bin)
+                    # CTranslate2 loads cublas/cudnn lazily via LoadLibrary, which
+                    # consults PATH but not the add_dll_directory list — so prepend
+                    # to PATH too, otherwise GPU encode() still can't find the DLL.
+                    os.environ["PATH"] = _bin + os.pathsep + os.environ.get("PATH", "")
+        except Exception:  # pragma: no cover - best-effort DLL discovery
+            pass
+
+
+def _rss_mb() -> float:
+    """Process RSS in MB. Tries psutil first (cross-platform), then /proc (Linux)."""
+    try:
+        import psutil, os
+        return psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
+    except Exception:
+        pass
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / 1024  # kB → MB
+    except OSError:
+        pass
+    return -1.0
 
 import httpx
 
@@ -92,25 +135,45 @@ async def unload_model_if_idle():
         if idle > _IDLE_THRESHOLD:
             async with _model_lock:
                 if _model is not None:
+                    before_mb = _rss_mb()
                     logger.info(
                         f"Whisper idle for {idle / 60:.1f} min "
                         f"(threshold: {settings.auto_shutdown_idle_minutes} min) — unloading"
+                        + (f" (RSS before: {before_mb:.0f} MB)" if before_mb >= 0 else "")
                     )
                     del _model
                     _model = None
                     gc.collect()
+                    after_mb = _rss_mb()
+                    if before_mb >= 0 and after_mb >= 0:
+                        logger.info(
+                            f"Whisper unloaded — RSS {before_mb:.0f} MB → {after_mb:.0f} MB "
+                            f"(freed {before_mb - after_mb:.0f} MB)"
+                        )
+                    else:
+                        logger.info("Whisper unloaded")
 
     if _ivrit_model is not None:
         idle = time.time() - _ivrit_last_used
         if idle > _IDLE_THRESHOLD:
             async with _ivrit_lock:
                 if _ivrit_model is not None:
+                    before_mb = _rss_mb()
                     logger.info(
                         f"ivrit-ai idle for {idle / 60:.1f} min — unloading"
+                        + (f" (RSS before: {before_mb:.0f} MB)" if before_mb >= 0 else "")
                     )
                     del _ivrit_model
                     _ivrit_model = None
                     gc.collect()
+                    after_mb = _rss_mb()
+                    if before_mb >= 0 and after_mb >= 0:
+                        logger.info(
+                            f"ivrit-ai unloaded — RSS {before_mb:.0f} MB → {after_mb:.0f} MB "
+                            f"(freed {before_mb - after_mb:.0f} MB)"
+                        )
+                    else:
+                        logger.info("ivrit-ai unloaded")
 
 
 # ── LOCAL transcription ───────────────────────────────────────────────────────
@@ -279,17 +342,22 @@ async def _call_whisper_api(client: httpx.AsyncClient, chunk_path: str, language
     """Send a single audio chunk to the OpenAI Whisper API and return the transcript text."""
     lang_param = language if language != "auto" else None
 
-    with open(chunk_path, "rb") as f:
-        data = {"model": "whisper-1", "response_format": "text"}
-        if lang_param:
-            data["language"] = lang_param
+    # Read the chunk off the event loop. Chunks are capped at ~13 min of
+    # audio (≤25 MB / OpenAI Whisper-1 limit), so loading fully into memory
+    # is fine and lets httpx stream pure bytes without holding a sync file
+    # handle through an awaited POST.
+    chunk_bytes = await asyncio.to_thread(Path(chunk_path).read_bytes)
 
-        response = await client.post(
-            "https://api.openai.com/v1/audio/transcriptions",
-            headers={"Authorization": f"Bearer {settings.openai_api_key}"},
-            files={"file": (Path(chunk_path).name, f, "audio/mpeg")},
-            data=data,
-        )
+    data = {"model": "whisper-1", "response_format": "text"}
+    if lang_param:
+        data["language"] = lang_param
+
+    response = await client.post(
+        "https://api.openai.com/v1/audio/transcriptions",
+        headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+        files={"file": (Path(chunk_path).name, chunk_bytes, "audio/mpeg")},
+        data=data,
+    )
 
     response.raise_for_status()
     return response.text

@@ -3,7 +3,7 @@ Application configuration using Pydantic BaseSettings.
 All values can be overridden via environment variables or the .env file.
 """
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     google_api_key: str = ""
     # Option B: GCP Service Account key file (Vertex AI — for production)
     google_application_credentials: str = "key.json"
-    gcp_project_id: str = "gen-lang-client-0633910627"
+    gcp_project_id: str = ""
     gcp_location: str = "us-central1"
     # Gemini model to use for summarization
     gemini_model: str = "gemini-2.5-flash"
@@ -68,7 +68,7 @@ class Settings(BaseSettings):
     # only when at least one question scores below the threshold.
     enable_exam_critique: bool = True
     # Average score threshold below which a question is sent for revision (1–5 scale).
-    exam_critique_threshold: float = 3.5
+    exam_critique_threshold: float = 3.8
 
     # ── App ─────────────────────────────────────────────────────────────────────
     app_title: str = "Zoom Transcriber"
@@ -79,9 +79,112 @@ class Settings(BaseSettings):
     # Comma-separated list of emails allowed to log in
     # Example: "alice@example.com,bob@example.com"
     allowed_emails: str = ""
+    # Comma-separated list of admin emails. Admins bypass per-user 24h quotas
+    # and per-IP rate limits, and have block_until/is_banned auto-cleared on
+    # startup. Override with ADMIN_EMAILS env var. Default is empty so a
+    # fresh clone doesn't silently grant admin to a hard-coded address —
+    # set ADMIN_EMAILS in your `.env` (see `.env.example`).
+    admin_emails: str = ""
     resend_api_key: str = ""
+    # When True (and base_url is http://localhost), exposes GET
+    # /api/auth/dev-login — a one-click loopback login that skips the magic-link
+    # email entirely (no Resend key needed for local dev). It logs in as the
+    # first ADMIN_EMAILS entry (falling back to the first ALLOWED_EMAILS entry).
+    # NEVER enable in production: any real deployment uses a domain base_url, so
+    # the endpoint 404s there even if this flag is accidentally left on.
+    enable_dev_login: bool = False
     # Allowed CORS origin — set to your Fly.io domain in production
     cors_origin: str = "http://localhost:8000"
+
+    # ── LLM provider selection ─────────────────────────────────────────────────
+    # Which backend handles summarization, critique, chat, and flashcards.
+    # All three providers share a common interface; switching is a single
+    # env-var change with no code edits required.
+    llm_provider: Literal["gemini", "openrouter", "ollama"] = "gemini"
+
+    # OpenRouter (https://openrouter.ai) — single API key, dozens of models
+    openrouter_api_key:  str = ""
+    openrouter_model:    str = "anthropic/claude-3.5-sonnet"
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+
+    # Ollama (https://ollama.com) — local model runner. Not deployed on Fly.io;
+    # used by self-hosted setups that want privacy / offline operation.
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_model:    str = "llama3.1:70b"
+    # Context window for Ollama requests. Ollama's own default is small (~4k) and
+    # silently truncates long lecture transcripts — the summarizer sends the whole
+    # transcript in one prompt, so we raise the window to fit it. 32768 suits
+    # qwen2.5 (32k native). Lower to 16384 if GPU VRAM is tight (less KV cache
+    # resident on the GPU); a value above the model's native context degrades it.
+    ollama_num_ctx: int = 32768
+
+    # ── LLM debugging ──────────────────────────────────────────────────────────
+    # When True, persist raw LLM responses (synthesis + extraction) into
+    # result_json.raw_llm_response for offline debugging. Disable in production
+    # — raw responses can be 50KB+ per recording.
+    llm_debug_raw_responses: bool = False
+
+    # ── Task 1.2 — Gemini text diarization ────────────────────────────────────
+    # When True, summarize_transcript runs an extra Gemini call before the
+    # synthesis+extraction pair to label speakers in the transcript. Skipped
+    # for GEMINI_DIRECT mode (audio model already perceives speakers) and for
+    # non-Gemini providers.
+    enable_diarization: bool = True
+
+    # ── Task 2.2 — Diarization provider (gemini | pyannote) ──────────────────
+    # "gemini"   — text-based diarization via the existing Gemini call (default,
+    #              works on Fly.io; no extra deps).
+    # "pyannote" — acoustic diarization via pyannote.audio (code-only; requires
+    #              pyannote.audio + torch from requirements-heavy.txt; home server
+    #              with GPU only; never deployed on Fly.io).
+    diarization_provider: str = "gemini"
+    # Pyannote pretrained model ID (HuggingFace Hub).
+    pyannote_model: str = "pyannote/speaker-diarization-3.1"
+    # HuggingFace token for gated models (pyannote requires accepting the license).
+    hf_token: str = ""
+
+    # ── Task 2.3 — WebSocket streaming (home-server only) ────────────────────
+    # Never enable on Fly.io — the shared-cpu-1x machine cannot sustain
+    # concurrent WebSocket connections + a loaded Whisper model.
+    # Enable on a home server: ENABLE_STREAMING=true in .env
+    enable_streaming: bool = False
+
+    # ── Rate limiting ───────────────────────────────────────────────────────────
+    # Maximum number of task-submission requests (POST /api/tasks and
+    # POST /api/tasks/upload) allowed per IP address per minute.
+    # Set to 0 to disable rate limiting entirely (e.g. during local dev).
+    rate_limit_per_minute: int = 10
+
+    # Maximum number of task-submission requests allowed per authenticated user
+    # per 24-hour rolling window. Exceeding this triggers a 24-hour block; a
+    # request while blocked causes a permanent ban. Set to 0 to disable.
+    user_daily_task_limit: int = 2
+
+    # ── API documentation ─────────────────────────────────────────────────────
+    # Set ENABLE_DOCS=false on Fly.io (or any production deployment) to hide
+    # /docs and /redoc from public access.  Local dev keeps them enabled.
+    enable_docs: bool = True
+
+    # ── Content language ────────────────────────────────────────────────────────
+    # "auto" — Gemini detects the lecture language and responds in kind (default).
+    # ISO 639-1 code ("he", "en", "ar", "fr" …) — force a specific output language.
+    lecture_language: str = "auto"
+
+    # ── LTI 1.3 (institutional SSO) ────────────────────────────────────────────
+    # OIDC state TTL — must comfortably exceed the worst-case round-trip from
+    # /lti/login → user authenticates at the LMS → POST /lti/launch.
+    lti_state_ttl_seconds: int = 300
+
+    @model_validator(mode="after")
+    def validate_llm_provider_credentials(self) -> "Settings":
+        """Fail fast at boot if the chosen provider is missing credentials."""
+        if self.llm_provider == "openrouter" and not self.openrouter_api_key:
+            raise ValueError(
+                "llm_provider=openrouter requires openrouter_api_key to be set"
+            )
+        # gemini and ollama either don't need a key (ollama) or already
+        # validate at first use (gemini's _get_client raises a clear error).
+        return self
 
 
 settings = Settings()

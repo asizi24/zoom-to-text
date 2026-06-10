@@ -1,0 +1,9 @@
+# Build:  ollama create qwen2.5-32k -f scripts\ollama\qwen2.5-32k.Modelfile
+#
+# Why: the app's Ollama provider (app/services/llm_providers/ollama.py) does not
+# set `num_ctx`, so Ollama would fall back to its small default (~4k) and silently
+# truncate full-lecture transcripts. qwen2.5 has a 32k native context, so baking
+# num_ctx=32768 lets a whole ~1.5h transcript fit in a single summarization prompt
+# with no quality loss. Lower to 16384 if VRAM is tight (less KV-cache on the GPU).
+FROM qwen2.5:14b
+PARAMETER num_ctx 32768
