@@ -1918,24 +1918,156 @@ async def summarize_transcript(
     return _apply_critique_pipeline(merged, progress_cb)
 
 
+# ── Provider (non-Gemini / local) transcript path ─────────────────────────────────
+#
+# Local models (Ollama) have a small context window that is a TOTAL budget for
+# prompt + output. A long transcript fills the window, leaving no room to generate
+# AND pushing the JSON instructions out of context — the model then emits one
+# garbage token (done_reason="length") and parsing fails. We therefore size every
+# call to leave output headroom, and map-reduce transcripts that don't fit.
+#
+# Hebrew tokenizes at ~0.7 token/char for mistral-nemo; we budget 0.8 for headroom.
+
+_PROVIDER_TOK_PER_CHAR = 0.8
+
+
+def _provider_single_call_chars() -> int:
+    """Max transcript chars for a one-shot full-LessonResult call (large output)."""
+    # Reserve ~8.5k tokens for the generated summary + chapters + exam JSON.
+    usable = max(4000, settings.ollama_num_ctx - 9000)
+    return int(usable / _PROVIDER_TOK_PER_CHAR)
+
+
+def _provider_map_chunk_chars() -> int:
+    """Max transcript chars per map-phase chunk (small partial-summary output)."""
+    # Reserve ~3k tokens for the partial summary of a single chunk.
+    usable = max(4000, settings.ollama_num_ctx - 3500)
+    return int(usable / _PROVIDER_TOK_PER_CHAR)
+
+
+_PROVIDER_PARTIAL_PROMPT = (
+    "להלן חלק מתמלול שיעור. סכם את הנקודות המרכזיות בחלק זה בלבד.\n"
+    'החזר JSON עם השדות: "summary" (מחרוזת) ו-"key_points" (רשימת מחרוזות).'
+)
+
+
+def _provider_lang_directive() -> str:
+    """A forceful, end-of-prompt language instruction for weaker local models.
+
+    Gemini follows the single language line in _system_prompt reliably; local
+    models (mistral-nemo etc.) drift to English on technical content unless the
+    directive is repeated emphatically near the end of the prompt (recency).
+    """
+    lang = settings.lecture_language
+    if lang == "auto":
+        return (
+            "\n\n‼️ חשוב מאוד: כתוב את כל הפלט (סיכום, פרקים, שאלות ותשובות) "
+            "באותה שפה של תמלול ההרצאה. אם ההרצאה בעברית — כתוב הכול בעברית בלבד."
+        )
+    if lang == "he":
+        return (
+            "\n\n‼️ חשוב מאוד: כתוב את כל הפלט — סיכום, פרקים, שאלות המבחן והתשובות — "
+            "בעברית בלבד. גם כשמדובר במונחים טכניים באנגלית (למשל AWS, S3, IAM), "
+            "הסבר אותם בעברית והשאר רק את שם המונח באנגלית בתוך משפט עברי."
+        )
+    return f"\n\n‼️ IMPORTANT: write ALL output strictly in this language: {lang}."
+
+
+def _extract_partial_text(text: str) -> str:
+    """Pull readable text out of a chunk's partial-summary JSON (best-effort)."""
+    try:
+        obj = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return text.strip()
+    parts: list[str] = []
+    summary = obj.get("summary")
+    if isinstance(summary, str) and summary.strip():
+        parts.append(summary.strip())
+    kps = obj.get("key_points")
+    if isinstance(kps, list):
+        parts.extend(f"• {kp}" for kp in kps if isinstance(kp, str) and kp.strip())
+    return "\n".join(parts) if parts else text.strip()
+
+
+async def _provider_generate_lesson(prompt: str, provider) -> LessonResult:
+    """One json_mode generation + parse, with a single retry on malformed JSON."""
+    last_error: Exception | None = None
+    for attempt in range(2):
+        text = await provider.generate_text(prompt, json_mode=True)
+        try:
+            return _parse_response(text)
+        except RuntimeError as exc:
+            last_error = exc
+            logger.warning(
+                "Provider JSON parse failed (attempt %d/2): %s", attempt + 1, exc
+            )
+    raise last_error  # type: ignore[misc]
+
+
 async def _summarize_transcript_via_provider(
     transcript: str,
     progress_cb: _ProgressCallback | None = None,
     supplementary_context: str | None = None,
 ) -> LessonResult:
-    """Run the full transcript→summary pipeline through a non-Gemini provider."""
+    """Run the full transcript→summary pipeline through a non-Gemini provider.
+
+    Short transcripts go in a single json_mode call. Long ones are map-reduced:
+    each fitting chunk is summarized, then the partials are merged into the final
+    summary + chapters + exam — so the whole lesson is covered without overflowing
+    the model's context window.
+    """
     provider = get_provider()
+    single_call_chars = _provider_single_call_chars()
+    lang_directive = _provider_lang_directive()
+
+    if len(transcript) <= single_call_chars:
+        if progress_cb:
+            progress_cb(82, f"🤖 שולח ל-{provider.name} — מייצר סיכום ומבחן...")
+        prompt = (
+            _system_prompt(supplementary_context)
+            + "\n\nתמלול השיעור:\n"
+            + transcript
+            + lang_directive
+        )
+        return await _provider_generate_lesson(prompt, provider)
+
+    # Long transcript: map (summarize each chunk) → reduce (merge into final result).
+    chunk_chars = _provider_map_chunk_chars()
+    chunks = [
+        transcript[i : i + chunk_chars]
+        for i in range(0, len(transcript), chunk_chars)
+    ]
+    n = len(chunks)
+    logger.info(
+        "Transcript is %d chars > %d single-call limit — chunking into %d parts for %s",
+        len(transcript), single_call_chars, n, provider.name,
+    )
+
+    partial_summaries: list[str] = []
+    for i, chunk in enumerate(chunks, 1):
+        if progress_cb:
+            pct = 82 + int(5 * i / n)  # 82–87%
+            progress_cb(pct, f"🔄 מסכם חלק {i} מתוך {n} ({provider.name})...")
+        text = await provider.generate_text(
+            f"{_PROVIDER_PARTIAL_PROMPT}\n\nחלק {i}:\n{chunk}{lang_directive}",
+            json_mode=True,
+            max_tokens=4096,
+        )
+        partial_summaries.append(_extract_partial_text(text))
 
     if progress_cb:
-        progress_cb(82, f"🤖 שולח ל-{provider.name} — מייצר סיכום ומבחן...")
+        progress_cb(88, "🔗 מאחד את כל החלקים לסיכום מלא ומבחן...")
 
-    prompt = (
+    merge_prompt = (
         _system_prompt(supplementary_context)
-        + "\n\nתמלול השיעור:\n"
-        + transcript[:_MAX_CHUNK_CHARS]
+        + "\n\nלהלן סיכומי ביניים של חלקי השיעור, לפי הסדר. "
+        "בנה מהם סיכום מלא, פרקים מפורטים, ומבחן אמריקאי שלם כפי שנדרש למעלה. "
+        "חובה לייצר את כל 8-10 השאלות עם התפלגות רמות בלום, ולא פחות, "
+        "וכן פרק לכל נושא מרכזי שעלה בסיכומים:\n\n"
+        + "\n\n---\n\n".join(partial_summaries)
+        + lang_directive
     )
-    text = await provider.generate_text(prompt)
-    return _parse_response(text)
+    return await _provider_generate_lesson(merge_prompt, provider)
 
 
 # ── Ask about lesson (chat) ───────────────────────────────────────────────────
@@ -2254,12 +2386,14 @@ async def generate_flashcards(
         provider = get_provider()
         context_parts = [f"סיכום השיעור:\n{summary}"]
         if transcript:
-            context_parts.append(f"\nקטע מהתמלול:\n{transcript[:30_000]}")
+            # Keep the excerpt small — local models have a tight context budget and
+            # the summary already carries the lesson's substance.
+            context_parts.append(f"\nקטע מהתמלול:\n{transcript[:12_000]}")
         joined_context = "\n\n".join(context_parts)
         prompt = f"{_FLASHCARDS_PROMPT}\n\n{joined_context}"
         try:
             text = await asyncio.wait_for(
-                provider.generate_text(prompt),
+                provider.generate_text(prompt, json_mode=True),
                 timeout=_FLASHCARDS_TIMEOUT,
             )
         except asyncio.TimeoutError:
@@ -2390,7 +2524,7 @@ async def generate_cram_guide(lessons: list[dict]) -> CramGuideResult:
         lessons_text = _build_lessons_text(lessons)
         prompt = _CRAM_GUIDE_PROMPT.format(n=len(lessons), lessons_text=lessons_text)
         text = await asyncio.wait_for(
-            provider.generate_text(prompt, timeout=_CRAM_GUIDE_TIMEOUT),
+            provider.generate_text(prompt, timeout=_CRAM_GUIDE_TIMEOUT, json_mode=True),
             timeout=_CRAM_GUIDE_TIMEOUT,
         )
         return _parse_cram_guide_response(text)
@@ -2489,7 +2623,7 @@ async def generate_mindmap(lesson: LessonResult) -> "MindMap | None":
     provider = get_provider()
     try:
         raw = await asyncio.wait_for(
-            provider.generate_text(prompt), timeout=_MINDMAP_TIMEOUT
+            provider.generate_text(prompt, json_mode=True), timeout=_MINDMAP_TIMEOUT
         )
     except asyncio.TimeoutError:
         logger.warning("Mind-map generation timed out")

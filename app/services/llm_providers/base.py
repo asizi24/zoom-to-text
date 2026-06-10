@@ -55,8 +55,16 @@ class LLMProvider(ABC):
         max_tokens: int = 65536,
         temperature: float = 0.3,
         timeout: float = 600.0,
+        json_mode: bool = False,
     ) -> str:
-        """Single-shot generation. Returns raw model text. Caller parses."""
+        """Single-shot generation. Returns raw model text. Caller parses.
+
+        json_mode: when True, ask the provider to constrain output to valid JSON
+        (Ollama `format=json`, OpenRouter `response_format`). This is essential for
+        local models, which otherwise emit prose or markdown-wrapped JSON that the
+        downstream parser rejects. Providers that cannot enforce it treat it as a
+        best-effort hint.
+        """
 
     @abstractmethod
     async def stream_text(

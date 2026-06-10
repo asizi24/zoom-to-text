@@ -69,6 +69,7 @@ class GeminiProvider(LLMProvider):
         max_tokens: int = 65536,
         temperature: float = 0.3,
         timeout: float = 600.0,
+        json_mode: bool = False,  # noqa: ARG002 — the summarizer prompt already requests JSON
     ) -> str:
         """Delegate to summarizer._generate_with_retry on a thread executor."""
         from app.services import summarizer  # local import — avoids cycle

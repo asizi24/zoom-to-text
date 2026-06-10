@@ -95,6 +95,7 @@ class OpenRouterProvider(LLMProvider):
         max_tokens: int = 65536,
         temperature: float = 0.3,
         timeout: float = 600.0,
+        json_mode: bool = False,
     ) -> str:
         url = f"{settings.openrouter_base_url}/chat/completions"
         payload = {
@@ -103,6 +104,8 @@ class OpenRouterProvider(LLMProvider):
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.post(url, json=payload, headers=self._headers())

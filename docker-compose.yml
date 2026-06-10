@@ -42,6 +42,13 @@ services:
       # the 4070 Ti, and has a 128k context so a full-length lecture transcript
       # is never silently truncated (gemma2:9b is cleaner Hebrew but only 8k).
       - OLLAMA_MODEL=mistral-nemo:12b
+      # Context window sized to fit a 12GB GPU (KV cache + model) while leaving
+      # room for the generated JSON. Long transcripts are chunked in summarizer.py,
+      # so this need not hold the whole lecture at once.
+      - OLLAMA_NUM_CTX=24576
+      # Force Hebrew output — local models drift to English on technical content
+      # (AWS/S3/IAM etc.) unless the language is pinned. "auto" is fine for Gemini.
+      - LECTURE_LANGUAGE=he
       # Loopback-only one-click login — no Resend email key needed locally.
       # Honored only because BASE_URL is http://localhost (see auth.dev_login).
       - ENABLE_DEV_LOGIN=true

@@ -30,6 +30,8 @@ if ($running) {
 $env:LLM_PROVIDER         = 'ollama'                 # summary/exam via local Ollama
 $env:OLLAMA_MODEL         = 'mistral-nemo:12b'       # clean Hebrew, 128k context
 $env:OLLAMA_BASE_URL      = 'http://localhost:11434' # Ollama is local now (not in Docker)
+$env:OLLAMA_NUM_CTX       = '24576'                  # fits 12GB VRAM + leaves room for output
+$env:LECTURE_LANGUAGE     = 'he'                     # force Hebrew output (local model drifts to English on tech terms)
 $env:WHISPER_DEVICE       = 'cuda'                   # <-- the RTX 4070 Ti
 $env:WHISPER_COMPUTE_TYPE = 'float16'                # GPU precision (better than int8)
 $env:ENABLE_DEV_LOGIN     = 'true'                   # one-click local login

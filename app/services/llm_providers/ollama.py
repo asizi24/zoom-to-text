@@ -59,6 +59,7 @@ class OllamaProvider(LLMProvider):
         max_tokens: int = 65536,
         temperature: float = 0.3,
         timeout: float = 600.0,
+        json_mode: bool = False,
     ) -> str:
         url = f"{settings.ollama_base_url}/api/generate"
         # Ollama /api/generate takes a flat prompt; for multi-turn use /api/chat
@@ -78,6 +79,10 @@ class OllamaProvider(LLMProvider):
                 "num_ctx": settings.ollama_num_ctx,
             },
         }
+        if json_mode:
+            # Constrained decoding — guarantees syntactically valid JSON even when
+            # the JSON instructions in the prompt were truncated by num_ctx.
+            payload["format"] = "json"
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.post(url, json=payload)
