@@ -18,6 +18,7 @@ from typing import Optional
 import aiofiles
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import Response, StreamingResponse
+from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field
 
 from app import state
@@ -218,8 +219,16 @@ async def create_task_from_upload(
         await asyncio.to_thread(_safe_unlink, file_path)
         raise
 
-    supplementary_context = await prepare_supplementary_context(task_id, supplementary_files)
-    task = await state.create_task(task_id, f"upload:{safe_name}", user_id=user_id)
+    # The file is now safely on disk. If anything below fails (supplementary
+    # extraction or the DB insert), the upload would be orphaned on the 10 GB
+    # volume forever — so delete it before re-raising. Cleanup runs in a thread
+    # to avoid blocking the event loop on a slow/locked unlink (Windows).
+    try:
+        supplementary_context = await prepare_supplementary_context(task_id, supplementary_files)
+        task = await state.create_task(task_id, f"upload:{safe_name}", user_id=user_id)
+    except Exception:
+        await asyncio.to_thread(_safe_unlink, file_path)
+        raise
 
     background_tasks.add_task(
         processor.run_pipeline_from_file,
@@ -602,19 +611,43 @@ async def chat_with_recording(
     # Persist the user message before streaming starts
     await state.append_chat_message(task_id, "user", body.question)
 
+    # Accumulated outside the generator so the post-stream BackgroundTask can
+    # read whatever was produced — even a partial response after a disconnect.
+    full_response: list[str] = []
+
     async def generate():
-        full_response: list[str] = []
         try:
             async for chunk in summarizer.stream_chat_response(context, history, body.question):
                 full_response.append(chunk)
                 yield f"data: {json.dumps({'text': chunk}, ensure_ascii=False)}\n\n"
+        except asyncio.CancelledError:
+            # The client disconnected: the ASGI server cancels the generator.
+            # Do NOT touch the DB here — re-raise so the server can unwind the
+            # stream. Whatever we streamed so far is already in `full_response`
+            # and gets persisted by the BackgroundTask below, which Starlette
+            # still runs after the connection closes.
+            logger.info(f"Chat stream for task {task_id} cancelled (client disconnect)")
+            raise
         except Exception as exc:
             logger.error(f"Chat stream failed for task {task_id}: {exc}")
             yield f"data: {json.dumps({'error': 'שגיאה בשיחה. נסה שוב.'}, ensure_ascii=False)}\n\n"
-        finally:
-            if full_response:
-                await state.append_chat_message(task_id, "model", "".join(full_response))
+        else:
             yield f"data: {json.dumps({'done': True})}\n\n"
+
+    async def _persist_final_response() -> None:
+        """Save the assembled model reply after the stream closes.
+
+        Runs as a Starlette BackgroundTask — outside the request/stream
+        lifecycle — so the DB write can't be aborted (and corrupt history)
+        by a mid-stream client disconnect. Best-effort: a failure here must
+        not surface as a 500 on an already-finished response.
+        """
+        if not full_response:
+            return
+        try:
+            await state.append_chat_message(task_id, "model", "".join(full_response))
+        except Exception as exc:
+            logger.warning(f"Failed to persist chat response for task {task_id}: {exc}")
 
     return StreamingResponse(
         generate(),
@@ -623,6 +656,7 @@ async def chat_with_recording(
             "X-Accel-Buffering": "no",   # disable nginx buffering
             "Cache-Control": "no-cache",
         },
+        background=BackgroundTask(_persist_final_response),
     )
 
 
@@ -1193,7 +1227,12 @@ async def export_flashcards_apkg(
         raise HTTPException(status_code=400, detail="No flashcards to export")
 
     deck_name = _sanitize_deck_name(task_id, task.url)
-    data = anki_export.create_apkg(task.result.flashcards, deck_name, task_id)
+    # create_apkg builds a SQLite deck + zips it — CPU-bound and blocking. Keep
+    # the endpoint async (it awaits the DB above) but offload the heavy work to
+    # a threadpool so a large export can't freeze the event loop.
+    data = await asyncio.to_thread(
+        anki_export.create_apkg, task.result.flashcards, deck_name, task_id
+    )
     filename = f"flashcards-{task_id[:8]}.apkg"
     return Response(
         content=data,
@@ -1214,7 +1253,8 @@ async def export_flashcards_csv(
     if task.result is None or not task.result.flashcards:
         raise HTTPException(status_code=400, detail="No flashcards to export")
 
-    data = anki_export.create_csv(task.result.flashcards)
+    # CSV building is synchronous CPU/string work — offload off the event loop.
+    data = await asyncio.to_thread(anki_export.create_csv, task.result.flashcards)
     filename = f"flashcards-{task_id[:8]}.csv"
     return Response(
         content=data,

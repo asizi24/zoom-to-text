@@ -347,13 +347,16 @@ async def _persist_audio_for_task(task_id: str, src_path: str | None) -> str | N
         return None
     dest = _audio_root() / f"{task_id}{src.suffix or '.mp3'}"
     try:
-        # Move is a rename when on same volume — cheap and atomic
-        shutil.move(str(src), str(dest))
+        # Move is a rename when on same volume — cheap and atomic. shutil.move
+        # is blocking, so offload to a thread: a large cross-volume move would
+        # otherwise freeze the FastAPI event loop for the whole copy.
+        await asyncio.to_thread(shutil.move, str(src), str(dest))
     except Exception as exc:
-        # Cross-device or permission issue: fall back to copy + remove-source
+        # Cross-device or permission issue: fall back to copy + remove-source.
+        # copy2 is also blocking I/O — run it off the event loop too.
         logger.warning(f"audio move failed ({exc}); falling back to copy")
         try:
-            shutil.copy2(str(src), str(dest))
+            await asyncio.to_thread(shutil.copy2, str(src), str(dest))
             src.unlink(missing_ok=True)
         except Exception as copy_exc:
             logger.error(f"audio persist failed for {task_id}: {copy_exc}")
