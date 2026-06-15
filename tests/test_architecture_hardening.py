@@ -155,3 +155,65 @@ async def test_chat_persists_model_reply_after_stream(client):
         assert model_replies == ["שלום עולם"], history
     finally:
         fastapi_app.dependency_overrides.pop(deps.get_current_user, None)
+
+
+# ── Phase 2 hardening ──────────────────────────────────────────────────────────
+
+# Issue 10: Task IDOR — get_task_for_user must not serve unowned (NULL) rows.
+
+async def test_get_task_for_user_rejects_null_owned_task(client):
+    """A NULL-owned (legacy/unowned) task is readable by NOBODY via this path.
+
+    Previously `(user_id=? OR user_id IS NULL)` let any authenticated user read
+    every unowned task by guessing its id — a classic IDOR. Ownership is now
+    strict.
+    """
+    await state.create_task("idor-null", "https://x/idor", user_id=None)
+    assert await state.get_task_for_user("idor-null", "any-user") is None
+
+    # A properly-owned task is still served to its owner — and only its owner.
+    await state.create_task("idor-owned", "https://x/idor2", user_id="owner-1")
+    owned = await state.get_task_for_user("idor-owned", "owner-1")
+    assert owned is not None and owned.task_id == "idor-owned"
+    assert await state.get_task_for_user("idor-owned", "intruder") is None
+
+
+# Issue 11: magic tokens are stored hashed, never in plaintext.
+
+async def test_magic_token_is_stored_hashed(client):
+    """Only the SHA-256 digest hits the DB; the round-trip still authenticates."""
+    import hashlib
+
+    user_id = await state.get_or_create_user("hash-test@example.com")
+    token = await state.create_magic_token(user_id)
+
+    db = await state._get_db()
+    async with db.execute(
+        "SELECT token FROM magic_tokens WHERE user_id=?", [user_id]
+    ) as cur:
+        row = await cur.fetchone()
+    stored = row["token"]
+
+    assert stored != token, "plaintext token must not be persisted"
+    assert stored == hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+    # The emailed plaintext still consumes correctly, exactly once.
+    assert await state.consume_magic_token(token) == user_id
+    assert await state.consume_magic_token(token) is None
+
+
+# Issue 4: oversized uploads are rejected up front, before any disk write.
+
+def test_upload_rejects_oversized_content_length(authed_client, tmp_path, monkeypatch):
+    """A body past max_upload_bytes returns 413 and writes nothing to the volume."""
+    downloads = tmp_path / "dl"
+    downloads.mkdir()
+    monkeypatch.setattr(settings, "downloads_dir", downloads, raising=False)
+    monkeypatch.setattr(settings, "max_upload_bytes", 1024, raising=False)
+
+    r = authed_client.post(
+        "/api/tasks/upload",
+        files=[("file", ("recording.mp3", io.BytesIO(b"x" * 5000), "audio/mpeg"))],
+    )
+    assert r.status_code == 413
+    assert list(downloads.iterdir()) == []  # fail-fast: nothing streamed to disk

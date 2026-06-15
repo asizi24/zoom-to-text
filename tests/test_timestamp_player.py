@@ -46,8 +46,13 @@ def test_parse_range_suffix():
 
 
 def test_parse_range_out_of_bounds():
-    assert _parse_range("bytes=90-200", 100) is None
+    # RFC 7233 §4.1: an end byte past the resource is satisfiable — the server
+    # must clamp it to the last byte, not reject the request.
+    assert _parse_range("bytes=90-200", 100) == (90, 99)
+    # start past the end (after clamping) is still unsatisfiable → None.
     assert _parse_range("bytes=50-10", 100) is None
+    # start past EOF is unsatisfiable even though end gets clamped → None.
+    assert _parse_range("bytes=150-200", 100) is None
 
 
 def test_parse_range_multi_takes_first():
@@ -83,7 +88,9 @@ def _seed_task_with_audio(audio_root: Path, task_id: str, body: bytes) -> Path:
     p.write_bytes(body)
 
     async def _setup():
-        await state_module.create_task(task_id, url="http://test/rec", user_id=None)
+        # Owned by the authed user (get_current_user override) — get_task_for_user
+        # is now strict and serves audio only for the task's owner.
+        await state_module.create_task(task_id, url="http://test/rec", user_id="test-user")
         await state_module.set_audio_path(task_id, str(p))
 
     asyncio.run(_setup())
@@ -102,7 +109,7 @@ def test_task_without_audio_returns_404(authed_client):
     client, _, _ = authed_client
 
     async def setup():
-        await state_module.create_task("t-no-audio", url="x", user_id=None)
+        await state_module.create_task("t-no-audio", url="x", user_id="test-user")
 
     asyncio.run(setup())
     r = client.get("/api/tasks/t-no-audio/audio")
@@ -116,7 +123,7 @@ def test_audio_path_outside_root_is_rejected(authed_client, tmp_path):
     evil.write_bytes(b"PWNED" * 10)
 
     async def setup():
-        await state_module.create_task("t-escape", url="x", user_id=None)
+        await state_module.create_task("t-escape", url="x", user_id="test-user")
         await state_module.set_audio_path("t-escape", str(evil))
 
     asyncio.run(setup())

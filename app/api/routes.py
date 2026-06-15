@@ -10,6 +10,7 @@ DELETE /api/tasks/{id}   — delete a job record
 import asyncio
 import json
 import re
+import shutil
 import uuid
 import logging
 from pathlib import Path
@@ -69,12 +70,37 @@ def _safe_unlink(path: Path) -> None:
         logger.warning("safe unlink: failed to delete %s: %s", path, exc)
 
 
+def _copy_upload_to_disk(upload: UploadFile, dest: Path) -> None:
+    """Copy a spooled UploadFile straight to `dest` (blocking; run in a thread).
+
+    Starlette has already buffered the multipart upload into the
+    SpooledTemporaryFile behind `upload.file` (RAM up to ~1 MB, then a /tmp file).
+    Re-streaming it through aiofiles would be a 100% redundant second disk write;
+    shutil.copyfileobj copies the existing handle in one pass. We rewind first in
+    case anything peeked at the stream, and size the buffer at 1 MB to keep the
+    syscall count low on multi-hundred-MB recordings.
+    """
+    upload.file.seek(0)
+    with open(dest, "wb") as out:
+        shutil.copyfileobj(upload.file, out, length=1024 * 1024)
+
+
 # ── Rate-limit string helper ──────────────────────────────────────────────────────
 # Returns a slowapi limit string like "10/minute". Read at request time so that
 # tests can monkeypatch settings.rate_limit_per_minute without restarting.
 def _task_rate_limit(request: Request) -> str:  # noqa: ARG001 — request required by slowapi
     n = settings.rate_limit_per_minute
     return f"{n}/minute"
+
+
+# Per-IP cap for the LLM-backed endpoints (/chat, both /ask variants). These call
+# out to Gemini/OpenRouter/Ollama on every hit, so an unprotected loop could rack
+# up cost or starve the single worker. Kept separate from the task-submission
+# limit (a stricter, fixed budget). Admins bypass it via the limiter's user_id
+# check. We reuse app.rate_limit.limiter rather than slowapi on purpose — see the
+# module docstring in app/rate_limit.py for the Windows/.env reason slowapi was
+# dropped from this project.
+_LLM_RATE_LIMIT = "5/minute"
 
 
 # ── Request models used across endpoints ─────────────────────────────────────────
@@ -193,29 +219,41 @@ async def create_task_from_upload(
             detail=f"Unsupported file type: {ext}. Allowed: {', '.join(sorted(_ALLOWED_EXTENSIONS))}",
         )
 
-    # Stream file to disk in 1 MB chunks — avoids loading a 3-hour recording into RAM
+    # Fail-fast on oversized uploads BEFORE writing a single byte to our volume.
+    # Content-Length covers the whole multipart envelope, so it's an upper bound
+    # on the file: if even that exceeds the cap, the file certainly does. This
+    # rejects giant uploads without the redundant copy + pipeline launch.
+    max_bytes = settings.max_upload_bytes
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            declared = int(content_length)
+        except ValueError:
+            declared = None
+        if declared is not None and declared > max_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large. Maximum size is {max_bytes // 1024 // 1024} MB.",
+            )
+
+    # Authoritative per-file guard: Starlette populates UploadFile.size from the
+    # spooled bytes, so this also catches a missing or dishonest Content-Length.
+    if file.size is not None and file.size > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large. Maximum size is {max_bytes // 1024 // 1024} MB.",
+        )
+
     settings.downloads_dir.mkdir(parents=True, exist_ok=True)
     file_path = settings.downloads_dir / f"{task_id}_{safe_name}"
 
-    total_bytes = 0
-    chunk_size = 1024 * 1024  # 1 MB
+    # Copy the already-spooled upload straight to disk in a worker thread. Using
+    # shutil.copyfileobj on file.file (the SpooledTemporaryFile) avoids the
+    # double disk I/O of re-streaming chunks through aiofiles; to_thread keeps the
+    # blocking copy off the event loop.
     try:
-        async with aiofiles.open(file_path, "wb") as f:
-            while True:
-                chunk = await file.read(chunk_size)
-                if not chunk:
-                    break
-                total_bytes += len(chunk)
-                if total_bytes > settings.max_upload_bytes:
-                    raise HTTPException(
-                        status_code=413,
-                        detail=f"File too large. Maximum size is {settings.max_upload_bytes // 1024 // 1024} MB.",
-                    )
-                await f.write(chunk)
-    except HTTPException:
-        # Don't block the event loop on filesystem cleanup. On Windows in
-        # particular, file_path.unlink() can stall briefly if the OS still
-        # holds the handle from the aiofiles write that just failed.
+        await asyncio.to_thread(_copy_upload_to_disk, file, file_path)
+    except Exception:
         await asyncio.to_thread(_safe_unlink, file_path)
         raise
 
@@ -526,7 +564,13 @@ class AskRequest(BaseModel):
 
 
 @router.post("/tasks/{task_id}/ask")
-async def ask_question(task_id: str, body: AskRequest, user_id: str = Depends(get_current_user)):
+@limiter.limit(_LLM_RATE_LIMIT)
+async def ask_question(
+    request: Request,
+    task_id: str,
+    body: AskRequest,
+    user_id: str = Depends(get_current_user),
+):
     """
     Ask a question about a completed lesson.
     Uses the stored summary + chapters as context for a Gemini-powered answer.
@@ -581,7 +625,9 @@ def _build_lesson_context(result) -> str:
 
 
 @router.post("/tasks/{task_id}/chat")
+@limiter.limit(_LLM_RATE_LIMIT)
 async def chat_with_recording(
+    request: Request,
     task_id: str,
     body: AskRequest,
     user_id: str = Depends(get_current_user),
@@ -758,7 +804,13 @@ def _parse_range(header: str | None, file_size: int) -> tuple[int, int] | None:
             end   = int(end_s) if end_s else file_size - 1
     except ValueError:
         return None
-    if start < 0 or end >= file_size or start > end:
+    # RFC 7233 §4.1: a range whose end byte runs past the resource is still
+    # satisfiable — clamp it to the last byte instead of rejecting the whole
+    # request (which would force the client back to a full 200 re-download).
+    if end >= file_size:
+        end = file_size - 1
+    # start past EOF (now start > end) or negative is unsatisfiable → fall back.
+    if start < 0 or start > end:
         return None
     return start, end
 
@@ -1544,7 +1596,9 @@ async def update_my_preferences(
 # ── Ask Across Lectures (Batch B2) ────────────────────────────────────────────
 
 @router.post("/ask")
+@limiter.limit(_LLM_RATE_LIMIT)
 async def ask_across_lectures(
+    request: Request,
     body: AskAcrossRequest,
     user_id: str = Depends(get_current_user),
 ):

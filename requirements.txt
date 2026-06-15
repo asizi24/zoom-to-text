@@ -12,10 +12,14 @@ pydantic-settings==2.3.4
 python-dotenv==1.0.1
 
 # ── Zoom Downloader ────────────────────────────────────────────────────────────
-yt-dlp>=2024.5.27
+# Pinned (==) for reproducible Docker builds. yt-dlp ships frequently to keep up
+# with site changes — bump this deliberately and re-test downloads, don't float it.
+yt-dlp==2026.3.17
 
 # ── Google AI (Gemini — for direct audio + text summarization) ─────────────────
-google-genai>=1.0.0
+# Pinned (==) so a surprise google-genai release can't silently change the
+# summarization contract between builds.
+google-genai==1.2.0
 
 # ── Transcription (Faster-Whisper — used only in WHISPER_LOCAL mode) ───────────
 # torch CPU-only is installed separately in Dockerfile to save ~1 GB of disk
