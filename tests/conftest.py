@@ -80,7 +80,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "allowed_emails", "allowed@example.com", raising=False)  # added in Task 2
     monkeypatch.setattr(settings, "resend_api_key", "test_key", raising=False)  # added in Task 2
     monkeypatch.setattr(settings, "base_url", "http://testserver")
-    monkeypatch.setattr(settings, "cors_origin", "http://testserver", raising=False)  # added in Task 2
+    monkeypatch.setattr(settings, "cors_origin", ["http://testserver"], raising=False)  # now list[str]
 
     from app.main import app
     from fastapi.testclient import TestClient
