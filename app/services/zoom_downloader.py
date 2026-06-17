@@ -13,6 +13,7 @@ sufficient for speech and keeps file sizes small (~43 MB/hour).
 import asyncio
 import logging
 import os
+import re
 import tempfile
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -22,6 +23,15 @@ import yt_dlp
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+# Zoom signed-download URLs carry access tokens in their query string; strip those
+# before the URL reaches a log line or a user-facing error message.
+_URL_QUERY_RE = re.compile(r"(https?://[^\s?]+)\?[^\s]*")
+
+
+def _redact_urls(text: str) -> str:
+    """Replace any URL query string with <redacted> (Zoom tokens live there)."""
+    return _URL_QUERY_RE.sub(r"\1?<redacted>", text)
 
 
 class ZoomDownloadError(Exception):
@@ -190,8 +200,11 @@ def _raise_user_friendly_error(raw_error: str, had_cookies: bool) -> None:
     """Convert yt-dlp error strings into helpful messages for the user."""
     # Always log the raw yt-dlp error — the user-facing message below is lossy
     # (e.g. several distinct failures all collapse to "404"), so this is the only
-    # place the true cause is preserved for diagnosis.
-    logger.error(f"yt-dlp download failed (had_cookies={had_cookies}): {raw_error}")
+    # place the true cause is preserved for diagnosis. Redact URL query strings:
+    # yt-dlp errors often echo the signed Zoom URL, whose token grants download access.
+    logger.error(
+        f"yt-dlp download failed (had_cookies={had_cookies}): {_redact_urls(raw_error)}"
+    )
     err = raw_error.lower()
 
     if any(k in err for k in ("password", "passcode", "403", "401", "forbidden", "login")):
@@ -216,4 +229,4 @@ def _raise_user_friendly_error(raw_error: str, had_cookies: bool) -> None:
             "ההקלטה פרטית. השתמש בתוסף Chrome בזמן צפייה בה בדפדפן."
         )
 
-    raise ZoomDownloadError(f"הורדה נכשלה: {raw_error[:300]}")
+    raise ZoomDownloadError(f"הורדה נכשלה: {_redact_urls(raw_error)[:300]}")

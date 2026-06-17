@@ -487,7 +487,7 @@ def _parse_response(text: str) -> LessonResult:
         logger.error(
             f"JSON parse error: {e}\nRaw response (first 500 chars):\n{text[:500]}"
         )
-        raise RuntimeError("🔄 Gemini החזיר JSON לא תקין — זו שגיאה חולפת, נסה שוב")
+        raise RuntimeError("🔄 המודל החזיר JSON לא תקין — זו שגיאה חולפת, נסה שוב")
 
     chapters = [
         Chapter(
@@ -1930,18 +1930,34 @@ async def summarize_transcript(
 
 _PROVIDER_TOK_PER_CHAR = 0.8
 
+# Output-token caps (num_predict). Deliberately far below the provider default
+# (65536): num_ctx is a TOTAL budget for input+output, so the cap only needs to
+# cover the JSON we actually generate — and every reserve below carves out exactly
+# this much context for it, so the cap and the reserve can never drift apart.
+_PROVIDER_FULL_OUTPUT_TOKENS = 8192     # full LessonResult: summary + chapters + exam
+_PROVIDER_PARTIAL_OUTPUT_TOKENS = 4096  # one chunk's partial summary
+
+# _system_prompt (~5.3k chars) + the language directive ride on the INPUT of every
+# full-output call. Budget their token cost (~0.8 tok/char) so a near-limit transcript
+# can never push those JSON-schema instructions out of context and corrupt the output.
+_PROVIDER_SYSTEM_FRAMING_TOKENS = 4400
+
 
 def _provider_single_call_chars() -> int:
     """Max transcript chars for a one-shot full-LessonResult call (large output)."""
-    # Reserve ~8.5k tokens for the generated summary + chapters + exam JSON.
-    usable = max(4000, settings.ollama_num_ctx - 9000)
+    # Leave room for the generated JSON *and* the system-prompt framing that rides
+    # on the same call's input; reserving only the output overflows num_ctx and
+    # truncates the JSON-schema instructions at the start of the prompt.
+    reserve = _PROVIDER_FULL_OUTPUT_TOKENS + _PROVIDER_SYSTEM_FRAMING_TOKENS
+    usable = max(4000, settings.ollama_num_ctx - reserve)
     return int(usable / _PROVIDER_TOK_PER_CHAR)
 
 
 def _provider_map_chunk_chars() -> int:
     """Max transcript chars per map-phase chunk (small partial-summary output)."""
-    # Reserve ~3k tokens for the partial summary of a single chunk.
-    usable = max(4000, settings.ollama_num_ctx - 3500)
+    # The map prompt carries only the short partial-summary instruction (no big
+    # system prompt), so reserve the partial-output cap plus a little framing.
+    usable = max(4000, settings.ollama_num_ctx - (_PROVIDER_PARTIAL_OUTPUT_TOKENS + 500))
     return int(usable / _PROVIDER_TOK_PER_CHAR)
 
 
@@ -1989,11 +2005,123 @@ def _extract_partial_text(text: str) -> str:
     return "\n".join(parts) if parts else text.strip()
 
 
-async def _provider_generate_lesson(prompt: str, provider) -> LessonResult:
-    """One json_mode generation + parse, with a single retry on malformed JSON."""
+def _chunk_transcript(text: str, chunk_chars: int) -> list[str]:
+    """Split text into <=chunk_chars pieces, preferring sentence/newline breaks.
+
+    A naive transcript[i:i+n] slice cuts mid-sentence (even mid-word), degrading
+    the summary at each chunk's edges. We walk back from every hard boundary to
+    the nearest newline or sentence end, as long as that keeps at least half the
+    chunk; otherwise we hard-split. Pieces stay contiguous, so
+    "".join(chunks) == text — no content is ever dropped.
+    """
+    if len(text) <= chunk_chars:
+        return [text]
+    chunks: list[str] = []
+    start, n = 0, len(text)
+    while start < n:
+        end = min(start + chunk_chars, n)
+        if end < n:
+            window = text[start:end]
+            cut = max(
+                window.rfind("\n"),
+                window.rfind(". "),
+                window.rfind("? "),
+                window.rfind("! "),
+            )
+            if cut >= chunk_chars // 2:
+                end = start + cut + 1  # keep the boundary char in this chunk
+        chunks.append(text[start:end])
+        start = end
+    return chunks
+
+
+def _provider_merge_budget_chars() -> int:
+    """Char budget for the joined partial summaries in the reduce (merge) step.
+
+    The merge prompt = system prompt + merge instructions + joined partials, and
+    it must still leave room to generate the whole LessonResult. Reserve the output
+    cap, the system-prompt framing, and the merge instructions, then convert the
+    remaining tokens to chars.
+    """
+    reserve = _PROVIDER_FULL_OUTPUT_TOKENS + _PROVIDER_SYSTEM_FRAMING_TOKENS + 500
+    usable = max(2000, settings.ollama_num_ctx - reserve)
+    return int(usable / _PROVIDER_TOK_PER_CHAR)
+
+
+def _group_to_budget(items: list[str], budget_chars: int, sep: str) -> list[list[str]]:
+    """Greedily pack consecutive items into groups whose joined length fits budget."""
+    groups: list[list[str]] = []
+    current: list[str] = []
+    current_len = 0
+    for item in items:
+        addition = len(item) + (len(sep) if current else 0)
+        if current and current_len + addition > budget_chars:
+            groups.append(current)
+            current, current_len = [item], len(item)
+        else:
+            current.append(item)
+            current_len += addition
+    if current:
+        groups.append(current)
+    return groups
+
+
+async def _provider_collapse_partials(
+    partials: list[str], provider, lang_directive: str, budget_chars: int
+) -> list[str]:
+    """Collapse partial summaries until their joined length fits budget_chars.
+
+    A multi-hour lecture produces many partials whose concatenation can itself
+    overflow the model's context at merge time — re-triggering the very overflow
+    this path exists to fix. We iteratively summarize adjacent groups into shorter
+    partials (the standard map-reduce 'collapse' step) until they fit. Bounded to
+    a few rounds; as a last resort the joined text is hard-truncated so the merge
+    prompt can never overflow.
+    """
+    sep = "\n\n---\n\n"
+    for _round in range(5):  # each round strictly reduces the count when it can
+        if len(sep.join(partials)) <= budget_chars or len(partials) <= 1:
+            return partials
+        collapsed: list[str] = []
+        for group in _group_to_budget(partials, budget_chars, sep):
+            if len(group) == 1:
+                collapsed.append(group[0])
+                continue
+            text = await provider.generate_text(
+                f"{_PROVIDER_PARTIAL_PROMPT}\n\n{sep.join(group)}{lang_directive}",
+                json_mode=True,
+                max_tokens=_PROVIDER_PARTIAL_OUTPUT_TOKENS,
+            )
+            collapsed.append(_extract_partial_text(text))
+        if len(collapsed) >= len(partials):
+            break  # not converging (e.g. one oversize partial) — truncate below
+        partials = collapsed
+    joined = sep.join(partials)
+    if len(joined) > budget_chars:
+        logger.warning(
+            "Partial collapse did not fit budget (%d > %d) — truncating",
+            len(joined), budget_chars,
+        )
+        return [joined[:budget_chars]]
+    return partials
+
+
+async def _provider_generate_lesson(
+    prompt: str, provider, *, max_tokens: int = _PROVIDER_FULL_OUTPUT_TOKENS
+) -> LessonResult:
+    """One json_mode generation + parse, with a single retry on malformed JSON.
+
+    max_tokens defaults to _PROVIDER_FULL_OUTPUT_TOKENS (not the provider's 65536)
+    because num_ctx is a TOTAL budget: the single-call and merge reserves above carve
+    out exactly this many tokens for the output, so the cap must match that reserve —
+    a 64k cap on a 24k window only confuses the request, and a smaller one truncates
+    the JSON mid-output.
+    """
     last_error: Exception | None = None
     for attempt in range(2):
-        text = await provider.generate_text(prompt, json_mode=True)
+        text = await provider.generate_text(
+            prompt, json_mode=True, max_tokens=max_tokens
+        )
         try:
             return _parse_response(text)
         except RuntimeError as exc:
@@ -2033,10 +2161,7 @@ async def _summarize_transcript_via_provider(
 
     # Long transcript: map (summarize each chunk) → reduce (merge into final result).
     chunk_chars = _provider_map_chunk_chars()
-    chunks = [
-        transcript[i : i + chunk_chars]
-        for i in range(0, len(transcript), chunk_chars)
-    ]
+    chunks = _chunk_transcript(transcript, chunk_chars)
     n = len(chunks)
     logger.info(
         "Transcript is %d chars > %d single-call limit — chunking into %d parts for %s",
@@ -2051,9 +2176,15 @@ async def _summarize_transcript_via_provider(
         text = await provider.generate_text(
             f"{_PROVIDER_PARTIAL_PROMPT}\n\nחלק {i}:\n{chunk}{lang_directive}",
             json_mode=True,
-            max_tokens=4096,
+            max_tokens=_PROVIDER_PARTIAL_OUTPUT_TOKENS,
         )
         partial_summaries.append(_extract_partial_text(text))
+
+    # Guard the reduce step: many partials can themselves overflow the context at
+    # merge time, so collapse them down to fit before building the final prompt.
+    partial_summaries = await _provider_collapse_partials(
+        partial_summaries, provider, lang_directive, _provider_merge_budget_chars()
+    )
 
     if progress_cb:
         progress_cb(88, "🔗 מאחד את כל החלקים לסיכום מלא ומבחן...")

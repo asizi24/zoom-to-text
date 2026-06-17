@@ -412,3 +412,222 @@ async def test_summarize_audio_with_openrouter_raises_unsupported(monkeypatch):
     # No need to mock anything — the call should raise before any network I/O
     with pytest.raises(ProviderUnsupportedError):
         await summarizer.summarize_audio("/tmp/fake.mp3")
+
+
+# ── json_mode wiring (constrained decoding) ───────────────────────────────────
+
+async def test_ollama_json_mode_sets_format(monkeypatch):
+    """json_mode=True must add Ollama's `format=json` and honour max_tokens."""
+    import httpx
+    from app.services.llm_providers.ollama import OllamaProvider
+
+    captured = {}
+
+    class FakeResp:
+        status_code = 200
+        def json(self):
+            return {"response": "{}", "done": True}
+
+    class FakeClient:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, url, json, headers=None):
+            captured["json"] = json
+            return FakeResp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    p = OllamaProvider()
+    await p.generate_text("hi", json_mode=True, max_tokens=4096)
+    assert captured["json"]["format"] == "json"
+    assert captured["json"]["options"]["num_predict"] == 4096
+
+
+async def test_ollama_omits_format_without_json_mode(monkeypatch):
+    import httpx
+    from app.services.llm_providers.ollama import OllamaProvider
+
+    captured = {}
+
+    class FakeResp:
+        status_code = 200
+        def json(self):
+            return {"response": "{}", "done": True}
+
+    class FakeClient:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, url, json, headers=None):
+            captured["json"] = json
+            return FakeResp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    p = OllamaProvider()
+    await p.generate_text("hi")
+    assert "format" not in captured["json"]
+
+
+async def test_openrouter_json_mode_sets_response_format(monkeypatch):
+    import httpx
+    from app.services.llm_providers.openrouter import OpenRouterProvider
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "openrouter_api_key", "sk-or-test", raising=False)
+
+    captured = {}
+
+    class FakeResp:
+        status_code = 200
+        def json(self):
+            return {"choices": [{"message": {"content": "{}"}}]}
+        def raise_for_status(self):
+            pass
+
+    class FakeClient:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, url, json, headers):
+            captured["json"] = json
+            return FakeResp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    p = OpenRouterProvider()
+    await p.generate_text("x", json_mode=True)
+    assert captured["json"]["response_format"] == {"type": "json_object"}
+
+
+# ── provider transcript path: context budgeting + map-reduce ──────────────────
+
+def test_provider_chunk_size_math(monkeypatch):
+    """The size helpers reserve output headroom out of the total num_ctx budget."""
+    from app.config import settings
+    from app.services import summarizer
+
+    monkeypatch.setattr(settings, "ollama_num_ctx", 24576, raising=False)
+    out = summarizer._PROVIDER_FULL_OUTPUT_TOKENS
+    partial = summarizer._PROVIDER_PARTIAL_OUTPUT_TOKENS
+    framing = summarizer._PROVIDER_SYSTEM_FRAMING_TOKENS
+    tpc = summarizer._PROVIDER_TOK_PER_CHAR
+    # Each full-output reserve covers the output cap *and* the system-prompt framing
+    # that rides on the same call's input; the map reserve only needs the small
+    # partial-summary instruction.
+    assert summarizer._provider_single_call_chars() == int((24576 - (out + framing)) / tpc)
+    assert summarizer._provider_map_chunk_chars() == int((24576 - (partial + 500)) / tpc)
+    assert summarizer._provider_merge_budget_chars() == int((24576 - (out + framing + 500)) / tpc)
+
+
+def test_provider_chunk_size_floored_on_tiny_ctx(monkeypatch):
+    """Even an absurdly small context never yields a non-positive budget."""
+    from app.config import settings
+    from app.services import summarizer
+
+    monkeypatch.setattr(settings, "ollama_num_ctx", 4096, raising=False)
+    assert summarizer._provider_single_call_chars() == int(4000 / 0.8)
+    assert summarizer._provider_map_chunk_chars() == int(4000 / 0.8)
+    assert summarizer._provider_merge_budget_chars() == int(2000 / 0.8)
+
+
+def test_chunk_transcript_reconstructs_and_respects_size():
+    from app.services import summarizer
+
+    text = ("שורה ראשונה. שורה שנייה? שורה שלישית! " * 50).strip()
+    chunks = summarizer._chunk_transcript(text, 80)
+    assert "".join(chunks) == text            # contiguous — no content dropped
+    assert all(len(c) <= 80 for c in chunks)  # never exceeds the cap
+    assert len(chunks) > 1
+
+
+async def test_provider_collapse_partials_reduces_to_fit():
+    """Many partials that would overflow the merge prompt are collapsed to fit."""
+    from app.services import summarizer
+
+    partials = [f"partial-{i}-" + "x" * 90 for i in range(5)]  # ~500 chars joined
+
+    class FakeProvider:
+        async def generate_text(self, prompt, *, json_mode=False, max_tokens=65536, **kw):
+            return json.dumps({"summary": "merged", "key_points": []}, ensure_ascii=False)
+
+    out = await summarizer._provider_collapse_partials(
+        partials, FakeProvider(), "", budget_chars=250
+    )
+    assert len("\n\n---\n\n".join(out)) <= 250
+    assert len(out) < len(partials)
+
+
+async def test_provider_summarize_short_transcript_is_single_call(monkeypatch):
+    """A short transcript takes the single-call path with json_mode + sized output."""
+    from app.config import settings
+    from app.services import summarizer
+    from app.services.llm_providers import _reset_provider_cache
+    from app.services.llm_providers.ollama import OllamaProvider
+
+    monkeypatch.setattr(settings, "llm_provider", "ollama", raising=False)
+    monkeypatch.setattr(settings, "lecture_language", "he", raising=False)
+    monkeypatch.setattr(settings, "enable_exam_critique", False, raising=False)
+    _reset_provider_cache()
+
+    calls = []
+
+    async def fake_gen(self, prompt, *, json_mode=False, max_tokens=65536, **kw):
+        calls.append({"json_mode": json_mode, "max_tokens": max_tokens})
+        return json.dumps(
+            {"summary": "ס", "chapters": [], "quiz": [], "language": "he"},
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(OllamaProvider, "generate_text", fake_gen)
+
+    result = await summarizer.summarize_transcript("תמלול קצר.")
+    assert result.summary == "ס"
+    assert len(calls) == 1
+    assert calls[0]["json_mode"] is True
+    assert calls[0]["max_tokens"] == 8192  # sized to num_ctx, not the 65536 default
+
+
+async def test_provider_summarize_map_reduces_long_transcript(monkeypatch):
+    """A transcript over the single-call limit is chunked, summarized, then merged."""
+    from app.config import settings
+    from app.services import summarizer
+    from app.services.llm_providers import _reset_provider_cache
+    from app.services.llm_providers.ollama import OllamaProvider
+
+    monkeypatch.setattr(settings, "llm_provider", "ollama", raising=False)
+    monkeypatch.setattr(settings, "lecture_language", "he", raising=False)
+    monkeypatch.setattr(settings, "enable_exam_critique", False, raising=False)
+    _reset_provider_cache()
+
+    # Force the map-reduce branch with tiny budgets; merge budget stays large so
+    # the collapse step does not fire (its own behaviour is tested separately).
+    monkeypatch.setattr(summarizer, "_provider_single_call_chars", lambda: 100)
+    monkeypatch.setattr(summarizer, "_provider_map_chunk_chars", lambda: 50)
+    monkeypatch.setattr(summarizer, "_provider_merge_budget_chars", lambda: 10_000)
+
+    calls = []
+    final_json = json.dumps(
+        {"summary": "סיכום סופי", "chapters": [], "quiz": [], "language": "he"},
+        ensure_ascii=False,
+    )
+    partial_json = json.dumps(
+        {"summary": "חלק", "key_points": ["נקודה"]}, ensure_ascii=False
+    )
+
+    async def fake_gen(self, prompt, *, json_mode=False, max_tokens=65536, **kw):
+        calls.append({"json_mode": json_mode, "max_tokens": max_tokens})
+        # Only the per-chunk map prompt carries the partial-summary instruction.
+        is_partial = "להלן חלק מתמלול" in prompt
+        return partial_json if is_partial else final_json
+
+    monkeypatch.setattr(OllamaProvider, "generate_text", fake_gen)
+
+    transcript = "משפט לדוגמה. " * 40  # well over the 100-char single-call limit
+    result = await summarizer.summarize_transcript(transcript)
+
+    assert result.summary == "סיכום סופי"
+    assert len(calls) >= 3                       # >=2 map calls + 1 merge call
+    assert all(c["json_mode"] for c in calls)    # every provider call used json_mode
+    assert calls[-1]["max_tokens"] == 8192       # merge call sized to num_ctx
