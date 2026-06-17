@@ -93,7 +93,15 @@ class Settings(BaseSettings):
     # NEVER enable in production: any real deployment uses a domain base_url, so
     # the endpoint 404s there even if this flag is accidentally left on.
     enable_dev_login: bool = False
-    # Allowed CORS origin — set to your Fly.io domain in production
+    # Allowed CORS origins — set to your production domain(s).
+    # Accepts a comma-separated string from the environment, e.g.
+    #   CORS_ORIGIN="https://app.example.com,https://admin.example.com"
+    # Declared as `str` on purpose: pydantic-settings 2.3.4 has no `NoDecode`,
+    # so a field typed `list[str]` would make the env source try to JSON-decode
+    # the raw value and raise SettingsError on a plain comma-separated string.
+    # The `_normalize_cors_origin` validator below splits it, so at runtime
+    # `settings.cors_origin` is always a list[str] — what Starlette's
+    # CORSMiddleware `allow_origins=` expects.
     cors_origin: str = "http://localhost:8000"
 
     # ── LLM provider selection ─────────────────────────────────────────────────
@@ -184,6 +192,21 @@ class Settings(BaseSettings):
             )
         # gemini and ollama either don't need a key (ollama) or already
         # validate at first use (gemini's _get_client raises a clear error).
+        return self
+
+    @model_validator(mode="after")
+    def _normalize_cors_origin(self) -> "Settings":
+        """Split the comma-separated cors_origin string into a list[str].
+
+        The field is declared `str` (see the field comment for why), but
+        Starlette's CORSMiddleware `allow_origins=` expects a list. pydantic
+        validates the raw env value as a str *before* this after-validator runs,
+        so `self.cors_origin` is always a str here — we just split on commas and
+        drop blank segments. An empty string yields an empty list (no origins).
+        """
+        raw = self.cors_origin
+        parsed = [origin.strip() for origin in raw.split(",") if origin.strip()]
+        object.__setattr__(self, "cors_origin", parsed)
         return self
 
 

@@ -41,13 +41,19 @@ async def _idle_watcher():
     Runs every 60 seconds. Unloads the Whisper model from RAM if it hasn't been
     used for AUTO_SHUTDOWN_IDLE_MINUTES. This prevents OOM on low-RAM machines
     between processing jobs.
+
+    On shutdown the lifespan cancels this task; we catch CancelledError and
+    break cleanly so the awaiting shutdown code returns without an error.
     """
-    while True:
-        await asyncio.sleep(60)
-        try:
-            await transcriber.unload_model_if_idle()
-        except Exception as e:
-            logger.warning(f"Idle watcher error (non-fatal): {e}")
+    try:
+        while True:
+            await asyncio.sleep(60)
+            try:
+                await transcriber.unload_model_if_idle()
+            except Exception as e:
+                logger.warning(f"Idle watcher error (non-fatal): {e}")
+    except asyncio.CancelledError:
+        logger.info("Idle watcher cancelled — stopping")
 
 
 # Failed-task TTL (hours). Failed tasks not retried within this window are
@@ -68,15 +74,18 @@ async def _weekly_digest_scheduler():
     has to wake regularly. It never raises; logs and continues on errors.
     """
     # Initial delay so a freshly-deployed server doesn't immediately blast emails.
-    await asyncio.sleep(120)
-    while True:
-        try:
-            sent = await email_digest.run_digest_cycle()
-            if sent:
-                logger.info(f"Weekly digest cycle: sent {sent} email(s)")
-        except Exception as exc:
-            logger.warning(f"Weekly digest scheduler error (non-fatal): {exc}")
-        await asyncio.sleep(_DIGEST_INTERVAL_SECONDS)
+    try:
+        await asyncio.sleep(120)
+        while True:
+            try:
+                sent = await email_digest.run_digest_cycle()
+                if sent:
+                    logger.info(f"Weekly digest cycle: sent {sent} email(s)")
+            except Exception as exc:
+                logger.warning(f"Weekly digest scheduler error (non-fatal): {exc}")
+            await asyncio.sleep(_DIGEST_INTERVAL_SECONDS)
+    except asyncio.CancelledError:
+        logger.info("Weekly digest scheduler cancelled — stopping")
 
 
 async def _failed_task_cleanup():
@@ -87,30 +96,33 @@ async def _failed_task_cleanup():
     """
     # Run once shortly after startup so a long-down server cleans up legacy
     # stragglers immediately instead of waiting an hour.
-    await asyncio.sleep(5)
-    while True:
-        try:
-            removed = await state.cleanup_stale_failed_tasks(_FAILED_TTL_HOURS)
-            if removed:
-                logger.info(
-                    f"Cleanup: removed {len(removed)} stale failed task(s) "
-                    f"older than {_FAILED_TTL_HOURS}h"
-                )
-                for entry in removed:
-                    audio = entry.get("audio_path")
-                    if not audio:
-                        continue
-                    try:
-                        p = Path(audio)
-                        if p.exists():
-                            p.unlink()
-                    except Exception as exc:
-                        logger.warning(
-                            f"Cleanup: could not remove audio for {entry['id']}: {exc}"
-                        )
-        except Exception as exc:
-            logger.warning(f"Failed-task cleanup error (non-fatal): {exc}")
-        await asyncio.sleep(_CLEANUP_INTERVAL_SECONDS)
+    try:
+        await asyncio.sleep(5)
+        while True:
+            try:
+                removed = await state.cleanup_stale_failed_tasks(_FAILED_TTL_HOURS)
+                if removed:
+                    logger.info(
+                        f"Cleanup: removed {len(removed)} stale failed task(s) "
+                        f"older than {_FAILED_TTL_HOURS}h"
+                    )
+                    for entry in removed:
+                        audio = entry.get("audio_path")
+                        if not audio:
+                            continue
+                        try:
+                            p = Path(audio)
+                            if p.exists():
+                                p.unlink()
+                        except Exception as exc:
+                            logger.warning(
+                                f"Cleanup: could not remove audio for {entry['id']}: {exc}"
+                            )
+            except Exception as exc:
+                logger.warning(f"Failed-task cleanup error (non-fatal): {exc}")
+            await asyncio.sleep(_CLEANUP_INTERVAL_SECONDS)
+    except asyncio.CancelledError:
+        logger.info("Failed-task cleanup cancelled — stopping")
 
 
 # ── Application lifespan ──────────────────────────────────────────────────────────
@@ -131,17 +143,44 @@ async def lifespan(app: FastAPI):
     if cleared:
         logger.info(f"Admin flag reset: cleared rate-limit state for {cleared} admin user(s)")
 
-    # Configure GCP credentials for Vertex AI / Gemini
+    # Configure GCP credentials for Vertex AI / Gemini.
+    #
+    # Fail-fast: if the active LLM provider actually needs Google credentials
+    # (LLM_PROVIDER=gemini) and none are present, raise RuntimeError so the
+    # container crashes immediately on boot. This surfaces the misconfiguration
+    # to the orchestrator (Docker/Fly restart-loop + alert) instead of masking
+    # it as opaque 500s on the first user request hours later.
+    #
+    # Providers that don't use Google (ollama / openrouter — the latter is
+    # already validated in config.py) only get a warning: the local Ollama
+    # deployment in docker-compose.yml runs fully offline with no Google key.
     creds_path = settings.google_application_credentials
-    if not os.getenv("GOOGLE_APPLICATION_CREDENTIALS") and Path(creds_path).exists():
+    if os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+        # Credentials are already supplied via the environment — a mounted
+        # service-account secret, Workload Identity, etc. This is the canonical
+        # ADC mechanism Google's SDK reads first, so it fully satisfies gemini.
+        # It MUST short-circuit here: otherwise the `elif llm_provider=='gemini'`
+        # fail-fast below would wrongly crash a correctly-configured container
+        # whose only credential source is this env var.
+        logger.info("Using GCP credentials from the GOOGLE_APPLICATION_CREDENTIALS env var")
+    elif Path(creds_path).exists():
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = creds_path
         logger.info(f"GCP credentials loaded from: {creds_path}")
     elif settings.google_api_key:
         logger.info("Using Gemini API key (AI Studio)")
+    elif settings.llm_provider == "gemini":
+        raise RuntimeError(
+            "No Google credentials found, but LLM_PROVIDER=gemini requires them. "
+            "Set GOOGLE_API_KEY (AI Studio) in .env, or provide a service-account "
+            f"key file at GOOGLE_APPLICATION_CREDENTIALS / '{creds_path}'. "
+            "Refusing to start so the orchestrator restarts the container instead "
+            "of masking runtime authentication errors."
+        )
     else:
         logger.warning(
-            "No Google credentials found! "
-            "Set GOOGLE_API_KEY in .env or ensure key.json is present."
+            "No Google credentials found — continuing because LLM_PROVIDER=%s "
+            "does not require them.",
+            settings.llm_provider,
         )
 
     # Start background idle watcher
@@ -173,9 +212,16 @@ async def lifespan(app: FastAPI):
     yield  # ← application runs here
 
     # ── Shutdown ──
+    # Cancel the background tasks, then await them so each one unwinds its loop
+    # (and any `finally`) before we close the DB. Without awaiting, the event
+    # loop could tear down mid-iteration — e.g. the cleanup task writing to a
+    # connection we just closed. return_exceptions=True absorbs the
+    # CancelledError so a single task can't break the shutdown of the others.
+    logger.info("Server shutting down — cancelling background tasks...")
     watcher.cancel()
     cleanup.cancel()
     digest.cancel()
+    await asyncio.gather(watcher, cleanup, digest, return_exceptions=True)
     await state.close_db()
     logger.info("Server shutting down — goodbye")
 
@@ -195,7 +241,7 @@ app.state.limiter = limiter
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.cors_origin],
+    allow_origins=settings.cors_origin,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -39,16 +39,25 @@ ENV PYTHONDONTWRITEBYTECODE=1
 
 WORKDIR /app
 
-COPY app/        ./app/
-COPY static/     ./static/
-COPY extension/  ./extension/
+# Create the non-root user FIRST so the application code can be COPY'd straight
+# into place already owned by it. A trailing `RUN chown -R appuser:appuser /app`
+# rewrites every file's metadata into a brand-new image layer — effectively
+# doubling the size of the app layers on disk. `COPY --chown` sets ownership at
+# copy time for free.
+RUN useradd -m -u 1000 appuser
+
+# extension/ (the Chrome cookie-helper for yt-dlp) is intentionally NOT copied:
+# it's a browser-side concern the backend never imports or serves, so shipping
+# it into the API image is pure bloat.
+COPY --chown=appuser:appuser app/    ./app/
+COPY --chown=appuser:appuser static/ ./static/
 # key.json is NOT copied — GCP credentials are injected via environment secrets
 # (fly secrets set GOOGLE_APPLICATION_CREDENTIALS_JSON="..." for production)
 
-RUN mkdir -p data/downloads
-
-# Non-root user for security
-RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+# data/ holds the SQLite DB + downloaded audio; it must be writable by appuser.
+# (The entrypoint additionally re-chowns the /app/data bind-mount at runtime,
+# since a host volume arrives root-owned and overrides this.)
+RUN mkdir -p data/downloads && chown -R appuser:appuser data
 
 # Entrypoint fixes ownership of the /app/data bind-mount at runtime (a host
 # mount overrides the image's chown and arrives root-owned, which made the

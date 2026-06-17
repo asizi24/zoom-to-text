@@ -13,6 +13,7 @@ Connection strategy:
   while staying safe for async code via WAL mode.
 """
 import asyncio
+import hashlib
 import uuid
 import aiosqlite
 import logging
@@ -27,6 +28,22 @@ logger = logging.getLogger(__name__)
 
 DB_PATH = settings.data_dir / "tasks.db"
 
+# ── Scalability note: SQLite is a deliberate single-container choice ──────────
+# Every function here talks to one SQLite file on one mounted volume. For the
+# current deployment (a single Fly.io machine, ~5 concurrent users) that's the
+# right call: zero extra infra, and DB + audio survive restarts on the volume.
+#
+# It will NOT survive horizontal scaling. The moment this runs as >1 replica
+# (Cloud Run, Kubernetes, multiple Fly machines), each replica opens the same
+# SQLite file and serializes behind SQLite's single-writer lock — expect
+# `database is locked` errors, lost writes, and no cross-replica consistency.
+# Cloud Run also gives each instance an ephemeral disk, so the file wouldn't
+# even be shared. Scaling out therefore means swapping this backend for a
+# networked DB — PostgreSQL via asyncpg is the natural fit (keeps the async
+# model, adds a real connection pool, moves the write lock into a server built
+# for concurrent clients). The CRUD here is intentionally the ONLY code that
+# touches the DB, so that migration stays contained to this module.
+
 
 def _now() -> datetime:
     """Return current UTC time. Isolated so tests can monkeypatch it."""
@@ -34,7 +51,25 @@ def _now() -> datetime:
 
 # ── Shared connection ────────────────────────────────────────────────────────
 _db: aiosqlite.Connection | None = None
-_db_lock = asyncio.Lock()
+# Created lazily (see _get_db_lock), NOT at import. An asyncio.Lock binds to the
+# running event loop the first time it's used; constructing it at module-import
+# time — before uvicorn's loop exists, or under pytest's per-test loop — is the
+# Python 3.10+ "got Future attached to a different loop" footgun. Lazy creation
+# guarantees the lock is born on the loop that will actually await it.
+_db_lock: asyncio.Lock | None = None
+
+
+def _get_db_lock() -> asyncio.Lock:
+    """Return the process-wide DB lock, creating it on first use.
+
+    No internal guard is needed: lock construction is synchronous (there is no
+    await between the None-check and the assignment), so within a single event
+    loop two coroutines cannot interleave here and build two competing locks.
+    """
+    global _db_lock
+    if _db_lock is None:
+        _db_lock = asyncio.Lock()
+    return _db_lock
 
 # Serialize read-modify-write blocks on JSON-encoded columns. Without these,
 # two concurrent SELECT result_json → mutate → UPDATE flows would race and
@@ -225,7 +260,7 @@ async def _get_db() -> aiosqlite.Connection:
     global _db
     if _db is not None:
         return _db
-    async with _db_lock:
+    async with _get_db_lock():
         if _db is not None:
             return _db
         DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -356,6 +391,27 @@ async def init_db():
 
     await _mark_interrupted_tasks_failed()
     await _purge_expired_lti_state()
+
+    # Diagnostic: get_task_for_user enforces strict ownership (it serves a task
+    # only on user_id=?), so any legacy row with a NULL user_id — created before
+    # auth existed or by an older path — is now unreachable by every user until
+    # its owner is backfilled. Surface the count at startup so an operator
+    # notices instead of fielding silent 404 reports. Read-only; never blocks boot.
+    try:
+        async with db.execute(
+            "SELECT COUNT(*) AS n FROM tasks WHERE user_id IS NULL"
+        ) as cursor:
+            orphan_row = await cursor.fetchone()
+        orphaned = orphan_row["n"] if orphan_row else 0
+        if orphaned:
+            logger.warning(
+                "%d task row(s) have a NULL user_id and are unreachable under "
+                "strict ownership — backfill their owner to restore access.",
+                orphaned,
+            )
+    except Exception as exc:  # diagnostics must never break startup
+        logger.debug("Legacy NULL-owner task check skipped: %s", exc)
+
     logger.info(f"Database ready: {DB_PATH}")
 
 
@@ -591,10 +647,16 @@ async def get_task_for_user(task_id: str, user_id: str) -> Optional[TaskResponse
     Return a task only if it belongs to user_id.
     Returns None if not found OR if owned by a different user — both look like 404
     to prevent task-id enumeration across users.
+
+    Ownership is strict: a task with NULL user_id is owned by NOBODY and is
+    returned to no one through this path. (Earlier this accepted
+    `user_id IS NULL` as a fallback, which let any authenticated user read every
+    unowned/legacy task by guessing its id — an IDOR. Legacy NULL-owned rows now
+    require a deliberate backfill of their owner to become readable again.)
     """
     db = await _get_db()
     async with db.execute(
-        "SELECT * FROM tasks WHERE id=? AND (user_id=? OR user_id IS NULL)",
+        "SELECT * FROM tasks WHERE id=? AND user_id=?",
         [task_id, user_id],
     ) as cursor:
         row = await cursor.fetchone()
@@ -931,15 +993,30 @@ async def get_or_create_user(email: str) -> str:
     return user_id
 
 
+def _hash_token(token: str) -> str:
+    """SHA-256 hex digest of a magic-link token.
+
+    Only this digest is persisted — never the raw token. A leaked DB or backup
+    then yields useless hashes instead of live, still-valid login tokens. The
+    tokens are high-entropy UUID4s, so a plain (unsalted) SHA-256 is sufficient:
+    no password-style KDF is needed, and lookup stays a single indexed equality.
+    """
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
 async def create_magic_token(user_id: str) -> str:
-    """Create a 15-minute single-use token. Returns the token string."""
+    """Create a 15-minute single-use token. Returns the *plaintext* token.
+
+    Only the SHA-256 hash is stored (see _hash_token); the plaintext is returned
+    exactly once, here, so the caller can email it. It is never persisted.
+    """
     from datetime import timedelta
     token = str(uuid.uuid4())
     expires_at = (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat()
     db = await _get_db()
     await db.execute(
         "INSERT INTO magic_tokens (token, user_id, expires_at) VALUES (?,?,?)",
-        [token, user_id, expires_at],
+        [_hash_token(token), user_id, expires_at],
     )
     await db.commit()
     return token
@@ -950,10 +1027,20 @@ async def consume_magic_token(token: str) -> Optional[str]:
     Validate and consume a magic token.
     Returns user_id if valid, None if expired/used/unknown.
     Marks the token used=1 on success.
+
+    The incoming plaintext token is hashed and matched against the stored digest
+    (tokens are never persisted in the clear — see create_magic_token).
     """
     db = await _get_db()
+    token_hash = _hash_token(token)
+    # Match on the hash (every token issued after the hashing rollout) OR the raw
+    # token. The raw clause is a transitional shim: links emailed in the ~15 min
+    # before the rollout were stored in plaintext and would otherwise fail to
+    # validate right after deploy. It self-expires — once those legacy rows pass
+    # their 15-min TTL the second placeholder can never match a live row again.
     async with db.execute(
-        "SELECT user_id, expires_at, used FROM magic_tokens WHERE token=?", [token]
+        "SELECT token, user_id, expires_at, used FROM magic_tokens WHERE token IN (?, ?)",
+        [token_hash, token],
     ) as cursor:
         row = await cursor.fetchone()
     if row is None or row["used"]:
@@ -961,7 +1048,7 @@ async def consume_magic_token(token: str) -> Optional[str]:
     expires_at = datetime.fromisoformat(row["expires_at"])
     if datetime.now(timezone.utc) > expires_at:
         return None
-    await db.execute("UPDATE magic_tokens SET used=1 WHERE token=?", [token])
+    await db.execute("UPDATE magic_tokens SET used=1 WHERE token=?", [row["token"]])
     await db.commit()
     return row["user_id"]
 
