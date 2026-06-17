@@ -92,6 +92,34 @@ def test_lifespan_boots_when_non_google_provider_missing_credentials(tmp_path, m
         pass
 
 
+def test_lifespan_boots_when_credentials_in_env_var(tmp_path, monkeypatch):
+    """GOOGLE_APPLICATION_CREDENTIALS in the environment satisfies gemini.
+
+    The canonical ADC mechanism (mounted service-account secret, Workload
+    Identity) is to export GOOGLE_APPLICATION_CREDENTIALS. A container that
+    supplies creds this way — no key.json at the default path, no API key — MUST
+    boot; the fail-fast is only for genuinely-absent credentials, not this case.
+    """
+    from fastapi.testclient import TestClient
+    import app.state as state_module
+
+    monkeypatch.setattr(state_module, "DB_PATH", tmp_path / "envcreds.db")
+    monkeypatch.setattr(settings, "llm_provider", "gemini", raising=False)
+    monkeypatch.setattr(settings, "google_api_key", "", raising=False)
+    # No key.json at the default path...
+    monkeypatch.setattr(
+        settings, "google_application_credentials", str(tmp_path / "nope.json"), raising=False
+    )
+    # ...but creds ARE provided via the env var (points at a real file).
+    cred_file = tmp_path / "sa.json"
+    cred_file.write_text("{}")
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(cred_file))
+
+    # Entering and exiting the lifespan must not raise.
+    with TestClient(fastapi_app):
+        pass
+
+
 # ── Issue 5: No orphaned upload when the DB insert fails ────────────────────────
 
 @pytest.fixture

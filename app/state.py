@@ -391,6 +391,27 @@ async def init_db():
 
     await _mark_interrupted_tasks_failed()
     await _purge_expired_lti_state()
+
+    # Diagnostic: get_task_for_user enforces strict ownership (it serves a task
+    # only on user_id=?), so any legacy row with a NULL user_id — created before
+    # auth existed or by an older path — is now unreachable by every user until
+    # its owner is backfilled. Surface the count at startup so an operator
+    # notices instead of fielding silent 404 reports. Read-only; never blocks boot.
+    try:
+        async with db.execute(
+            "SELECT COUNT(*) AS n FROM tasks WHERE user_id IS NULL"
+        ) as cursor:
+            orphan_row = await cursor.fetchone()
+        orphaned = orphan_row["n"] if orphan_row else 0
+        if orphaned:
+            logger.warning(
+                "%d task row(s) have a NULL user_id and are unreachable under "
+                "strict ownership — backfill their owner to restore access.",
+                orphaned,
+            )
+    except Exception as exc:  # diagnostics must never break startup
+        logger.debug("Legacy NULL-owner task check skipped: %s", exc)
+
     logger.info(f"Database ready: {DB_PATH}")
 
 
@@ -1012,8 +1033,14 @@ async def consume_magic_token(token: str) -> Optional[str]:
     """
     db = await _get_db()
     token_hash = _hash_token(token)
+    # Match on the hash (every token issued after the hashing rollout) OR the raw
+    # token. The raw clause is a transitional shim: links emailed in the ~15 min
+    # before the rollout were stored in plaintext and would otherwise fail to
+    # validate right after deploy. It self-expires — once those legacy rows pass
+    # their 15-min TTL the second placeholder can never match a live row again.
     async with db.execute(
-        "SELECT user_id, expires_at, used FROM magic_tokens WHERE token=?", [token_hash]
+        "SELECT token, user_id, expires_at, used FROM magic_tokens WHERE token IN (?, ?)",
+        [token_hash, token],
     ) as cursor:
         row = await cursor.fetchone()
     if row is None or row["used"]:
@@ -1021,7 +1048,7 @@ async def consume_magic_token(token: str) -> Optional[str]:
     expires_at = datetime.fromisoformat(row["expires_at"])
     if datetime.now(timezone.utc) > expires_at:
         return None
-    await db.execute("UPDATE magic_tokens SET used=1 WHERE token=?", [token_hash])
+    await db.execute("UPDATE magic_tokens SET used=1 WHERE token=?", [row["token"]])
     await db.commit()
     return row["user_id"]
 

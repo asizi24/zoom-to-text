@@ -155,7 +155,15 @@ async def lifespan(app: FastAPI):
     # already validated in config.py) only get a warning: the local Ollama
     # deployment in docker-compose.yml runs fully offline with no Google key.
     creds_path = settings.google_application_credentials
-    if not os.getenv("GOOGLE_APPLICATION_CREDENTIALS") and Path(creds_path).exists():
+    if os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+        # Credentials are already supplied via the environment — a mounted
+        # service-account secret, Workload Identity, etc. This is the canonical
+        # ADC mechanism Google's SDK reads first, so it fully satisfies gemini.
+        # It MUST short-circuit here: otherwise the `elif llm_provider=='gemini'`
+        # fail-fast below would wrongly crash a correctly-configured container
+        # whose only credential source is this env var.
+        logger.info("Using GCP credentials from the GOOGLE_APPLICATION_CREDENTIALS env var")
+    elif Path(creds_path).exists():
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = creds_path
         logger.info(f"GCP credentials loaded from: {creds_path}")
     elif settings.google_api_key:
