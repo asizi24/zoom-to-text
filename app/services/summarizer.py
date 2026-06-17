@@ -1930,18 +1930,34 @@ async def summarize_transcript(
 
 _PROVIDER_TOK_PER_CHAR = 0.8
 
+# Output-token caps (num_predict). Deliberately far below the provider default
+# (65536): num_ctx is a TOTAL budget for input+output, so the cap only needs to
+# cover the JSON we actually generate — and every reserve below carves out exactly
+# this much context for it, so the cap and the reserve can never drift apart.
+_PROVIDER_FULL_OUTPUT_TOKENS = 8192     # full LessonResult: summary + chapters + exam
+_PROVIDER_PARTIAL_OUTPUT_TOKENS = 4096  # one chunk's partial summary
+
+# _system_prompt (~5.3k chars) + the language directive ride on the INPUT of every
+# full-output call. Budget their token cost (~0.8 tok/char) so a near-limit transcript
+# can never push those JSON-schema instructions out of context and corrupt the output.
+_PROVIDER_SYSTEM_FRAMING_TOKENS = 4400
+
 
 def _provider_single_call_chars() -> int:
     """Max transcript chars for a one-shot full-LessonResult call (large output)."""
-    # Reserve ~8.5k tokens for the generated summary + chapters + exam JSON.
-    usable = max(4000, settings.ollama_num_ctx - 9000)
+    # Leave room for the generated JSON *and* the system-prompt framing that rides
+    # on the same call's input; reserving only the output overflows num_ctx and
+    # truncates the JSON-schema instructions at the start of the prompt.
+    reserve = _PROVIDER_FULL_OUTPUT_TOKENS + _PROVIDER_SYSTEM_FRAMING_TOKENS
+    usable = max(4000, settings.ollama_num_ctx - reserve)
     return int(usable / _PROVIDER_TOK_PER_CHAR)
 
 
 def _provider_map_chunk_chars() -> int:
     """Max transcript chars per map-phase chunk (small partial-summary output)."""
-    # Reserve ~3k tokens for the partial summary of a single chunk.
-    usable = max(4000, settings.ollama_num_ctx - 3500)
+    # The map prompt carries only the short partial-summary instruction (no big
+    # system prompt), so reserve the partial-output cap plus a little framing.
+    usable = max(4000, settings.ollama_num_ctx - (_PROVIDER_PARTIAL_OUTPUT_TOKENS + 500))
     return int(usable / _PROVIDER_TOK_PER_CHAR)
 
 
@@ -2023,10 +2039,12 @@ def _provider_merge_budget_chars() -> int:
     """Char budget for the joined partial summaries in the reduce (merge) step.
 
     The merge prompt = system prompt + merge instructions + joined partials, and
-    it must still leave room to generate the whole LessonResult. Reserve output
-    headroom plus the fixed framing, then convert the remaining tokens to chars.
+    it must still leave room to generate the whole LessonResult. Reserve the output
+    cap, the system-prompt framing, and the merge instructions, then convert the
+    remaining tokens to chars.
     """
-    usable = max(2000, settings.ollama_num_ctx - 11000)  # ~9k output + ~2k framing
+    reserve = _PROVIDER_FULL_OUTPUT_TOKENS + _PROVIDER_SYSTEM_FRAMING_TOKENS + 500
+    usable = max(2000, settings.ollama_num_ctx - reserve)
     return int(usable / _PROVIDER_TOK_PER_CHAR)
 
 
@@ -2072,7 +2090,7 @@ async def _provider_collapse_partials(
             text = await provider.generate_text(
                 f"{_PROVIDER_PARTIAL_PROMPT}\n\n{sep.join(group)}{lang_directive}",
                 json_mode=True,
-                max_tokens=4096,
+                max_tokens=_PROVIDER_PARTIAL_OUTPUT_TOKENS,
             )
             collapsed.append(_extract_partial_text(text))
         if len(collapsed) >= len(partials):
@@ -2089,13 +2107,15 @@ async def _provider_collapse_partials(
 
 
 async def _provider_generate_lesson(
-    prompt: str, provider, *, max_tokens: int = 8192
+    prompt: str, provider, *, max_tokens: int = _PROVIDER_FULL_OUTPUT_TOKENS
 ) -> LessonResult:
     """One json_mode generation + parse, with a single retry on malformed JSON.
 
-    max_tokens defaults to 8192 (not the provider's 65536) because num_ctx is a
-    TOTAL budget — asking for 64k output tokens on a 24k window is meaningless and
-    only confuses the request; 8k matches the output headroom we reserved.
+    max_tokens defaults to _PROVIDER_FULL_OUTPUT_TOKENS (not the provider's 65536)
+    because num_ctx is a TOTAL budget: the single-call and merge reserves above carve
+    out exactly this many tokens for the output, so the cap must match that reserve —
+    a 64k cap on a 24k window only confuses the request, and a smaller one truncates
+    the JSON mid-output.
     """
     last_error: Exception | None = None
     for attempt in range(2):
@@ -2156,7 +2176,7 @@ async def _summarize_transcript_via_provider(
         text = await provider.generate_text(
             f"{_PROVIDER_PARTIAL_PROMPT}\n\nחלק {i}:\n{chunk}{lang_directive}",
             json_mode=True,
-            max_tokens=4096,
+            max_tokens=_PROVIDER_PARTIAL_OUTPUT_TOKENS,
         )
         partial_summaries.append(_extract_partial_text(text))
 

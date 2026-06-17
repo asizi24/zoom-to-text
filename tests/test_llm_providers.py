@@ -509,9 +509,16 @@ def test_provider_chunk_size_math(monkeypatch):
     from app.services import summarizer
 
     monkeypatch.setattr(settings, "ollama_num_ctx", 24576, raising=False)
-    assert summarizer._provider_single_call_chars() == int((24576 - 9000) / 0.8)
-    assert summarizer._provider_map_chunk_chars() == int((24576 - 3500) / 0.8)
-    assert summarizer._provider_merge_budget_chars() == int((24576 - 11000) / 0.8)
+    out = summarizer._PROVIDER_FULL_OUTPUT_TOKENS
+    partial = summarizer._PROVIDER_PARTIAL_OUTPUT_TOKENS
+    framing = summarizer._PROVIDER_SYSTEM_FRAMING_TOKENS
+    tpc = summarizer._PROVIDER_TOK_PER_CHAR
+    # Each full-output reserve covers the output cap *and* the system-prompt framing
+    # that rides on the same call's input; the map reserve only needs the small
+    # partial-summary instruction.
+    assert summarizer._provider_single_call_chars() == int((24576 - (out + framing)) / tpc)
+    assert summarizer._provider_map_chunk_chars() == int((24576 - (partial + 500)) / tpc)
+    assert summarizer._provider_merge_budget_chars() == int((24576 - (out + framing + 500)) / tpc)
 
 
 def test_provider_chunk_size_floored_on_tiny_ctx(monkeypatch):
