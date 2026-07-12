@@ -1,17 +1,17 @@
 """
 Tests for Feature 6 — Flashcards + Anki export.
 
-Gemini itself is NOT hit in tests (cost, flakiness). We monkeypatch the client
-to return canned JSON and assert:
-  - Parser handles clean JSON, fenced JSON, and thinking-preamble JSON
-  - generate_flashcards returns the expected Flashcard objects
+Gemini itself is NOT hit in tests (cost, flakiness). Since the structured-output
+refactor there is no raw-JSON parsing to test — Gemini's constrained decoding
+returns a parsed _FlashcardsSchema. We monkeypatch _generate_structured and assert:
+  - generate_flashcards maps parsed cards to Flashcard objects
+  - empty/invalid cards are dropped, failures return an empty list (soft-fail)
   - anki_export.create_apkg produces a non-trivial binary that looks like a zip
     (apkg is a zip containing sqlite + media), with the expected note count
   - CSV export is UTF-8 with BOM and has the right header
   - Deck IDs are deterministic per task_id (re-import updates, not duplicates)
 """
 import io
-import json
 import sqlite3
 import zipfile
 
@@ -19,67 +19,50 @@ import pytest
 
 from app.models import Flashcard
 from app.services import anki_export, summarizer
-
-
-# ── Parser tests ──────────────────────────────────────────────────────────────
-
-CANNED_JSON = {
-    "flashcards": [
-        {"front": "מה תפקיד useState?", "back": "מחזיר [state, setState]", "tags": ["React"]},
-        {"front": "What is TCP?", "back": "Reliable delivery protocol.", "tags": ["networking"]},
-    ]
-}
-
-
-def test_parse_clean_json():
-    cards = summarizer._parse_flashcards_response(json.dumps(CANNED_JSON, ensure_ascii=False))
-    assert len(cards) == 2
-    assert cards[0].front.startswith("מה תפקיד")
-    assert "React" in cards[0].tags
-
-
-def test_parse_fenced_json():
-    raw = "```json\n" + json.dumps(CANNED_JSON, ensure_ascii=False) + "\n```"
-    cards = summarizer._parse_flashcards_response(raw)
-    assert len(cards) == 2
-
-
-def test_parse_thinking_preamble():
-    """Gemini 2.5 sometimes emits {reasoning...} before the JSON."""
-    raw = 'Thinking: {this is not the answer}\n' + json.dumps(CANNED_JSON, ensure_ascii=False)
-    cards = summarizer._parse_flashcards_response(raw)
-    assert len(cards) == 2
-
-
-def test_parse_drops_empty_cards():
-    raw = json.dumps({
-        "flashcards": [
-            {"front": "", "back": "orphan back", "tags": []},
-            {"front": "good", "back": "good back", "tags": []},
-            {"front": "no back", "back": "", "tags": []},
-        ]
-    })
-    assert len(summarizer._parse_flashcards_response(raw)) == 1
-
-
-def test_parse_returns_empty_on_garbage():
-    assert summarizer._parse_flashcards_response("totally not json") == []
+from app.services.errors import PipelineError
+from app.services.summarizer import _FlashcardSchema, _FlashcardsSchema
 
 
 # ── Generation wiring ─────────────────────────────────────────────────────────
 
+def _patch_structured(monkeypatch, parsed):
+    async def fake_structured(contents, config, timeout=None, **kwargs):
+        if isinstance(parsed, Exception):
+            raise parsed
+        return parsed
+    monkeypatch.setattr(summarizer, "_generate_structured", fake_structured)
+
+
 @pytest.mark.asyncio
 async def test_generate_flashcards_returns_cards(monkeypatch):
-    """Monkeypatch the sync helper so we don't hit Gemini."""
-    def fake_sync(summary, transcript):
-        return [
-            Flashcard(front="a", back="b", tags=["t"]),
-            Flashcard(front="c", back="d", tags=[]),
-        ]
-    monkeypatch.setattr(summarizer, "_generate_flashcards_sync", fake_sync)
+    _patch_structured(monkeypatch, _FlashcardsSchema(flashcards=[
+        _FlashcardSchema(front="מה תפקיד useState?", back="מחזיר [state, setState]", tags=["React"]),
+        _FlashcardSchema(front="What is TCP?", back="Reliable delivery protocol.", tags=[]),
+    ]))
     cards = await summarizer.generate_flashcards("some summary", "transcript")
     assert len(cards) == 2
-    assert cards[0].tags == ["t"]
+    assert cards[0].front.startswith("מה תפקיד")
+    assert cards[0].tags == ["React"]
+
+
+@pytest.mark.asyncio
+async def test_generate_flashcards_drops_empty_cards(monkeypatch):
+    _patch_structured(monkeypatch, _FlashcardsSchema(flashcards=[
+        _FlashcardSchema(front="", back="orphan back", tags=[]),
+        _FlashcardSchema(front="good", back="good back", tags=[" React "]),
+        _FlashcardSchema(front="no back", back="  ", tags=[]),
+    ]))
+    cards = await summarizer.generate_flashcards("some summary")
+    assert len(cards) == 1
+    assert cards[0].tags == ["React"]  # tags are stripped
+
+
+@pytest.mark.asyncio
+async def test_generate_flashcards_soft_fails_on_gemini_error(monkeypatch):
+    """Flashcards are a bonus step — a Gemini failure returns [] instead of raising."""
+    _patch_structured(monkeypatch, PipelineError("קצב", detail="429"))
+    cards = await summarizer.generate_flashcards("some summary")
+    assert cards == []
 
 
 @pytest.mark.asyncio

@@ -93,12 +93,59 @@ async def test_processor_routes_ivrit_mode_to_ivrit_transcriber(monkeypatch, tmp
 
 
 @pytest.mark.asyncio
-async def test_unload_model_if_idle_handles_both_caches(monkeypatch):
-    """
-    The idle watcher must not crash when only the ivrit cache is populated,
-    or only the whisper cache, or neither.
-    """
-    # Both empty — must be a no-op
-    monkeypatch.setattr(transcriber, "_model", None)
-    monkeypatch.setattr(transcriber, "_ivrit_model", None)
-    await transcriber.unload_model_if_idle()  # must not raise
+async def test_unload_model_if_idle_noop_when_empty():
+    """The idle watcher must not crash when no model is loaded."""
+    slot = transcriber._ModelSlot()
+    await slot.unload_if_idle(threshold_s=0)  # must not raise
+    assert slot._model is None
+
+
+@pytest.mark.asyncio
+async def test_unload_never_evicts_active_model():
+    """A model with an in-flight transcription must never be evicted, even if
+    its last_used timestamp is ancient (the mid-transcription OOM bug)."""
+    slot = transcriber._ModelSlot()
+    sentinel = object()
+    slot._model = sentinel
+    slot._key = "whisper:test"
+    slot._active = 1
+    slot._last_used = 0.0  # epoch — far past any threshold
+    await slot.unload_if_idle(threshold_s=1)
+    assert slot._model is sentinel
+
+
+@pytest.mark.asyncio
+async def test_unload_evicts_idle_model():
+    """An idle model past the threshold is evicted and the slot cleared."""
+    slot = transcriber._ModelSlot()
+    slot._model = object()
+    slot._key = "whisper:test"
+    slot._active = 0
+    slot._last_used = 0.0
+    await slot.unload_if_idle(threshold_s=1)
+    assert slot._model is None
+    assert slot._key is None
+
+
+@pytest.mark.asyncio
+async def test_slot_acquire_release_refcounts():
+    """acquire loads once per key, refcounts actives, and release decrements."""
+    slot = transcriber._ModelSlot()
+    loads = {"n": 0}
+
+    def loader():
+        loads["n"] += 1
+        return f"model-{loads['n']}"
+
+    m1 = await slot.acquire("whisper:a", loader)
+    assert slot._active == 1 and loads["n"] == 1
+    m2 = await slot.acquire("whisper:a", loader)
+    assert m2 == m1 and loads["n"] == 1  # cached, no reload
+    await slot.release()
+    await slot.release()
+    assert slot._active == 0
+
+    # Switching variants evicts the old model and loads the new one
+    m3 = await slot.acquire("ivrit:b", loader)
+    assert m3 != m1 and loads["n"] == 2
+    await slot.release()

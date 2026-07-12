@@ -54,3 +54,61 @@ def test_unknown_email_returns_generic_message(client, mock_email):
     resp = client.post("/api/auth/request", json={"email": "hacker@evil.com"})
     assert resp.status_code == 200
     assert len(mock_email) == 0
+
+
+@pytest.mark.parametrize(
+    "key,expected",
+    [
+        ("", False),
+        ("  ", False),
+        ("dummy", False),
+        ("CHANGEME", False),
+        ("re_your_key_here", False),
+        ("re_AbC123realkey", True),
+        ("test_key", True),  # conftest default — must stay on the email path
+    ],
+)
+def test_resend_configured_detection(monkeypatch, key, expected):
+    """Placeholder/empty keys disable email; anything else counts as real."""
+    monkeypatch.setattr(settings, "resend_api_key", key)
+    assert settings.resend_configured is expected
+
+
+def test_dev_bypass_logs_magic_link(client, monkeypatch, caplog):
+    """Without a real Resend key: no email attempt, link logged, and the
+    logged token actually authenticates."""
+    import logging
+    import re
+
+    import app.api.auth as auth_module
+
+    async def boom(email, token):
+        raise AssertionError("email must not be sent in dev bypass mode")
+
+    monkeypatch.setattr(auth_module, "_send_magic_link_email", boom)
+    monkeypatch.setattr(settings, "resend_api_key", "")
+
+    with caplog.at_level(logging.INFO, logger="app.api.auth"):
+        resp = client.post("/api/auth/request", json={"email": "allowed@example.com"})
+    assert resp.status_code == 200
+
+    bypass_logs = [r.message for r in caplog.records if "DEV LOGIN" in r.message]
+    assert len(bypass_logs) == 1
+    token = re.search(r"token=([\w\-]+)", bypass_logs[0]).group(1)
+
+    resp = client.get(f"/api/auth/verify?token={token}", follow_redirects=False)
+    assert resp.status_code == 302
+    assert "session_id" in resp.cookies
+
+
+def test_dev_bypass_still_hides_unknown_emails(client, monkeypatch, caplog):
+    """The bypass must not weaken enumeration protection: non-whitelisted
+    emails get no logged link and the same generic response."""
+    import logging
+
+    monkeypatch.setattr(settings, "resend_api_key", "")
+
+    with caplog.at_level(logging.INFO, logger="app.api.auth"):
+        resp = client.post("/api/auth/request", json={"email": "hacker@evil.com"})
+    assert resp.status_code == 200
+    assert not any("DEV LOGIN" in r.message for r in caplog.records)
