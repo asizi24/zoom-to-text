@@ -683,6 +683,94 @@
     }
     @keyframes blink { 50% { opacity: 0; } }
 
+    /* ── Progress phase stepper ── */
+    .progress-steps {
+      display: flex; align-items: flex-start; justify-content: space-between;
+      margin-bottom: 22px; position: relative;
+    }
+    .progress-steps::before {
+      content: ''; position: absolute;
+      top: 15px; right: 12%; left: 12%; height: 2px;
+      background: rgba(255,255,255,.09); z-index: 0;
+    }
+    .p-step {
+      display: flex; flex-direction: column; align-items: center; gap: 7px;
+      flex: 1; position: relative; z-index: 1;
+    }
+    .p-step .p-dot {
+      width: 32px; height: 32px; border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(255,255,255,.06);
+      border: 1px solid rgba(255,255,255,.12);
+      font-size: .85rem; transition: all .35s ease;
+    }
+    .p-step .p-name {
+      font-size: .7rem; font-weight: 600; color: var(--muted);
+      transition: color .35s ease;
+    }
+    .p-step.active .p-dot {
+      background: var(--accent-g); border-color: transparent;
+      box-shadow: 0 0 18px rgba(124,58,237,.55);
+      animation: pulse 2s ease-in-out infinite;
+    }
+    .p-step.active .p-name { color: #c4b5fd; }
+    .p-step.done .p-dot {
+      background: rgba(16,185,129,.18); border-color: rgba(16,185,129,.45);
+    }
+    .p-step.done .p-name { color: #6ee7b7; }
+    @keyframes pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.1); } }
+
+    /* Progress bar shimmer — makes long phases feel alive */
+    .progress-bar-fill { position: relative; overflow: hidden; }
+    .progress-bar-fill::after {
+      content: ''; position: absolute; inset: 0;
+      background: linear-gradient(90deg, transparent, rgba(255,255,255,.35), transparent);
+      transform: translateX(-100%);
+      animation: bar-shimmer 1.8s ease-in-out infinite;
+    }
+    @keyframes bar-shimmer { to { transform: translateX(100%); } }
+    @media (prefers-reduced-motion: reduce) {
+      .progress-bar-fill::after, .p-step.active .p-dot { animation: none; }
+    }
+
+    /* ── Transcript search ── */
+    .t-search-wrap {
+      display: flex; align-items: center; gap: 10px;
+      margin-bottom: 10px; position: relative;
+    }
+    .t-search-input {
+      flex: 1; padding: 9px 36px 9px 14px;
+      background: rgba(0,0,0,.3); border: 1px solid var(--border);
+      border-radius: 10px; color: var(--text);
+      font-size: .85rem; font-family: inherit; outline: none;
+      transition: border-color .2s, box-shadow .2s;
+    }
+    .t-search-input::placeholder { color: rgba(255,255,255,.4); }
+    .t-search-input:focus {
+      border-color: rgba(124,58,237,.55);
+      box-shadow: 0 0 0 3px rgba(124,58,237,.15);
+    }
+    .t-search-icon {
+      position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
+      opacity: .45; pointer-events: none; font-size: .85rem;
+    }
+    .t-search-count {
+      font-size: .75rem; color: var(--muted); white-space: nowrap;
+      font-variant-numeric: tabular-nums; min-width: 70px; text-align: left;
+    }
+    mark.t-hit {
+      background: rgba(245,158,11,.4); color: #fde68a;
+      border-radius: 3px; padding: 0 2px;
+    }
+    .t-seg { display: block; padding: 3px 0; }
+    .t-no-hits { color: var(--muted); font-size: .85rem; text-align: center; padding: 14px 0; }
+
+    /* ── Consistent keyboard focus ── */
+    button:focus-visible, a:focus-visible, input:focus-visible,
+    [tabindex]:focus-visible {
+      outline: 2px solid rgba(165,180,252,.8); outline-offset: 2px;
+    }
+
     /* ── Animations ── */
     @keyframes fadeIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } }
     @keyframes spin   { to { transform: rotate(360deg); } }
@@ -1529,6 +1617,13 @@
         <div class="mode-name">ivrit-ai <span style="color:#f59e0b;font-size:.8em;">⭐</span></div>
         <div class="mode-desc">מומלץ לעברית<br>מודל מקומי מותאם</div>
       </div>
+      <!-- Transcript only — runs the ivrit-ai model locally, skips Gemini
+           entirely (no summary/quiz). Same ~2 GB RAM requirement as ivrit_ai. -->
+      <div class="mode-opt" data-mode="transcription_only" onclick="selectMode(this)">
+        <div class="mode-icon">📝</div>
+        <div class="mode-name">תמלול בלבד</div>
+        <div class="mode-desc">ivrit-ai מקומי<br>ללא סיכום ומבחן</div>
+      </div>
     </div>
   </div>
 
@@ -1543,13 +1638,19 @@
 <div class="stats">
   <div class="stat"><div class="stat-dot"></div>שרת פעיל</div>
   <div class="stat">·</div>
-  <div class="stat">3 מצבי עיבוד</div>
+  <div class="stat">4 מצבי עיבוד</div>
   <div class="stat">·</div>
   <div class="stat">תמיכה בעברית</div>
 </div>
 
 <!-- ═══════════════ PROGRESS CARD ═══════════════ -->
 <div class="card" id="progress-card" style="margin-top:16px;">
+  <div class="progress-steps" id="progress-steps">
+    <div class="p-step" data-step="ingest"><div class="p-dot">⬇️</div><div class="p-name">קליטה</div></div>
+    <div class="p-step" data-step="transcribe"><div class="p-dot">🎙️</div><div class="p-name">תמלול</div></div>
+    <div class="p-step" data-step="summarize"><div class="p-dot">🤖</div><div class="p-name">סיכום</div></div>
+    <div class="p-step" data-step="done"><div class="p-dot">✅</div><div class="p-name">מוכן</div></div>
+  </div>
   <div class="status-label" id="status-label">
     <span class="spinner"></span>מתחיל עיבוד...
   </div>
@@ -1565,6 +1666,12 @@
   <div class="live-transcript-header">
     <span class="section-title" style="margin-bottom:0; font-size:.95rem; border-right-color:#7c3aed;">📝 תמלול חי</span>
     <button id="transcript-pin-btn" class="pin-btn" onclick="toggleTranscriptPin()" title="נעל/שחרר גלילה אוטומטית">📌 נעל</button>
+  </div>
+  <div class="t-search-wrap">
+    <input type="search" class="t-search-input" id="live-search-input"
+           placeholder="חפש בתמלול החי..." oninput="onLiveSearch(this.value)" />
+    <span class="t-search-icon">🔍</span>
+    <span class="t-search-count" id="live-search-count"></span>
   </div>
   <div id="live-transcript-box"><span class="typing-cursor"></span></div>
   <div class="live-transcript-status" id="live-transcript-status">ממתין לטקסט...</div>
@@ -1590,6 +1697,7 @@
 
   <!-- Action bar -->
   <div class="results-actions">
+    <button class="action-btn" onclick="exportObsidian()">🟣 ייצוא ל-Obsidian</button>
     <button class="action-btn" onclick="exportMarkdown()">⬇️ ייצוא Markdown</button>
     <button class="action-btn" id="copy-all-btn" onclick="copyAll()">📋 העתק הכל</button>
     <button class="action-btn" onclick="window.print()">🖨️ הדפסה</button>
@@ -1611,9 +1719,15 @@
     <div class="chapters-list" id="chapters-list"></div>
   </div>
 
-  <!-- Transcript (collapsible) -->
+  <!-- Transcript (collapsible, searchable) -->
   <div id="transcript-section" style="display:none; margin-top:24px;">
     <span class="transcript-toggle" onclick="toggleTranscript()">▶ הצג תמלול גולמי</span>
+    <div class="t-search-wrap" id="final-search-wrap" style="display:none; margin-top:10px;">
+      <input type="search" class="t-search-input" id="final-search-input"
+             placeholder="חפש בתמלול..." oninput="onFinalSearch(this.value)" />
+      <span class="t-search-icon">🔍</span>
+      <span class="t-search-count" id="final-search-count"></span>
+    </div>
     <div class="transcript-box" id="transcript-box"></div>
   </div>
 
@@ -1713,6 +1827,13 @@
   let transcriptTimer  = null;
   let transcriptOffset = 0;
   let transcriptPinned = false;
+  let liveTranscriptText = '';   // full text buffer — enables client-side search
+  let liveSearchQuery  = '';
+
+  // Live update transport state (SSE with polling fallback)
+  let esRef         = null;
+  let watchdogTimer = null;
+  let taskFinished  = false;
 
   // ══════════════════════════════════════════════════════════════════════════
   // Keyboard shortcut — Enter to submit
@@ -1800,8 +1921,12 @@
 
     processingStartTime = Date.now();
     showProgress();
-    startPolling(taskId);
-    startTranscriptPolling(taskId);
+    resetLiveTranscript();
+    // GEMINI_DIRECT produces no live transcript — its card appears lazily
+    // (on first delta) for every other mode too, but showing it upfront
+    // when we know text is coming feels more responsive.
+    if (selectedMode !== 'gemini_direct') showLiveTranscriptCard();
+    startLiveUpdates(taskId);
   }
 
   async function submitUrl(url) {
@@ -1826,27 +1951,116 @@
   }
 
   // ══════════════════════════════════════════════════════════════════════════
-  // Polling
+  // Live updates — SSE stream with automatic fallback to 2s polling.
+  // The fallback keeps the UI fully working against a backend that predates
+  // the /events endpoint (404 → EventSource errors before any message).
   // ══════════════════════════════════════════════════════════════════════════
-  function startPolling(taskId) {
-    pollTimer = setInterval(async () => {
-      try {
-        const r = await fetch(`/api/tasks/${taskId}`);
-        if (!r.ok) return;
-        const task = await r.json();
-        updateProgress(task.progress, task.message);
+  function startLiveUpdates(taskId) {
+    stopLiveUpdates();
+    taskFinished = false;
+    if (!window.EventSource) { startPollingBundle(taskId); return; }
 
-        if (task.status === 'completed') {
-          clearInterval(pollTimer);
-          showResults(task.result, taskId, !!task.has_audio);
-        } else if (task.status === 'failed') {
-          clearInterval(pollTimer);
-          hideLiveTranscript();
-          hideProgress();
-          showError(task.error || 'העיבוד נכשל');
-        }
-      } catch { /* retry next tick */ }
-    }, 2000);
+    let gotEvent = false;
+    let es;
+    try { es = new EventSource(`/api/tasks/${taskId}/events`); }
+    catch { startPollingBundle(taskId); return; }
+    esRef = es;
+
+    es.onmessage = (e) => {
+      gotEvent = true;
+      let p;
+      try { p = JSON.parse(e.data); } catch { return; }
+      handleLiveEvent(taskId, p);
+    };
+    es.onerror = () => {
+      // Error before the first message = endpoint missing/blocked → permanent
+      // polling fallback. After the first message EventSource auto-reconnects
+      // on its own; the watchdog below covers any stream gap meanwhile.
+      if (!gotEvent && esRef === es) {
+        stopLiveUpdates();
+        startPollingBundle(taskId);
+      }
+    };
+    // Safety net: a slow poll catches a stalled stream or a missed 'done'
+    watchdogTimer = setInterval(() => pollOnce(taskId), 20000);
+  }
+
+  function stopLiveUpdates() {
+    if (pollTimer)     { clearInterval(pollTimer); pollTimer = null; }
+    if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; }
+    if (esRef)         { esRef.close(); esRef = null; }
+    stopTranscriptPolling();
+  }
+
+  function startPollingBundle(taskId) {
+    startPolling(taskId);
+    startTranscriptDeltaPolling(taskId);
+  }
+
+  async function handleLiveEvent(taskId, p) {
+    if (taskFinished) return;
+    if (p.type === 'snapshot') {
+      updateProgress(p.progress, p.message, p.status);
+      if (p.transcript_total > 0) {
+        showLiveTranscriptCard();
+        await backfillTranscript(taskId);
+      }
+      if (p.status === 'completed' || p.status === 'failed') pollOnce(taskId);
+    } else if (p.type === 'status') {
+      updateProgress(p.progress, p.message, p.status);
+    } else if (p.type === 'transcript') {
+      showLiveTranscriptCard();
+      if (p.total - p.text.length === transcriptOffset) {
+        transcriptOffset = p.total;
+        appendLiveTranscript(p.text);
+      } else if (p.total > transcriptOffset) {
+        // Missed events (reconnect) — resync via the delta endpoint
+        await backfillTranscript(taskId);
+      }
+    } else if (p.type === 'done') {
+      pollOnce(taskId);  // fetch the full task (result JSON) exactly once
+    }
+  }
+
+  async function backfillTranscript(taskId) {
+    try {
+      const r = await fetch(`/api/tasks/${taskId}/transcript?offset=${transcriptOffset}`);
+      if (!r.ok) return;
+      const data = await r.json();
+      transcriptOffset = data.total;
+      if (data.text) appendLiveTranscript(data.text);
+    } catch { /* next event or watchdog will retry */ }
+  }
+
+  // ── Polling transport (fallback + watchdog) ──
+  function startPolling(taskId) {
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = setInterval(() => pollOnce(taskId), 2000);
+  }
+
+  async function pollOnce(taskId) {
+    try {
+      const r = await fetch(`/api/tasks/${taskId}`);
+      if (!r.ok) return;
+      applyTaskState(await r.json(), taskId);
+    } catch { /* retry next tick */ }
+  }
+
+  function applyTaskState(task, taskId) {
+    if (taskFinished) return;
+    if (task.status === 'completed') {
+      taskFinished = true;
+      stopLiveUpdates();
+      showResults(task.result, taskId, !!task.has_audio);
+    } else if (task.status === 'failed') {
+      taskFinished = true;
+      stopLiveUpdates();
+      hideLiveTranscript();
+      hideProgress();
+      showError(task.error || 'העיבוד נכשל');
+    } else {
+      updateProgress(task.progress, task.message, task.status);
+    }
   }
 
   function _applyProgressBar(pct) {
@@ -1855,7 +2069,7 @@
   }
 
   // Typical total processing time in seconds per mode (2-hour recording baseline)
-  const MODE_TYPICAL_SEC = { gemini_direct: 240, whisper_api: 600, whisper_local: 1800, ivrit_ai: 1500 };
+  const MODE_TYPICAL_SEC = { gemini_direct: 240, whisper_api: 600, whisper_local: 1800, ivrit_ai: 1500, transcription_only: 1400 };
 
   function _estimateRemaining(pct) {
     if (!processingStartTime || pct <= 5) return null;
@@ -1890,7 +2104,29 @@
     }
   }
 
-  function updateProgress(pct, msg) {
+  // ── Phase stepper ──
+  const STEP_ORDER = ['ingest', 'transcribe', 'summarize', 'done'];
+
+  function stepFromStatus(status, pct) {
+    if (status === 'completed' || pct >= 100) return 'done';
+    if (status === 'summarizing') return 'summarize';
+    if (status === 'transcribing') return pct >= 15 ? 'transcribe' : 'ingest';
+    if (status === 'downloading' || status === 'pending') return 'ingest';
+    return null;  // unknown status → keep current highlight
+  }
+
+  function updateSteps(status, pct) {
+    const current = stepFromStatus(status, pct);
+    if (!current) return;
+    const curIdx = STEP_ORDER.indexOf(current);
+    document.querySelectorAll('#progress-steps .p-step').forEach(el => {
+      const idx = STEP_ORDER.indexOf(el.dataset.step);
+      el.classList.toggle('done',   idx < curIdx || current === 'done');
+      el.classList.toggle('active', idx === curIdx && current !== 'done');
+    });
+  }
+
+  function updateProgress(pct, msg, status) {
     // Stop existing creep — a real update arrived
     if (creepTimer) { clearInterval(creepTimer); creepTimer = null; }
 
@@ -1898,6 +2134,7 @@
     lastProgressTime = Date.now();
     visualProgress   = pct;
 
+    updateSteps(status, pct);
     _applyProgressBar(pct);
     const _sl = document.getElementById('status-label');
     _sl.textContent = '';
@@ -1924,28 +2161,63 @@
   }
 
   // ══════════════════════════════════════════════════════════════════════════
-  // Live transcript preview
+  // Live transcript preview — buffered client-side so it is searchable
   // ══════════════════════════════════════════════════════════════════════════
-  function startTranscriptPolling(taskId) {
-    // GEMINI_DIRECT sends audio directly to Gemini — no text transcript during processing
-    if (selectedMode === 'gemini_direct') return;
+  function makeCursor() {
+    const cursor = document.createElement('span');
+    cursor.className = 'typing-cursor';
+    return cursor;
+  }
 
-    transcriptOffset = 0;
-    transcriptPinned = false;
+  function resetLiveTranscript() {
+    transcriptOffset   = 0;
+    transcriptPinned   = false;
+    liveTranscriptText = '';
+    liveSearchQuery    = '';
+
+    const input = document.getElementById('live-search-input');
+    if (input) input.value = '';
+    document.getElementById('live-search-count').textContent = '';
 
     const box = document.getElementById('live-transcript-box');
     box.textContent = '';
-    const cursor = document.createElement('span');
-    cursor.className = 'typing-cursor';
-    box.appendChild(cursor);
+    box.appendChild(makeCursor());
 
     const pinBtn = document.getElementById('transcript-pin-btn');
     pinBtn.textContent = '📌 נעל';
     pinBtn.classList.remove('pinned');
-
-    document.getElementById('live-transcript-card').style.display = 'block';
     document.getElementById('live-transcript-status').textContent = 'ממתין לטקסט...';
+  }
 
+  function showLiveTranscriptCard() {
+    document.getElementById('live-transcript-card').style.display = 'block';
+  }
+
+  function appendLiveTranscript(delta) {
+    if (!delta) return;
+    liveTranscriptText += delta;
+    showLiveTranscriptCard();
+    document.getElementById('live-transcript-status').textContent =
+      liveTranscriptText.length.toLocaleString('he-IL') + ' תווים';
+
+    const box = document.getElementById('live-transcript-box');
+    if (liveSearchQuery) {
+      // Search active — keep the filtered view in sync with fresh text
+      renderTranscriptSearch(box, liveTranscriptText, liveSearchQuery,
+        document.getElementById('live-search-count'));
+      return;
+    }
+    const cur = box.querySelector('.typing-cursor');
+    if (cur) cur.remove();
+    box.appendChild(document.createTextNode(delta));
+    box.appendChild(makeCursor());
+    if (!transcriptPinned) box.scrollTop = box.scrollHeight;
+  }
+
+  // Fallback transport: poll the delta endpoint every 2s (SSE path pushes
+  // deltas instead). resetLiveTranscript() must run before this.
+  function startTranscriptDeltaPolling(taskId) {
+    if (transcriptTimer) clearInterval(transcriptTimer);
     transcriptTimer = setInterval(async () => {
       try {
         const r = await fetch(`/api/tasks/${taskId}/transcript?offset=${transcriptOffset}`);
@@ -1953,20 +2225,83 @@
         const data = await r.json();
         if (data.text) {
           transcriptOffset = data.total;
-          // Remove cursor, append delta, re-add cursor
-          const cur = box.querySelector('.typing-cursor');
-          if (cur) cur.remove();
-          box.appendChild(document.createTextNode(data.text));
-          const newCursor = document.createElement('span');
-          newCursor.className = 'typing-cursor';
-          box.appendChild(newCursor);
-          // Auto-scroll to bottom unless user has pinned
-          if (!transcriptPinned) box.scrollTop = box.scrollHeight;
-          document.getElementById('live-transcript-status').textContent =
-            data.total.toLocaleString('he-IL') + ' תווים';
+          appendLiveTranscript(data.text);
         }
       } catch { /* retry on next tick */ }
     }, 2000);
+  }
+
+  // ── Transcript search (shared by live + finished views) ──
+  // Splits on [MM:SS] boundaries so every hit is shown with its timestamp
+  // context line, then highlights each occurrence. DOM-built — no innerHTML.
+  function renderTranscriptSearch(box, text, query, countEl) {
+    box.textContent = '';
+    const q = query.toLowerCase();
+    const segs = text.split(/(?=\[\d{1,2}:\d{2}\])/);
+    let totalHits = 0;
+
+    for (const seg of segs) {
+      const lower = seg.toLowerCase();
+      let idx = lower.indexOf(q);
+      if (idx === -1) continue;
+
+      const el = document.createElement('span');
+      el.className = 't-seg';
+      let last = 0;
+      while (idx !== -1) {
+        totalHits++;
+        if (idx > last) el.appendChild(document.createTextNode(seg.slice(last, idx)));
+        const mark = document.createElement('mark');
+        mark.className = 't-hit';
+        mark.textContent = seg.slice(idx, idx + query.length);
+        el.appendChild(mark);
+        last = idx + query.length;
+        idx = lower.indexOf(q, last);
+      }
+      if (last < seg.length) el.appendChild(document.createTextNode(seg.slice(last)));
+      box.appendChild(el);
+    }
+
+    if (!totalHits) {
+      const none = document.createElement('div');
+      none.className = 't-no-hits';
+      none.textContent = `אין תוצאות עבור "${query}"`;
+      box.appendChild(none);
+      countEl.textContent = '';
+    } else {
+      countEl.textContent = totalHits.toLocaleString('he-IL') + ' תוצאות';
+    }
+    box.scrollTop = 0;
+    linkifyTimestamps(box);  // no-op unless an audio player is active
+  }
+
+  function onLiveSearch(value) {
+    liveSearchQuery = value.trim();
+    const box     = document.getElementById('live-transcript-box');
+    const countEl = document.getElementById('live-search-count');
+    if (!liveSearchQuery) {
+      countEl.textContent = '';
+      box.textContent = liveTranscriptText;
+      box.appendChild(makeCursor());
+      if (!transcriptPinned) box.scrollTop = box.scrollHeight;
+      return;
+    }
+    renderTranscriptSearch(box, liveTranscriptText, liveSearchQuery, countEl);
+  }
+
+  function onFinalSearch(value) {
+    const q       = value.trim();
+    const box     = document.getElementById('transcript-box');
+    const countEl = document.getElementById('final-search-count');
+    const full    = (currentResult && currentResult.transcript) || '';
+    if (!q) {
+      countEl.textContent = '';
+      box.textContent = full;
+      linkifyTimestamps(box);
+      return;
+    }
+    if (box.style.display !== 'block') toggleTranscript();  // auto-open results
+    renderTranscriptSearch(box, full, q, countEl);
   }
 
   function stopTranscriptPolling() {
@@ -2041,10 +2376,13 @@
     else
       linkifyTimestamps(cl);
 
-    // Transcript (Whisper mode only)
+    // Transcript (Whisper mode only) — with search
     if (result.transcript) {
       document.getElementById('transcript-box').textContent = result.transcript;
       document.getElementById('transcript-section').style.display = 'block';
+      document.getElementById('final-search-wrap').style.display = 'flex';
+      document.getElementById('final-search-input').value = '';
+      document.getElementById('final-search-count').textContent = '';
       linkifyTimestamps(document.getElementById('transcript-box'));
     }
 
@@ -2210,12 +2548,97 @@
     if (!currentResult) return;
     const md = buildMarkdown(currentResult);
     const date = new Date().toISOString().slice(0, 10);
-    const blob = new Blob([md], { type: 'text/markdown; charset=utf-8' });
+    _downloadText(md, `lesson-summary-${date}.md`);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // Export to Obsidian — YAML properties + callouts + foldable quiz
+  // ══════════════════════════════════════════════════════════════════════════
+  function _sanitizeFilename(s) {
+    return (s || '').replace(/[\\/:*?"<>|#^\[\]]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80);
+  }
+
+  function _downloadText(text, filename) {
+    const blob = new Blob([text], { type: 'text/markdown; charset=utf-8' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `lesson-summary-${date}.md`;
+    a.download = filename;
     a.click();
     URL.revokeObjectURL(a.href);
+  }
+
+  function buildObsidianMarkdown(result) {
+    const dateISO = new Date().toISOString().slice(0, 10);
+    const source  = (currentSource || '').replace(/^upload:/, '');
+    const title   = _sanitizeFilename(source.replace(/\.[a-z0-9]{2,5}$/i, '')) || `שיעור ${dateISO}`;
+    const lines   = [];
+
+    // YAML frontmatter → Obsidian properties
+    lines.push('---');
+    lines.push(`title: "${title.replace(/"/g, "'")}"`);
+    lines.push(`date: ${dateISO}`);
+    if (source) lines.push(`source: "${source.replace(/"/g, "'")}"`);
+    lines.push('tags:');
+    lines.push('  - שיעור');
+    lines.push('  - zoom-to-text');
+    lines.push('---');
+    lines.push('');
+    lines.push(`# ${title}`);
+    lines.push('');
+
+    if (result.summary) {
+      lines.push('> [!abstract] סיכום השיעור');
+      result.summary.split('\n').forEach(l => lines.push('> ' + l));
+      lines.push('');
+    }
+
+    if ((result.chapters || []).length) {
+      lines.push('## 🗂️ פרקים');
+      lines.push('');
+      result.chapters.forEach((ch, i) => {
+        lines.push(`### ${i + 1}. ${ch.title || ''}`);
+        if (ch.content) { lines.push(ch.content); lines.push(''); }
+        (ch.key_points || []).forEach(p => lines.push(`- ${p}`));
+        lines.push('');
+      });
+    }
+
+    if ((result.quiz || []).length) {
+      lines.push('## 🧠 מבחן לתרגול');
+      lines.push('');
+      result.quiz.forEach((q, i) => {
+        // Foldable callout — the answer stays hidden until expanded in Obsidian
+        lines.push(`> [!question]- שאלה ${i + 1}: ${q.question || ''}`);
+        (q.options || []).forEach(o =>
+          lines.push(`> - ${o === q.correct_answer ? '**' + o + '** ✅' : o}`));
+        if (q.explanation) { lines.push('>'); lines.push(`> 💡 ${q.explanation}`); }
+        lines.push('');
+      });
+    }
+
+    if ((result.flashcards || []).length) {
+      lines.push('## 🃏 כרטיסיות');
+      lines.push('');
+      result.flashcards.forEach(c => {
+        lines.push(`**ש:** ${c.front || ''}`);
+        lines.push(`**ת:** ${c.back || ''}`);
+        lines.push('');
+      });
+    }
+
+    if (result.transcript) {
+      lines.push('## 📄 תמלול מלא');
+      lines.push('');
+      lines.push(result.transcript);
+    }
+
+    return { md: lines.join('\n'), filename: `${title} — ${dateISO}.md` };
+  }
+
+  function exportObsidian() {
+    if (!currentResult) return;
+    const { md, filename } = buildObsidianMarkdown(currentResult);
+    _downloadText(md, filename);
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -2276,6 +2699,9 @@
 
         if (isCompleted) {
           item.onclick = () => loadHistoryTask(t.id);
+        } else if (!isFailed) {
+          // Running task — clicking re-attaches the live progress view
+          item.onclick = () => { toggleHistory(); resumeTask(t); };
         }
         list.appendChild(item);
       });
@@ -2307,7 +2733,9 @@
     document.getElementById('input-card').style.display    = 'none';
     document.getElementById('progress-card').style.display = 'block';
     document.getElementById('progress-eta').textContent    = '';
-    updateProgress(5, 'מתחיל עיבוד...');
+    document.querySelectorAll('#progress-steps .p-step')
+      .forEach(el => el.classList.remove('active', 'done'));
+    updateProgress(5, 'מתחיל עיבוד...', 'pending');
   }
   function hideProgress() {
     if (creepTimer) { clearInterval(creepTimer); creepTimer = null; }
@@ -2324,8 +2752,9 @@
   }
 
   function reset() {
-    if (pollTimer)  clearInterval(pollTimer);
+    stopLiveUpdates();
     if (creepTimer) { clearInterval(creepTimer); creepTimer = null; }
+    taskFinished = false;
     hideLiveTranscript();
     hideChatPanel();
     hideAudioPlayer();
@@ -2349,11 +2778,48 @@
     switchTab('url');
   }
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // Task resume — a reload must never orphan a running job
+  // ══════════════════════════════════════════════════════════════════════════
+  // Re-attach the progress UI to a task that is already running server-side.
+  // Accepts either a bare id (extension ?task= flow) or a task object from
+  // the history/list API ({id, url, progress, message, created_at}).
+  function resumeTask(t) {
+    const taskId = typeof t === 'string' ? t : t.id;
+    if (typeof t === 'object') {
+      currentSource = (t.url || '').replace(/^upload:/, '');
+      processingStartTime = t.created_at ? Date.parse(t.created_at) : Date.now();
+    } else {
+      processingStartTime = Date.now();
+    }
+    showProgress();
+    resetLiveTranscript();
+    if (typeof t === 'object' && t.progress) {
+      updateProgress(t.progress, t.message || 'ממשיך עיבוד...', t.status);
+    }
+    // Live transcript card appears lazily on the first delta — the resumed
+    // task's mode is unknown client-side, so don't show an empty panel.
+    startLiveUpdates(taskId);
+  }
+
+  // On page load: pick up the newest task that is still processing, so an
+  // upload keeps showing progress even after a refresh / browser restart.
+  async function resumeLatestInFlight() {
+    try {
+      const r = await fetch('/api/tasks?limit=10');
+      if (!r.ok) return;
+      const tasks = await r.json();
+      const inflight = tasks.find(t => t.status !== 'completed' && t.status !== 'failed');
+      if (inflight) resumeTask(inflight);
+    } catch { /* server unreachable — leave the normal input UI */ }
+  }
+
   // Auto-load a specific task when arriving from the Chrome extension (?task=<id>)
   const _taskFromUrl = new URLSearchParams(location.search).get('task');
   if (_taskFromUrl) {
-    showProgress();
-    startPolling(_taskFromUrl);
+    resumeTask(_taskFromUrl);
+  } else {
+    resumeLatestInFlight();
   }
 
   // ── Chat with recording ──────────────────────────────────────────
