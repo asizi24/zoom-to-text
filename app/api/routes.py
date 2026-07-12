@@ -7,6 +7,7 @@ GET  /api/tasks          — list recent jobs
 GET  /api/tasks/{id}     — get job status + result
 DELETE /api/tasks/{id}   — delete a job record
 """
+import asyncio
 import json
 import re
 import uuid
@@ -14,15 +15,17 @@ import logging
 from pathlib import Path
 
 import aiofiles
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app import state
+from app.events import hub as events_hub
+from app.models import TaskStatus
 from app.api.deps import get_current_user
 from app.config import settings
 from app.models import ProcessingMode, TaskCreate, TaskResponse
-from app.services import anki_export, processor, summarizer
+from app.services import anki_export, summarizer, worker
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -36,7 +39,6 @@ _ALLOWED_EXTENSIONS = {".mp3", ".mp4", ".m4a", ".wav", ".mkv", ".webm", ".avi"}
 @router.post("/tasks", response_model=TaskResponse, status_code=202)
 async def create_task(
     task_in: TaskCreate,
-    background_tasks: BackgroundTasks,
     user_id: str = Depends(get_current_user),
 ):
     """
@@ -47,18 +49,19 @@ async def create_task(
     - **cookies**: Netscape-format cookie string from the Chrome extension
                    (required for institutional recordings like ORT)
     - **language**: Audio language hint — `he` (Hebrew), `en`, or `auto`
+
+    Returns 202; the job runs on the worker queue (at most
+    settings.pipeline_concurrency at a time) and survives server restarts.
     """
     task_id = str(uuid.uuid4())
     task = await state.create_task(task_id, task_in.url, user_id=user_id)
-
-    background_tasks.add_task(
-        processor.run_pipeline,
-        task_id=task_id,
-        url=task_in.url,
-        mode=task_in.mode,
-        cookies=task_in.cookies,
-        language=task_in.language,
-    )
+    await state.set_job_payload(task_id, {
+        "url": task_in.url,
+        "mode": task_in.mode.value,
+        "cookies": task_in.cookies,
+        "language": task_in.language,
+    })
+    worker.enqueue(task_id)
     return task
 
 
@@ -66,7 +69,6 @@ async def create_task(
 
 @router.post("/tasks/upload", response_model=TaskResponse, status_code=202)
 async def create_task_from_upload(
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     mode: ProcessingMode = Form(ProcessingMode.GEMINI_DIRECT),
     language: str = Form("he"),
@@ -112,14 +114,12 @@ async def create_task_from_upload(
         raise
 
     task = await state.create_task(task_id, f"upload:{safe_name}", user_id=user_id)
-
-    background_tasks.add_task(
-        processor.run_pipeline_from_file,
-        task_id=task_id,
-        file_path=str(file_path),
-        mode=mode,
-        language=language,
-    )
+    await state.set_job_payload(task_id, {
+        "file_path": str(file_path),
+        "mode": mode.value,
+        "language": language,
+    })
+    worker.enqueue(task_id)
     return task
 
 
@@ -189,6 +189,81 @@ async def get_partial_transcript(
 
     delta, total = await state.get_partial_transcript(task_id, from_offset=offset)
     return {"text": delta, "total": total}
+
+
+# ── Live task events (SSE) ────────────────────────────────────────────────────
+
+def _sse(payload: dict) -> str:
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+@router.get("/tasks/{task_id}/events")
+async def task_events(
+    task_id: str,
+    request: Request,
+    user_id: str = Depends(get_current_user),
+):
+    """
+    Server-Sent Events stream of live task updates — replaces 2s polling.
+
+    Events (each a JSON object in the `data:` field):
+      {"type":"snapshot", status, progress, message, transcript_total}  — on connect
+      {"type":"status", status, progress, message}                     — task row changed
+      {"type":"transcript", text, total}                               — live transcript delta
+      {"type":"done", status}                                          — terminal; stream closes
+
+    A `: ping` comment is sent every 15s so proxies don't kill the idle
+    connection. The frontend falls back to polling when this endpoint is
+    unavailable, and keeps a 20s watchdog poll as a safety net.
+    """
+    task = await state.get_task_for_user(task_id, user_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    # Subscribe BEFORE reading the snapshot so no event can slip between them.
+    queue = events_hub.subscribe(task_id)
+
+    async def generate():
+        try:
+            # Snapshot: current row + transcript length (delta fetched by
+            # the client through GET /transcript with its own offset).
+            _, transcript_total = await state.get_partial_transcript(
+                task_id, from_offset=2**31
+            )
+            snapshot_task = await state.get_task(task_id)
+            yield _sse({
+                "type": "snapshot",
+                "status": snapshot_task.status.value,
+                "progress": snapshot_task.progress,
+                "message": snapshot_task.message,
+                "transcript_total": transcript_total,
+            })
+            if snapshot_task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED):
+                yield _sse({"type": "done", "status": snapshot_task.status.value})
+                return
+
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    if await request.is_disconnected():
+                        return
+                    yield ": ping\n\n"
+                    continue
+                yield _sse(event)
+                if event.get("type") == "done":
+                    return
+        finally:
+            events_hub.unsubscribe(task_id, queue)
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",   # disable nginx buffering
+        },
+    )
 
 
 # ── Chat with transcript ───────────────────────────────────────────────────────────

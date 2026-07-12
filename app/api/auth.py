@@ -36,11 +36,24 @@ async def request_magic_link(body: MagicLinkRequest):
     if email in allowed:
         user_id = await state.get_or_create_user(email)
         token = await state.create_magic_token(user_id)
-        try:
-            await _send_magic_link_email(email, token)
-            logger.info(f"Magic link sent to {email}")
-        except Exception as exc:
-            logger.error(f"Failed to send magic link to {email}: {exc}")
+        if not settings.resend_configured:
+            # Local dev bypass: without a real Resend key we couldn't email
+            # anyway (e.g. developing offline), so print the link to the
+            # terminal for copy-paste. Logging the token is safe here exactly
+            # because this branch is unreachable once a real key is set.
+            magic_url = f"{settings.base_url}/api/auth/verify?token={token}"
+            logger.info(
+                "\n" + "─" * 62 + "\n"
+                f"🔑 [DEV LOGIN] Resend not configured — magic link for {email}:\n"
+                f"   {magic_url}\n"
+                + "─" * 62
+            )
+        else:
+            try:
+                await _send_magic_link_email(email, token)
+                logger.info(f"Magic link sent to {email}")
+            except Exception as exc:
+                logger.error(f"Failed to send magic link to {email}: {exc}")
     else:
         logger.warning(f"Magic link requested for non-whitelisted email: {email}")
 

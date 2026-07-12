@@ -13,6 +13,7 @@ Connection strategy:
   while staying safe for async code via WAL mode.
 """
 import asyncio
+import json
 import uuid
 import aiosqlite
 import logging
@@ -21,6 +22,7 @@ from pathlib import Path
 from typing import Optional
 
 from app.config import settings
+from app.events import hub as _events
 from app.models import TaskStatus, TaskResponse, LessonResult
 
 logger = logging.getLogger(__name__)
@@ -92,6 +94,10 @@ async def _get_db() -> aiosqlite.Connection:
         _db = await aiosqlite.connect(DB_PATH)
         await _db.execute("PRAGMA journal_mode=WAL")
         await _db.execute("PRAGMA synchronous=NORMAL")
+        # Wait up to 5s on a locked DB instead of failing immediately —
+        # protects against transient contention from external readers
+        # (sqlite3 CLI, backup scripts) hitting the same file.
+        await _db.execute("PRAGMA busy_timeout=5000")
         # Set row_factory once on the shared connection so all cursors return
         # aiosqlite.Row objects — avoids repeated mutation of the shared connection.
         _db.row_factory = aiosqlite.Row
@@ -140,36 +146,121 @@ async def init_db():
         await db.execute("ALTER TABLE tasks ADD COLUMN audio_path TEXT")
         await db.commit()
         logger.info("Migrated tasks table: added audio_path column")
+    if "payload_json" not in cols:
+        await db.execute("ALTER TABLE tasks ADD COLUMN payload_json TEXT")
+        await db.commit()
+        logger.info("Migrated tasks table: added payload_json column")
+    if "error_detail" not in cols:
+        await db.execute("ALTER TABLE tasks ADD COLUMN error_detail TEXT")
+        await db.commit()
+        logger.info("Migrated tasks table: added error_detail column")
 
-    # Create index now that user_id column is guaranteed to exist
+    # Create indexes now that all columns are guaranteed to exist.
+    # (user_id, created_at DESC) serves the history listing exactly
+    # (WHERE user_id=? ORDER BY created_at DESC LIMIT n) with no sort step;
+    # (status) serves reset_interrupted_tasks' startup scan.
     await db.execute(CREATE_TASKS_INDEX_SQL)
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tasks_user_created "
+        "ON tasks (user_id, created_at DESC)"
+    )
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks (status)")
     await db.commit()
-
-    await _mark_interrupted_tasks_failed()
     logger.info(f"Database ready: {DB_PATH}")
 
 
-async def _mark_interrupted_tasks_failed():
-    """
-    On startup, any task that was mid-flight when the server died is marked failed.
-    This replaces the old behavior of silently leaving tasks stuck in 'downloading'
-    state forever after a crash.
-    """
-    in_flight = [
-        TaskStatus.PENDING.value,
-        TaskStatus.DOWNLOADING.value,
-        TaskStatus.TRANSCRIBING.value,
-        TaskStatus.SUMMARIZING.value,
-    ]
-    placeholders = ",".join("?" * len(in_flight))
+# ── Job queue persistence ─────────────────────────────────────────────────────────
+# The tasks table doubles as a durable job queue: payload_json holds everything
+# needed to (re)run the pipeline. It is cleared when the task finishes because
+# it may contain the user's Zoom session cookies.
+
+_IN_FLIGHT_STATUSES = [
+    TaskStatus.PENDING.value,
+    TaskStatus.DOWNLOADING.value,
+    TaskStatus.TRANSCRIBING.value,
+    TaskStatus.SUMMARIZING.value,
+]
+
+
+async def set_job_payload(task_id: str, payload: dict) -> None:
     db = await _get_db()
-    result = await db.execute(
-        f"UPDATE tasks SET status=?, progress=0, message=?, error=? WHERE status IN ({placeholders})",
-        [TaskStatus.FAILED.value, "השרת הופעל מחדש — המשימה הופסקה", "השרת הופעל מחדש — נסה שוב"] + in_flight,
+    await db.execute(
+        "UPDATE tasks SET payload_json=? WHERE id=?",
+        [json.dumps(payload, ensure_ascii=False), task_id],
     )
-    if result.rowcount:
-        logger.warning(f"Marked {result.rowcount} interrupted task(s) as failed on startup")
     await db.commit()
+
+
+async def get_job_payload(task_id: str) -> Optional[dict]:
+    db = await _get_db()
+    async with db.execute(
+        "SELECT payload_json FROM tasks WHERE id=?", [task_id]
+    ) as cursor:
+        row = await cursor.fetchone()
+    if row is None or not row["payload_json"]:
+        return None
+    return json.loads(row["payload_json"])
+
+
+async def clear_job_payload(task_id: str) -> None:
+    """Wipe the job payload once processing ends — cookies must not linger."""
+    db = await _get_db()
+    await db.execute("UPDATE tasks SET payload_json=NULL WHERE id=?", [task_id])
+    await db.commit()
+
+
+async def reset_interrupted_tasks() -> list[str]:
+    """
+    Called on startup by the worker. Tasks that were mid-flight when the server
+    died are re-queued if their job payload is intact (and, for uploads, the
+    source file still exists on disk); the rest are marked failed.
+
+    Returns the list of task ids to re-enqueue, oldest first.
+    """
+    db = await _get_db()
+    placeholders = ",".join("?" * len(_IN_FLIGHT_STATUSES))
+    async with db.execute(
+        f"SELECT id, payload_json FROM tasks WHERE status IN ({placeholders}) "
+        "ORDER BY created_at ASC",
+        _IN_FLIGHT_STATUSES,
+    ) as cursor:
+        rows = await cursor.fetchall()
+
+    resumable: list[str] = []
+    dead: list[str] = []
+    for row in rows:
+        payload = None
+        if row["payload_json"]:
+            try:
+                payload = json.loads(row["payload_json"])
+            except ValueError:
+                payload = None
+        file_path = (payload or {}).get("file_path")
+        if payload and (file_path is None or Path(file_path).exists()):
+            resumable.append(row["id"])
+        else:
+            dead.append(row["id"])
+
+    if resumable:
+        marks = ",".join("?" * len(resumable))
+        await db.execute(
+            f"UPDATE tasks SET status=?, progress=0, message=? WHERE id IN ({marks})",
+            [TaskStatus.PENDING.value, "ממתין בתור (חודש אחרי הפעלה מחדש)"] + resumable,
+        )
+        logger.warning(f"Re-queued {len(resumable)} interrupted task(s) on startup")
+    if dead:
+        marks = ",".join("?" * len(dead))
+        await db.execute(
+            f"UPDATE tasks SET status=?, progress=0, message=?, error=? WHERE id IN ({marks})",
+            [
+                TaskStatus.FAILED.value,
+                "השרת הופעל מחדש — המשימה הופסקה",
+                "השרת הופעל מחדש — נסה שוב",
+            ] + dead,
+        )
+        logger.warning(f"Marked {len(dead)} interrupted task(s) as failed on startup")
+    await db.commit()
+    return resumable
 
 
 # ── CRUD ──────────────────────────────────────────────────────────────────────────
@@ -199,6 +290,12 @@ async def update_task(task_id: str, status: TaskStatus, progress: int, message: 
         [status.value, progress, message, task_id],
     )
     await db.commit()
+    _events.publish(task_id, {
+        "type": "status",
+        "status": status.value,
+        "progress": progress,
+        "message": message,
+    })
 
 
 async def complete_task(task_id: str, result: LessonResult):
@@ -211,17 +308,21 @@ async def complete_task(task_id: str, result: LessonResult):
         [TaskStatus.COMPLETED.value, "Processing complete ✅", result.model_dump_json(), task_id],
     )
     await db.commit()
+    _events.publish(task_id, {"type": "done", "status": TaskStatus.COMPLETED.value})
 
 
-async def fail_task(task_id: str, error: str):
+async def fail_task(task_id: str, error: str, detail: str = ""):
+    """Mark a task failed. `error` is the user-facing message; `detail` keeps
+    the technical cause in error_detail so failures are debuggable later."""
     # Truncate long error messages so they fit cleanly in the DB
     short_error = error[:500] if len(error) > 500 else error
     db = await _get_db()
     await db.execute(
-        "UPDATE tasks SET status=?, message=?, error=? WHERE id=?",
-        [TaskStatus.FAILED.value, f"Failed: {short_error}", short_error, task_id],
+        "UPDATE tasks SET status=?, message=?, error=?, error_detail=? WHERE id=?",
+        [TaskStatus.FAILED.value, f"Failed: {short_error}", short_error, detail[:2000], task_id],
     )
     await db.commit()
+    _events.publish(task_id, {"type": "done", "status": TaskStatus.FAILED.value})
 
 
 async def get_task(task_id: str) -> Optional[TaskResponse]:
@@ -424,16 +525,22 @@ async def append_partial_transcript(task_id: str, text: str) -> None:
     db = await _get_db()
     # Guard: skip write if we are already at or above the size cap to prevent
     # the column from growing unboundedly on multi-hour recordings.
-    await db.execute(
+    # RETURNING gives the post-append length so the SSE event carries the
+    # authoritative total — the client uses it to detect missed deltas.
+    async with db.execute(
         """
         UPDATE tasks
            SET partial_transcript = COALESCE(partial_transcript, '') || ?
          WHERE id = ?
            AND LENGTH(COALESCE(partial_transcript, '')) < ?
+     RETURNING LENGTH(partial_transcript)
         """,
         [text, task_id, _MAX_PARTIAL_TRANSCRIPT_CHARS],
-    )
+    ) as cursor:
+        row = await cursor.fetchone()
     await db.commit()
+    if row is not None:
+        _events.publish(task_id, {"type": "transcript", "text": text, "total": row[0]})
 
 
 async def get_partial_transcript(task_id: str, from_offset: int = 0) -> tuple[str, int]:

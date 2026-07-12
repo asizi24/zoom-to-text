@@ -15,14 +15,17 @@ python-dotenv==1.0.1
 yt-dlp>=2024.5.27
 
 # ── Google AI (Gemini — for direct audio + text summarization) ─────────────────
-google-genai>=1.0.0
+# ≥1.20 required: client.aio native async + pydantic response_schema support
+google-genai>=1.20.0
 
 # ── Transcription (Faster-Whisper — used only in WHISPER_LOCAL mode) ───────────
-# torch CPU-only is installed separately in Dockerfile to save ~1 GB of disk
+# Runs on CTranslate2 + onnxruntime — torch is NOT a dependency and is not
+# installed anywhere (it was ~1.7 GB of dead weight in the old image).
 faster-whisper==1.0.3
 
 # ── Utilities ──────────────────────────────────────────────────────────────────
-httpx==0.27.0
+# httpx ≥0.28.1 required by google-genai ≥1.20
+httpx>=0.28.1,<1.0.0
 psutil==6.0.0
 
 # ── Flashcards → Anki export ──────────────────────────────────────────────────
@@ -32,4 +35,4 @@ genanki==0.13.1
 # ── Testing ─────────────────────────────────────────────────────────────────────
 pytest==8.2.2
 pytest-asyncio==0.23.8
-anyio==4.4.0
+anyio>=4.4.0,<5

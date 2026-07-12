@@ -14,6 +14,13 @@ Two modes:
   │  • Handles very long transcripts via chunking                               │
   └─────────────────────────────────────────────────────────────────────────────┘
 
+All Gemini calls use:
+  • client.aio — native async; timeouts genuinely cancel the request instead
+    of orphaning an executor thread.
+  • Structured output (response_schema) — Gemini's constrained decoding
+    guarantees schema-valid JSON, so there is no fence-stripping, regex
+    anchoring, or escape sanitization anywhere in this module.
+
 Output is always a structured LessonResult with:
   - summary    : 3-5 paragraph overview
   - chapters   : logical topic breakdown with key points
@@ -23,54 +30,40 @@ import asyncio
 import json
 import logging
 import os
-import re
-import time
 from pathlib import Path
-from typing import Callable
+from typing import Awaitable, Callable
 
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai import types
+from pydantic import BaseModel
 
 from app.config import settings
 from app.models import Chapter, Flashcard, LessonResult, QuizQuestion
+from app.services.errors import PipelineError
 
 logger = logging.getLogger(__name__)
 
-_ProgressCallback = Callable[[int, str], None]
+_ProgressCallback = Callable[[int, str], Awaitable[None]]
 
 # ── Prompt ────────────────────────────────────────────────────────────────────────
+# The JSON *shape* is enforced by response_schema (constrained decoding), so the
+# prompt spends its budget on content quality: field semantics, code-switching,
+# timestamps, and exam design.
 
 _SYSTEM_PROMPT = """
 אתה מומחה לחינוך וניתוח שיעורים אקדמיים.
 המשימה שלך: לנתח את הקלטת השיעור ולהפיק פלט מובנה ומקיף **בעברית**.
 
-החזר אך ורק JSON תקין. אל תוסיף שום טקסט לפני או אחרי ה-JSON.
-אל תשתמש בגושי קוד markdown. רק JSON גולמי.
-
-הפורמט הנדרש:
-{
-  "summary": "סיכום מקיף של השיעור כולו (3-5 פסקאות, תסביר גם למה הנושאים חשובים)",
-  "chapters": [
-    {
-      "title": "כותרת נושא",
-      "content": "הסבר מפורט של הנושא (לפחות 3-4 משפטים)",
-      "key_points": ["נקודה מרכזית 1", "נקודה מרכזית 2", "נקודה מרכזית 3"]
-    }
-  ],
-  "quiz": [
-    {
-      "question": "שאלה שבודקת הבנה אמיתית ולא רק שינון",
-      "options": ["א. תשובה ראשונה", "ב. תשובה שנייה", "ג. תשובה שלישית", "ד. תשובה רביעית"],
-      "correct_answer": "א. תשובה ראשונה",
-      "explanation": "הסבר מדוע זו התשובה הנכונה ולמה כל אחת מהאחרות שגויה"
-    }
-  ],
-  "language": "he"
-}
-
-הנחיות לסיכום ופרקים:
-1. סיכום: כסה את כל הנושאים המרכזיים, הסבר את ה'למה' לא רק את ה'מה'
-2. פרקים: חלק לפי נושאים לוגיים כפי שהוצגו בשיעור
+תוכן השדות (המבנה נאכף אוטומטית — אתה אחראי לאיכות התוכן):
+  • summary — סיכום מקיף של השיעור כולו (3-5 פסקאות). כסה את כל הנושאים
+    המרכזיים והסבר את ה'למה', לא רק את ה'מה'.
+  • chapters — חלוקה לפי נושאים לוגיים כפי שהוצגו בשיעור. לכל פרק:
+    title (כותרת נושא), content (הסבר מפורט, לפחות 3-4 משפטים),
+    key_points (2-4 נקודות מרכזיות).
+  • quiz — מבחן אמריקאי לפי ההנחיות המפורטות בהמשך. לכל שאלה 4 options,
+    correct_answer שזהה מילה-במילה לאחת האפשרויות, ו-explanation.
+  • language — קוד השפה של הפלט ("he").
 
 ══════════════════════════════════════════════════
 הנחיה קריטית — שמירה על מונחים באנגלית (Code-Switching):
@@ -141,6 +134,8 @@ _CRITIQUE_PROMPT = """
 - accuracy   (1-5): האם התשובה הנכונה אכן נכונה ומוצדקת?
 
 avg = ממוצע ארבעת הציונים.
+בשדה index החזר את האינדקס המקורי של השאלה כפי שניתן לך.
+בשדה feedback כתוב הערה קצרה בעברית.
 
 ══════════════════════════════════════════════════
 דוגמאות few-shot:
@@ -160,30 +155,13 @@ avg = ממוצע ארבעת הציונים.
   🟡 "איזה מהבאים הוא יתרון של TCP על UDP?"
   → clarity:4, difficulty:3, distractors:3, accuracy:5 → avg:3.75
   feedback: "ניתן לשפר את האפשרויות השגויות"
-
-══════════════════════════════════════════════════
-
-החזר JSON בלבד (אין טקסט לפני או אחרי):
-{
-  "questions": [
-    {
-      "index": 0,
-      "question": "טקסט השאלה",
-      "clarity": 1-5,
-      "difficulty": 1-5,
-      "distractors": 1-5,
-      "accuracy": 1-5,
-      "avg": 1.0-5.0,
-      "feedback": "הערה קצרה (עברית)"
-    }
-  ]
-}
 """
 
 _REVISE_PROMPT_HEADER = """
 אתה מומחה לכתיבת שאלות בחינה ברמה אקדמית.
 קיבלת מבחן שעבר ביקורת — חלק מהשאלות קיבלו ציון ממוצע נמוך מ-THRESHOLD_PLACEHOLDER.
 עליך לכתוב מחדש את השאלות שסומנו כ-NEEDS_REVISION, תוך שמירה על השאלות הטובות כמות שהן.
+החזר את רשימת כל השאלות המעודכנות — כולל OK, כולל NEEDS_REVISION.
 
 חוקי שכתוב:
   • כל שאלה שתחליף את NEEDS_REVISION חייבת לבדוק הבנה, יישום, ניתוח — לא שינון
@@ -196,14 +174,61 @@ _REVISE_PROMPT_HEADER = """
 
 מבחן מקורי עם סימון NEEDS_REVISION:
 """
-# NOTE: We intentionally do NOT use .format() for this prompt because both
-# the exam JSON and the summary may contain curly braces, which would cause
-# KeyError. We build the final prompt by simple string concatenation instead.
-_REVISE_PROMPT_SUFFIX = """
 
-החזר JSON בלבד (אין טקסט לפני או אחרי):
-{"quiz": [<רשימת כל השאלות המעודכנות, כולל OK, כולל NEEDS_REVISION>]}
-"""
+
+# ── Response schemas (constrained decoding) ───────────────────────────────────────
+# Dedicated schemas rather than the app models: LessonResult carries fields the
+# model must never fill (transcript, flashcards, exam_critique_log), and here
+# every field is required so Gemini always emits it.
+
+class _ChapterSchema(BaseModel):
+    title: str
+    content: str
+    key_points: list[str]
+
+
+class _QuizSchema(BaseModel):
+    question: str
+    options: list[str]
+    correct_answer: str
+    explanation: str
+
+
+class _LessonSchema(BaseModel):
+    summary: str
+    chapters: list[_ChapterSchema]
+    quiz: list[_QuizSchema]
+    language: str
+
+
+class _CritiqueItemSchema(BaseModel):
+    index: int
+    question: str
+    clarity: int
+    difficulty: int
+    distractors: int
+    accuracy: int
+    avg: float
+    feedback: str
+
+
+class _CritiqueSchema(BaseModel):
+    questions: list[_CritiqueItemSchema]
+
+
+class _RevisedQuizSchema(BaseModel):
+    quiz: list[_QuizSchema]
+
+
+class _FlashcardSchema(BaseModel):
+    front: str
+    back: str
+    tags: list[str]
+
+
+class _FlashcardsSchema(BaseModel):
+    flashcards: list[_FlashcardSchema]
+
 
 # ── Client (singleton) ────────────────────────────────────────────────────────────
 
@@ -230,198 +255,129 @@ def _get_client() -> genai.Client:
 
 # ── Generation config ─────────────────────────────────────────────────────────────
 
-# Attempt to disable thinking on Gemini 2.5 Flash so the model doesn't emit
-# reasoning text as preamble before the JSON.  ThinkingConfig was added in
-# google-genai ≥1.5 and the exact constructor signature varies — wrap in
-# try/except so a missing or mis-versioned ThinkingConfig never crashes the app.
-try:
-    _thinking_cfg = (
-        types.ThinkingConfig(thinking_budget=0)
-        if hasattr(types, "ThinkingConfig")
-        else None
-    )
-except Exception:
-    _thinking_cfg = None
-
-_GEN_CONFIG = types.GenerateContentConfig(
+# thinking_budget=0 disables Gemini 2.5 Flash reasoning preamble — combined with
+# response_schema, the response body is exactly the requested JSON.
+_BASE_KWARGS = dict(
     temperature=0.3,
     max_output_tokens=65536,
-    **({} if _thinking_cfg is None else {"thinking_config": _thinking_cfg}),
+    thinking_config=types.ThinkingConfig(thinking_budget=0),
 )
 
-# Timeout for each async Gemini call (10 minutes)
-_GEMINI_TIMEOUT = 600.0
+
+def _json_config(system_instruction: str | None, schema: type[BaseModel]) -> types.GenerateContentConfig:
+    return types.GenerateContentConfig(
+        **_BASE_KWARGS,
+        system_instruction=system_instruction,
+        response_mime_type="application/json",
+        response_schema=schema,
+    )
 
 
-# ── Retry helper ──────────────────────────────────────────────────────────────────
+_LESSON_CONFIG = _json_config(_SYSTEM_PROMPT, _LessonSchema)
+_CRITIQUE_CONFIG = _json_config(_CRITIQUE_PROMPT, _CritiqueSchema)
+_REVISE_CONFIG = _json_config(None, _RevisedQuizSchema)
 
-def _generate_with_retry(client: genai.Client, contents, max_retries: int = 3):
+# Timeout for each individual Gemini call
+_GEMINI_TIMEOUT = 600.0   # 10 minutes — full lesson generation
+_ASK_TIMEOUT = 120.0      # 2 minutes — chat answers should be fast
+_FLASHCARDS_TIMEOUT = 180.0
+
+
+# ── Generation helpers ────────────────────────────────────────────────────────────
+
+async def _generate(
+    contents,
+    config: types.GenerateContentConfig,
+    max_retries: int = 3,
+    timeout: float = _GEMINI_TIMEOUT,
+):
     """
-    Exponential backoff with error classification.
-    Rate-limit (429/quota) → longer backoff + user-friendly raise.
-    Server errors (5xx) → standard backoff + retry.
-    Other errors → fail immediately.
+    One Gemini call with typed retry classification and a real timeout.
+    429 → long backoff; 5xx → standard backoff; anything else fails immediately.
+    asyncio.timeout cancels the underlying HTTP request — no orphaned work.
     """
+    client = _get_client()
     for attempt in range(max_retries):
         try:
-            return client.models.generate_content(
-                model=settings.gemini_model,
-                contents=contents,
-                config=_GEN_CONFIG,
-            )
-        except Exception as exc:
-            exc_str = str(exc)
-            exc_low = exc_str.lower()
-            is_rate_limit = "429" in exc_str or "quota" in exc_low or "rate limit" in exc_low
-            is_server_error = any(c in exc_str for c in ("500", "502", "503", "504"))
-            is_retriable = is_rate_limit or is_server_error
-
+            async with asyncio.timeout(timeout):
+                return await client.aio.models.generate_content(
+                    model=settings.gemini_model,
+                    contents=contents,
+                    config=config,
+                )
+        except TimeoutError as exc:
+            raise PipelineError(
+                f"⏱️ Gemini לא הגיב תוך {int(timeout // 60)} דקות — נסה שוב",
+                detail=f"generate_content timed out after {timeout}s",
+            ) from exc
+        except genai_errors.APIError as exc:
+            code = exc.code or 0
+            is_rate_limit = code == 429
+            is_retriable = is_rate_limit or code >= 500
             if attempt == max_retries - 1 or not is_retriable:
                 if is_rate_limit:
-                    raise RuntimeError(
-                        "⚠️ מכסת ה-API של Gemini הוצתה — נסה שוב בעוד כמה דקות"
+                    raise PipelineError(
+                        "⚠️ מכסת ה-API של Gemini הוצתה — נסה שוב בעוד כמה דקות",
+                        detail=str(exc),
                     ) from exc
-                raise
-
+                raise PipelineError(
+                    "שגיאה בתקשורת עם Gemini — נסה שוב",
+                    detail=str(exc),
+                ) from exc
             wait = (4 if is_rate_limit else 2) ** attempt
             logger.warning(
                 f"Gemini {'rate-limit' if is_rate_limit else 'server'} error "
                 f"(attempt {attempt + 1}/{max_retries}), retrying in {wait}s: {exc}"
             )
-            time.sleep(wait)
+            await asyncio.sleep(wait)
 
 
-# ── Parsing ───────────────────────────────────────────────────────────────────────
-
-def _response_text(response) -> str:
+async def _generate_structured(
+    contents,
+    config: types.GenerateContentConfig,
+    timeout: float = _GEMINI_TIMEOUT,
+):
     """
-    Extract only non-thinking text from a Gemini response.
-
-    Gemini 2.5 Flash with thinking enabled emits "thought" parts before the
-    actual answer.  When those are included in response.text the JSON parser
-    sees a preamble full of {…} references and breaks.
-
-    Strategy: iterate the candidate parts and skip any part where thought=True.
-    Falls back to response.text if the parts API is unavailable.
+    Generate with a response_schema config and return response.parsed (a
+    pydantic instance). Constrained decoding makes invalid output rare, but
+    truncation (max_output_tokens) can still yield parsed=None — retry once.
     """
-    try:
-        parts = response.candidates[0].content.parts
-        non_thought = [
-            p.text
-            for p in parts
-            if not getattr(p, "thought", False) and getattr(p, "text", None)
-        ]
-        if non_thought:
-            return "\n".join(non_thought)
-    except Exception:
-        pass
-    return response.text or ""
-
-
-def _sanitize_json_escapes(text: str) -> str:
-    """
-    Fix invalid JSON escape sequences that Gemini sometimes emits.
-
-    Gemini occasionally produces strings like '...path \\מ...' or '...(AWS \\X)...'
-    where a backslash precedes a character that is not a valid JSON escape sequence.
-    json.loads rejects these with 'Invalid \\escape'.
-
-    Strategy: double any stray backslash so the parser sees a literal backslash
-    followed by the character (valid JSON representing the original text).
-
-    Valid JSON single-char escapes: \\ \" / b f n r t  (slash needs no backslash prefix)
-    Valid JSON unicode escape:       \\uXXXX  (u + exactly 4 hex digits)
-    Everything else → double the backslash.
-    """
-    return re.sub(r'\\(?!["\\/bfnrtu]|u[0-9a-fA-F]{4})', r'\\\\', text)
-
-
-def _parse_response(text: str) -> LessonResult:
-    """
-    Parse Gemini JSON into a LessonResult.
-
-    Handles several real-world response formats:
-      1. Bare JSON (ideal)
-      2. ```json ... ``` code fences (Gemini sometimes adds these despite instructions)
-      3. Thinking-model output — preamble text before the JSON object
-         (Gemini 2.5 Flash can emit reasoning text before the JSON)
-      4. Any trailing text after the closing }
-      5. Invalid JSON escape sequences (backslash before Hebrew / special chars)
-
-    Strategy: strip fences → find JSON start via "summary" key → sanitize escapes → parse.
-    """
-    stripped = text.strip()
-
-    # 1. Strip markdown code fences
-    if stripped.startswith("```"):
-        lines = stripped.split("\n")
-        stripped = "\n".join(lines[1:])
-        stripped = stripped.rsplit("```", 1)[0].strip()
-
-    # 2. Find the JSON object using our known root key "summary".
-    #    Gemini thinking preamble often contains bare { } characters when
-    #    referencing JSON schemas, so find("{") picks up the wrong brace.
-    #    Searching for '{"summary":' reliably skips all preamble.
-    m = re.search(r'\{\s*"summary"\s*:', stripped)
-    json_start = m.start() if m else stripped.find("{")
-    json_end = stripped.rfind("}")
-    if json_start != -1 and json_end > json_start:
-        stripped = stripped[json_start : json_end + 1]
-
-    # 3. Fix any invalid escape sequences before handing off to json.loads.
-    #    Gemini sometimes emits \X where X is not a valid JSON escape char
-    #    (e.g. backslash before a Hebrew letter or an open-paren).
-    stripped = _sanitize_json_escapes(stripped)
-
-    try:
-        data = json.loads(stripped)
-    except json.JSONDecodeError as e:
-        logger.error(f"JSON parse error: {e}\nRaw response (first 500 chars):\n{text[:500]}")
-        raise RuntimeError(
-            "🔄 Gemini החזיר JSON לא תקין — זו שגיאה חולפת, נסה שוב"
+    for attempt in range(2):
+        response = await _generate(contents, config, timeout=timeout)
+        parsed = response.parsed
+        if parsed is not None:
+            return parsed
+        logger.warning(
+            f"Gemini returned unparseable structured output (attempt {attempt + 1}/2)"
         )
-
-    chapters = [
-        Chapter(
-            title=c.get("title", ""),
-            content=c.get("content", ""),
-            key_points=c.get("key_points", []),
-        )
-        for c in data.get("chapters", [])
-    ]
-    quiz = [
-        QuizQuestion(
-            question=q.get("question", ""),
-            options=q.get("options", []),
-            correct_answer=q.get("correct_answer", ""),
-            explanation=q.get("explanation", ""),
-        )
-        for q in data.get("quiz", [])
-    ]
-    return LessonResult(
-        summary=data.get("summary", ""),
-        chapters=chapters,
-        quiz=quiz,
-        language=data.get("language", "he"),
+    raise PipelineError(
+        "🔄 Gemini החזיר תוצאה לא תקינה — נסה שוב",
+        detail="response.parsed was None after 2 attempts (truncated output?)",
     )
 
 
-# ── Exam critique helpers ─────────────────────────────────────────────────────────
+def _to_lesson_result(parsed: _LessonSchema) -> LessonResult:
+    return LessonResult(
+        summary=parsed.summary,
+        chapters=[Chapter(**c.model_dump()) for c in parsed.chapters],
+        quiz=[QuizQuestion(**q.model_dump()) for q in parsed.quiz],
+        language=parsed.language or "he",
+    )
 
-def critique_exam(exam: list, summary: str) -> dict:
+
+# ── Exam critique pipeline ────────────────────────────────────────────────────────
+
+async def critique_exam(exam: list, summary: str) -> dict:
     """
-    Synchronous: score each question 1-5 on 4 rubrics via Gemini.
+    Score each question 1-5 on 4 rubrics via Gemini.
 
     Returns a dict:
       {"questions": [{"index": int, "question": str, "clarity": int,
                       "difficulty": int, "distractors": int, "accuracy": int,
                       "avg": float, "feedback": str}, ...]}
 
-    Runs in a thread executor (same pattern as _summarize_*_sync).
+    Failures are non-fatal: an empty critique means the revise pass is skipped.
     """
-    client = _get_client()
-
-    # Serialize the exam for Gemini
     exam_text = json.dumps(
         [
             {
@@ -437,34 +393,22 @@ def critique_exam(exam: list, summary: str) -> dict:
         indent=2,
     )
 
-    prompt = f"{_CRITIQUE_PROMPT}\n\nשאלות המבחן:\n{exam_text}"
-    response = _generate_with_retry(client, prompt)
-    text = _response_text(response).strip()
-
-    # Strip fences if present
-    if text.startswith("```"):
-        lines = text.split("\n")
-        text = "\n".join(lines[1:]).rsplit("```", 1)[0].strip()
-
-    text = _sanitize_json_escapes(text)
     try:
-        data = json.loads(text)
-    except json.JSONDecodeError as exc:
-        logger.error(f"Critique JSON parse error: {exc}\nRaw: {text[:300]}")
-        # Non-fatal: return empty critique → revise won't run
+        parsed: _CritiqueSchema = await _generate_structured(
+            f"שאלות המבחן:\n{exam_text}", _CRITIQUE_CONFIG
+        )
+    except PipelineError as exc:
+        logger.error(f"Critique pass failed (non-fatal): {exc}")
         return {"questions": []}
+    return parsed.model_dump()
 
-    return data
 
-
-def revise_exam(exam: list, critique: dict, summary: str) -> list:
+async def revise_exam(exam: list, critique: dict, summary: str) -> list:
     """
-    Synchronous: rewrite questions whose avg score < settings.exam_critique_threshold.
-
-    Returns a new list[QuizQuestion] — preserving good questions, replacing bad ones.
-    Runs in a thread executor.
+    Rewrite questions whose avg score < settings.exam_critique_threshold.
+    Returns a new list[QuizQuestion] — preserving good questions, replacing bad
+    ones. Falls back to the original exam on any failure.
     """
-    client = _get_client()
     threshold = settings.exam_critique_threshold
 
     # Build score lookup by index
@@ -477,7 +421,7 @@ def revise_exam(exam: list, critique: dict, summary: str) -> list:
     marked = []
     for i, q in enumerate(exam):
         avg = score_by_idx.get(i, 5.0)
-        entry = {
+        marked.append({
             "index": i,
             "question": q.question,
             "options": q.options,
@@ -485,54 +429,29 @@ def revise_exam(exam: list, critique: dict, summary: str) -> list:
             "explanation": q.explanation,
             "avg_score": avg,
             "status": "NEEDS_REVISION" if avg < threshold else "OK",
-        }
-        marked.append(entry)
+        })
 
     marked_json = json.dumps(marked, ensure_ascii=False, indent=2)
 
     # Build prompt via concatenation — NOT .format() — because marked_json and summary
     # contain curly braces that would cause KeyError with Python's str.format().
     header = _REVISE_PROMPT_HEADER.replace("THRESHOLD_PLACEHOLDER", str(threshold))
-    prompt = (
-        header
-        + marked_json
-        + "\n\nסיכום השיעור להקשר:\n"
-        + summary
-        + _REVISE_PROMPT_SUFFIX
-    )
+    prompt = header + marked_json + "\n\nסיכום השיעור להקשר:\n" + summary
 
-    response = _generate_with_retry(client, prompt)
-    text = _response_text(response).strip()
-
-    # Strip fences
-    if text.startswith("```"):
-        lines = text.split("\n")
-        text = "\n".join(lines[1:]).rsplit("```", 1)[0].strip()
-
-    text = _sanitize_json_escapes(text)
     try:
-        data = json.loads(text)
-    except json.JSONDecodeError as exc:
-        logger.error(f"Revise JSON parse error: {exc}\nRaw: {text[:300]}")
-        # Non-fatal fallback: return original exam unchanged
+        parsed: _RevisedQuizSchema = await _generate_structured(prompt, _REVISE_CONFIG)
+    except PipelineError as exc:
+        logger.error(f"Revise pass failed (non-fatal, keeping original exam): {exc}")
         return exam
 
-    revised_questions = []
-    for q_data in data.get("quiz", []):
-        revised_questions.append(
-            QuizQuestion(
-                question=q_data.get("question", ""),
-                options=q_data.get("options", []),
-                correct_answer=q_data.get("correct_answer", ""),
-                explanation=q_data.get("explanation", ""),
-            )
-        )
-
-    if not revised_questions:
+    revised = [
+        QuizQuestion(**q.model_dump())
+        for q in parsed.quiz
+    ]
+    if not revised:
         logger.warning("revise_exam: Gemini returned empty quiz — keeping original")
         return exam
-
-    return revised_questions
+    return revised
 
 
 def _needs_revision(critique: dict, threshold: float) -> bool:
@@ -543,146 +462,7 @@ def _needs_revision(critique: dict, threshold: float) -> bool:
     )
 
 
-# ── Direct audio mode ─────────────────────────────────────────────────────────────
-
-def _summarize_audio_sync(
-    audio_path: str,
-    progress_cb: _ProgressCallback | None = None,
-) -> LessonResult:
-    """Upload audio to Gemini and get summary + quiz in one call."""
-    client = _get_client()
-
-    logger.info(f"Uploading audio to Gemini Files API: {audio_path}")
-    audio_file = client.files.upload(file=audio_path)
-
-    if progress_cb:
-        progress_cb(55, "✅ האודיו הועלה ל-Gemini. ממתין לעיבוד הקובץ...")
-
-    max_wait = 300
-    waited = 0
-    while audio_file.state.name == "PROCESSING":
-        if waited >= max_wait:
-            raise RuntimeError("⏱️ Gemini לא סיים לעבד את קובץ האודיו תוך 5 דקות")
-        time.sleep(5)
-        waited += 5
-        audio_file = client.files.get(name=audio_file.name)
-
-    if audio_file.state.name == "FAILED":
-        raise RuntimeError("❌ Gemini נכשל בעיבוד קובץ האודיו")
-
-    if progress_cb:
-        progress_cb(65, "🔄 Gemini עיבד את הקובץ. מייצר סיכום, פרקים ומבחן...")
-
-    logger.info("Audio processed by Gemini. Generating summary + quiz...")
-
-    if progress_cb:
-        progress_cb(72, "✍️ Gemini כותב את הסיכום והמבחן — עוד רגע...")
-
-    result = None
-    last_error = None
-    for attempt in range(2):
-        response = _generate_with_retry(client, [_SYSTEM_PROMPT, audio_file])
-        try:
-            result = _parse_response(_response_text(response))
-            break
-        except RuntimeError as e:
-            last_error = e
-            if attempt == 0:
-                logger.warning("JSON parse failed on first attempt, retrying...")
-
-    if result is None:
-        raise last_error
-
-    try:
-        client.files.delete(name=audio_file.name)
-        logger.info("Cleaned up Gemini file upload")
-    except Exception:
-        pass
-
-    # NOTE: GEMINI_DIRECT processes the full audio in one pass — Gemini sees all context
-    # (tone, pauses, emphasis) and typically produces higher-quality questions.
-    # We skip the critique pipeline here because there is no separate text transcript
-    # to attach to the critique request (the audio file was already deleted above).
-    return result
-
-
-# ── Text (transcript) mode ────────────────────────────────────────────────────────
-
-_MAX_CHUNK_CHARS = 350_000
-
-
-def _summarize_text_sync(
-    transcript: str,
-    progress_cb: _ProgressCallback | None = None,
-) -> LessonResult:
-    """
-    Send transcript text to Gemini. Handles chunking for very long classes.
-
-    When settings.enable_exam_critique=True, runs an extra two-pass quality check:
-      pass 1 — critique_exam: score each question 1-5 on 4 rubrics
-      pass 2 — revise_exam:   rewrite questions that scored below the threshold
-                               (skipped if all questions are already above threshold)
-    """
-    client = _get_client()
-
-    if len(transcript) <= _MAX_CHUNK_CHARS:
-        prompt = f"{_SYSTEM_PROMPT}\n\nתמלול השיעור:\n{transcript}"
-        result = None
-        last_error = None
-        for attempt in range(2):
-            response = _generate_with_retry(client, prompt)
-            try:
-                result = _parse_response(_response_text(response))
-                break
-            except RuntimeError as e:
-                last_error = e
-                if attempt == 0:
-                    logger.warning("JSON parse failed on first attempt, retrying...")
-        if result is None:
-            raise last_error
-
-        return _apply_critique_pipeline(result, progress_cb)
-
-    # Long transcript: chunk → partial summaries → final merge
-    chunks = [
-        transcript[i: i + _MAX_CHUNK_CHARS]
-        for i in range(0, len(transcript), _MAX_CHUNK_CHARS)
-    ]
-    n = len(chunks)
-    logger.info(f"Transcript is {len(transcript):,} chars — chunking into {n} parts")
-
-    partial_prompt = """
-    להלן חלק מתמלול שיעור. סכם את הנקודות המרכזיות בחלק זה בלבד.
-    החזר JSON עם שדות: "summary" ו-"key_points" (רשימה).
-    """
-
-    partial_summaries: list[str] = []
-    for i, chunk in enumerate(chunks, 1):
-        logger.info(f"Summarizing chunk {i}/{n}")
-        if progress_cb:
-            # Map chunk progress proportionally into the 82–88% range
-            # (leaving 88-95 for critique + revise)
-            pct = 82 + int(6 * i / n)
-            progress_cb(pct, f"🔄 מסכם חלק {i} מתוך {n}...")
-        resp = _generate_with_retry(client, f"{partial_prompt}\n\nחלק {i}:\n{chunk}")
-        partial_summaries.append(resp.text)
-
-    if progress_cb:
-        progress_cb(86, "🔗 מאחד את כל החלקים לסיכום מלא ומבחן...")
-
-    merge_prompt = (
-        f"{_SYSTEM_PROMPT}\n\n"
-        "להלן סיכומי ביניים של חלקי השיעור. "
-        "בנה מהם סיכום מלא, פרקים ומבחן אמריקאי כפי שנדרש:\n\n"
-        + "\n\n---\n\n".join(partial_summaries)
-    )
-    final_response = _generate_with_retry(client, merge_prompt)
-    result = _parse_response(_response_text(final_response))
-
-    return _apply_critique_pipeline(result, progress_cb)
-
-
-def _apply_critique_pipeline(
+async def _apply_critique_pipeline(
     result: LessonResult,
     progress_cb: _ProgressCallback | None = None,
 ) -> LessonResult:
@@ -691,7 +471,6 @@ def _apply_critique_pipeline(
 
     Mutates `result.quiz` and sets `result.exam_critique_log` in-place.
     No-ops if ENABLE_EXAM_CRITIQUE=False or the exam is empty.
-    Safe to call from any sync context (runs in a thread executor).
     """
     if not settings.enable_exam_critique or not result.quiz:
         return result
@@ -704,9 +483,9 @@ def _apply_critique_pipeline(
 
     # ── Pass 1: Critique ──────────────────────────────────────────────────────
     if progress_cb:
-        progress_cb(90, "🔍 בודק איכות שאלות המבחן...")
+        await progress_cb(90, "🔍 בודק איכות שאלות המבחן...")
 
-    critique = critique_exam(result.quiz, result.summary)
+    critique = await critique_exam(result.quiz, result.summary)
     result.exam_critique_log = critique  # always save for debugging
 
     # Log per-question scores
@@ -726,48 +505,143 @@ def _apply_critique_pipeline(
             f"(below threshold {threshold})"
         )
         if progress_cb:
-            progress_cb(95, f"✏️ משפר {low_count} שאלות שלא עמדו בסף האיכות...")
+            await progress_cb(95, f"✏️ משפר {low_count} שאלות שלא עמדו בסף האיכות...")
 
-        revised_quiz = revise_exam(result.quiz, critique, result.summary)
-        result.quiz = revised_quiz
+        result.quiz = await revise_exam(result.quiz, critique, result.summary)
     else:
         logger.info("All questions above threshold — skipping revise pass")
         if progress_cb:
-            progress_cb(95, "✅ כל שאלות המבחן עברו את בדיקת האיכות")
+            await progress_cb(95, "✅ כל שאלות המבחן עברו את בדיקת האיכות")
 
     return result
 
 
-# ── Async wrappers ────────────────────────────────────────────────────────────────
+# ── Direct audio mode ─────────────────────────────────────────────────────────────
 
 async def summarize_audio(
     audio_path: str,
     progress_cb: _ProgressCallback | None = None,
 ) -> LessonResult:
-    """Async: upload audio directly to Gemini (GEMINI_DIRECT mode)."""
-    loop = asyncio.get_running_loop()
+    """Upload audio to Gemini and get summary + quiz in one call (GEMINI_DIRECT)."""
+    client = _get_client()
+
+    logger.info(f"Uploading audio to Gemini Files API: {audio_path}")
     try:
-        return await asyncio.wait_for(
-            loop.run_in_executor(None, _summarize_audio_sync, audio_path, progress_cb),
-            timeout=_GEMINI_TIMEOUT,
+        async with asyncio.timeout(_GEMINI_TIMEOUT):
+            audio_file = await client.aio.files.upload(file=audio_path)
+
+            if progress_cb:
+                await progress_cb(55, "✅ האודיו הועלה ל-Gemini. ממתין לעיבוד הקובץ...")
+
+            max_wait = 300
+            waited = 0
+            while audio_file.state.name == "PROCESSING":
+                if waited >= max_wait:
+                    raise PipelineError("⏱️ Gemini לא סיים לעבד את קובץ האודיו תוך 5 דקות")
+                await asyncio.sleep(5)
+                waited += 5
+                audio_file = await client.aio.files.get(name=audio_file.name)
+
+            if audio_file.state.name == "FAILED":
+                raise PipelineError("❌ Gemini נכשל בעיבוד קובץ האודיו")
+    except TimeoutError as exc:
+        raise PipelineError(
+            "⏱️ העלאת האודיו ל-Gemini לא הסתיימה תוך 10 דקות — נסה שוב",
+            detail="Files API upload/processing timed out",
+        ) from exc
+
+    if progress_cb:
+        await progress_cb(65, "🔄 Gemini עיבד את הקובץ. מייצר סיכום, פרקים ומבחן...")
+
+    logger.info("Audio processed by Gemini. Generating summary + quiz...")
+
+    if progress_cb:
+        await progress_cb(72, "✍️ Gemini כותב את הסיכום והמבחן — עוד רגע...")
+
+    try:
+        parsed = await _generate_structured(
+            ["נתח את הקלטת השיעור המצורפת והפק את הפלט הנדרש.", audio_file],
+            _LESSON_CONFIG,
         )
-    except asyncio.TimeoutError:
-        raise TimeoutError("⏱️ Gemini לא הגיב תוך 10 דקות — נסה שוב")
+    finally:
+        try:
+            await client.aio.files.delete(name=audio_file.name)
+            logger.info("Cleaned up Gemini file upload")
+        except Exception:
+            pass
+
+    # NOTE: GEMINI_DIRECT processes the full audio in one pass — Gemini sees all context
+    # (tone, pauses, emphasis) and typically produces higher-quality questions.
+    # We skip the critique pipeline here because there is no separate text transcript
+    # to attach to the critique request (the audio file was already deleted above).
+    return _to_lesson_result(parsed)
+
+
+# ── Text (transcript) mode ────────────────────────────────────────────────────────
+
+_MAX_CHUNK_CHARS = 350_000
 
 
 async def summarize_transcript(
     transcript: str,
     progress_cb: _ProgressCallback | None = None,
 ) -> LessonResult:
-    """Async: summarize a text transcript (WHISPER_LOCAL / WHISPER_API mode)."""
-    loop = asyncio.get_running_loop()
-    try:
-        return await asyncio.wait_for(
-            loop.run_in_executor(None, _summarize_text_sync, transcript, progress_cb),
-            timeout=_GEMINI_TIMEOUT,
+    """
+    Summarize a text transcript (WHISPER_LOCAL / WHISPER_API / IVRIT_AI modes).
+    Handles chunking for very long classes, then runs the critique pipeline.
+    """
+    if len(transcript) <= _MAX_CHUNK_CHARS:
+        parsed = await _generate_structured(
+            f"תמלול השיעור:\n{transcript}", _LESSON_CONFIG
         )
-    except asyncio.TimeoutError:
-        raise TimeoutError("⏱️ Gemini לא הגיב תוך 10 דקות — נסה שוב")
+        result = _to_lesson_result(parsed)
+    else:
+        result = await _summarize_long_transcript(transcript, progress_cb)
+
+    return await _apply_critique_pipeline(result, progress_cb)
+
+
+async def _summarize_long_transcript(
+    transcript: str,
+    progress_cb: _ProgressCallback | None = None,
+) -> LessonResult:
+    """Long transcript: chunk → plain-text partial summaries → structured merge."""
+    chunks = [
+        transcript[i: i + _MAX_CHUNK_CHARS]
+        for i in range(0, len(transcript), _MAX_CHUNK_CHARS)
+    ]
+    n = len(chunks)
+    logger.info(f"Transcript is {len(transcript):,} chars — chunking into {n} parts")
+
+    # Intermediate summaries are plain text (no schema) — they only feed the
+    # final merge prompt, so JSON here would be pointless overhead.
+    partial_config = types.GenerateContentConfig(**_BASE_KWARGS)
+    partial_prompt = (
+        "להלן חלק מתמלול שיעור. סכם בטקסט חופשי את הנקודות המרכזיות "
+        "בחלק זה בלבד: פסקה-שתיים של סיכום ואז רשימת נקודות מפתח. "
+        "שמור מונחים באנגלית וסימוני זמן [MM:SS] כפי שהם."
+    )
+
+    partial_summaries: list[str] = []
+    for i, chunk in enumerate(chunks, 1):
+        logger.info(f"Summarizing chunk {i}/{n}")
+        if progress_cb:
+            # Map chunk progress proportionally into the 82–88% range
+            # (leaving 88-95 for critique + revise)
+            await progress_cb(82 + int(6 * i / n), f"🔄 מסכם חלק {i} מתוך {n}...")
+        resp = await _generate(f"{partial_prompt}\n\nחלק {i}:\n{chunk}", partial_config)
+        partial_summaries.append(resp.text or "")
+
+    if progress_cb:
+        await progress_cb(86, "🔗 מאחד את כל החלקים לסיכום מלא ומבחן...")
+
+    merge_prompt = (
+        "להלן סיכומי ביניים של חלקי השיעור. "
+        "בנה מהם סיכום מלא, פרקים ומבחן אמריקאי כפי שנדרש:\n\n"
+        + "\n\n---\n\n".join(partial_summaries)
+    )
+    parsed = await _generate_structured(merge_prompt, _LESSON_CONFIG)
+    return _to_lesson_result(parsed)
 
 
 # ── Ask about lesson (chat) ───────────────────────────────────────────────────
@@ -780,27 +654,17 @@ _ASK_SYSTEM_PROMPT = """
 """
 
 
-def _ask_sync(context: str, question: str) -> str:
-    """Synchronous: send a question with lesson context to Gemini."""
-    client = _get_client()
-    prompt = f"{_ASK_SYSTEM_PROMPT}\n\nתוכן השיעור:\n{context}\n\nשאלת התלמיד: {question}"
-    response = _generate_with_retry(client, prompt)
-    return response.text
-
-
-_ASK_TIMEOUT = 120.0  # 2 minutes — chat answers should be fast
-
-
 async def ask_about_lesson(context: str, question: str) -> str:
-    """Async: answer a student question based on the lesson content."""
-    loop = asyncio.get_running_loop()
-    try:
-        return await asyncio.wait_for(
-            loop.run_in_executor(None, _ask_sync, context, question),
-            timeout=_ASK_TIMEOUT,
-        )
-    except asyncio.TimeoutError:
-        raise TimeoutError("⏱️ Gemini לא הגיב תוך 2 דקות — נסה שוב")
+    """Answer a student question based on the lesson content."""
+    config = types.GenerateContentConfig(
+        **_BASE_KWARGS, system_instruction=_ASK_SYSTEM_PROMPT
+    )
+    response = await _generate(
+        f"תוכן השיעור:\n{context}\n\nשאלת התלמיד: {question}",
+        config,
+        timeout=_ASK_TIMEOUT,
+    )
+    return response.text or ""
 
 
 # ── Streaming multi-turn chat ─────────────────────────────────────────────────────
@@ -823,88 +687,41 @@ _CHAT_SYSTEM_PROMPT = """\
 _MAX_HISTORY_TURNS = 10
 
 
-def _build_chat_contents(context: str, history: list[dict], question: str) -> list:
-    """
-    Build the contents list for a multi-turn Gemini chat call.
-    The lesson context is embedded in the first user turn as a system-style prefix
-    (google-genai's generate_content_stream does not accept a system role directly).
-    """
+def _build_chat_contents(history: list[dict], question: str) -> list:
+    """Build the contents list for a multi-turn chat call. The system prompt and
+    lesson context travel in system_instruction — no fake user/model turn pair."""
     contents = []
-
-    # First turn: system context as a user message (Gemini ignores "system" role)
-    context_turn = (
-        f"{_CHAT_SYSTEM_PROMPT}\n\n"
-        f"תוכן השיעור:\n{context[:40_000]}"  # cap at 40 k chars (~30 k tokens)
-    )
-    contents.append({"role": "user", "parts": [{"text": context_turn}]})
-    contents.append({"role": "model", "parts": [{"text": "הבנתי. אני מוכן לענות על שאלות על השיעור הזה."}]})
-
     # Recent history (trim to avoid overly long context)
     trimmed = history[-(2 * _MAX_HISTORY_TURNS):]  # 2× because user+model per turn
     for msg in trimmed:
-        role = msg.get("role", "user")
-        contents.append({"role": role, "parts": [{"text": msg.get("content", "")}]})
-
-    # Current user question
+        contents.append({
+            "role": msg.get("role", "user"),
+            "parts": [{"text": msg.get("content", "")}],
+        })
     contents.append({"role": "user", "parts": [{"text": question}]})
     return contents
 
 
-def _stream_chat_sync(
-    context: str,
-    history: list[dict],
-    question: str,
-    out_queue,  # thread-safe queue.Queue
-) -> None:
-    """
-    Blocking: calls Gemini generate_content_stream, puts each text chunk into
-    out_queue, and puts None as sentinel on completion or Exception on error.
-    """
-    import queue as _q_mod
-    client = _get_client()
-    contents = _build_chat_contents(context, history, question)
-    try:
-        for chunk in client.models.generate_content_stream(
-            model=settings.gemini_model,
-            contents=contents,
-        ):
-            text = getattr(chunk, "text", None)
-            if text:
-                out_queue.put(text)
-    except Exception as exc:
-        out_queue.put(exc)
-    finally:
-        out_queue.put(None)  # sentinel — always sent
-
-
 async def stream_chat_response(context: str, history: list[dict], question: str):
     """
-    Async generator that yields text chunks from a streaming Gemini chat call.
-
-    Architecture:
-      • _stream_chat_sync() runs in a thread executor (sync Gemini SDK).
-      • It pushes chunks into a thread-safe queue.Queue.
-      • This coroutine drains the queue using run_in_executor so it never
-        blocks the event loop.
-
-    Raises RuntimeError on Gemini errors; caller is responsible for cleanup.
+    Async generator yielding text chunks from a streaming Gemini chat call.
+    Native client.aio streaming — no executor thread, no queue bridge.
     """
-    import queue as _q_mod
-
-    loop = asyncio.get_running_loop()
-    q: _q_mod.Queue = _q_mod.Queue()
-
-    # Fire off the sync streaming in a thread — don't await, let it run concurrently
-    loop.run_in_executor(None, _stream_chat_sync, context, history, question, q)
-
-    while True:
-        # Block (in executor) until a chunk or sentinel arrives
-        item = await loop.run_in_executor(None, q.get)
-        if item is None:
-            break
-        if isinstance(item, Exception):
-            raise item
-        yield item
+    client = _get_client()
+    config = types.GenerateContentConfig(
+        **_BASE_KWARGS,
+        # Lesson context rides in the system instruction (capped at 40k chars
+        # ≈ 30k tokens) so history stays purely conversational.
+        system_instruction=f"{_CHAT_SYSTEM_PROMPT}\n\nתוכן השיעור:\n{context[:40_000]}",
+    )
+    stream = await client.aio.models.generate_content_stream(
+        model=settings.gemini_model,
+        contents=_build_chat_contents(history, question),
+        config=config,
+    )
+    async for chunk in stream:
+        if chunk.text:
+            yield chunk.text
 
 
 # ── Flashcards generation ─────────────────────────────────────────────────────
@@ -917,8 +734,8 @@ _FLASHCARDS_PROMPT = """
 קיבלת סיכום שיעור ותמלול. המשימה: הפק 15-25 כרטיסיות תרגול איכותיות בעברית.
 
 כללי כתיבת כרטיסייה:
-  ✅ "Front" — שאלה ממוקדת, מושג לזיהוי, או הנחיה קצרה (לא יותר ממשפט אחד)
-  ✅ "Back" — הסבר קצר, 1-3 משפטים. צריך לעמוד בזכות עצמו (לא "ראה סעיף...").
+  ✅ "front" — שאלה ממוקדת, מושג לזיהוי, או הנחיה קצרה (לא יותר ממשפט אחד)
+  ✅ "back" — הסבר קצר, 1-3 משפטים. צריך לעמוד בזכות עצמו (לא "ראה סעיף...").
   ✅ כל כרטיסייה בודקת רעיון אחד בלבד (atomic)
   ✅ **שמור מונחים טכניים באנגלית כפי שהם** — React, API, TCP, JWT וכו'
      לא מתורגמים גם אם יש תרגום עברי מקובל.
@@ -932,84 +749,47 @@ _FLASHCARDS_PROMPT = """
 אסור:
   ❌ כרטיסיות "רשימה" ("מנה 5 עקרונות של X") — קשה לזכור, תפצל ל-5 כרטיסיות
   ❌ כרטיסיות שהתשובה בהן "כן/לא"
-  ❌ שאלה שהתשובה שלה נכתבה מילה במילה ב-Front (רמז עצמי)
+  ❌ שאלה שהתשובה שלה נכתבה מילה במילה ב-front (רמז עצמי)
   ❌ תרגום מונחים טכניים לעברית
-
-החזר JSON גולמי בלבד, ללא markdown fences, בפורמט הזה:
-{
-  "flashcards": [
-    {"front": "...", "back": "...", "tags": ["...", "..."]}
-  ]
-}
 """
 
-
-def _parse_flashcards_response(text: str) -> list[Flashcard]:
-    """Parse Gemini flashcards JSON response into a list of Flashcard objects."""
-    stripped = text.strip()
-    if stripped.startswith("```"):
-        lines = stripped.split("\n")
-        stripped = "\n".join(lines[1:]).rsplit("```", 1)[0].strip()
-
-    # Anchor on our known root key to skip any thinking preamble
-    m = re.search(r'\{\s*"flashcards"\s*:', stripped)
-    if m:
-        stripped = stripped[m.start():]
-    json_end = stripped.rfind("}")
-    if json_end != -1:
-        stripped = stripped[: json_end + 1]
-
-    stripped = _sanitize_json_escapes(stripped)
-    try:
-        data = json.loads(stripped)
-    except json.JSONDecodeError as exc:
-        logger.error(f"Flashcards JSON parse error: {exc}\nRaw (first 300): {text[:300]}")
-        return []
-
-    cards = []
-    for c in data.get("flashcards", []):
-        front = (c.get("front") or "").strip()
-        back  = (c.get("back") or "").strip()
-        if not front or not back:
-            continue
-        tags = [str(t).strip() for t in c.get("tags", []) if str(t).strip()]
-        cards.append(Flashcard(front=front, back=back, tags=tags))
-    return cards
-
-
-def _generate_flashcards_sync(summary: str, transcript: str | None) -> list[Flashcard]:
-    """Blocking: one Gemini call to produce 15-25 flashcards. Runs in executor."""
-    client = _get_client()
-
-    # Build context — prefer summary; include transcript head for richer detail
-    context_parts = [f"סיכום השיעור:\n{summary}"]
-    if transcript:
-        # Cap at 30k chars — flashcards don't need the full 2-hour transcript
-        context_parts.append(f"\nקטע מהתמלול:\n{transcript[:30_000]}")
-    context = "\n\n".join(context_parts)
-
-    prompt = f"{_FLASHCARDS_PROMPT}\n\n{context}"
-    response = _generate_with_retry(client, prompt)
-    text = _response_text(response)
-    return _parse_flashcards_response(text)
-
-
-_FLASHCARDS_TIMEOUT = 180.0  # 3 minutes
+_FLASHCARDS_CONFIG = _json_config(_FLASHCARDS_PROMPT, _FlashcardsSchema)
 
 
 async def generate_flashcards(
     summary: str,
     transcript: str | None = None,
 ) -> list[Flashcard]:
-    """Async: generate 15-25 flashcards from a lesson summary (+ optional transcript)."""
+    """Generate 15-25 flashcards from a lesson summary (+ optional transcript).
+
+    Never raises — flashcards are a bonus step; failures return an empty list
+    and the processor keeps the completed lesson.
+    """
     if not summary.strip():
         return []
-    loop = asyncio.get_running_loop()
+
+    # Build context — prefer summary; include transcript head for richer detail
+    context_parts = [f"סיכום השיעור:\n{summary}"]
+    if transcript:
+        # Cap at 30k chars — flashcards don't need the full 2-hour transcript
+        context_parts.append(f"\nקטע מהתמלול:\n{transcript[:30_000]}")
+
     try:
-        return await asyncio.wait_for(
-            loop.run_in_executor(None, _generate_flashcards_sync, summary, transcript),
+        parsed: _FlashcardsSchema = await _generate_structured(
+            "\n\n".join(context_parts),
+            _FLASHCARDS_CONFIG,
             timeout=_FLASHCARDS_TIMEOUT,
         )
-    except asyncio.TimeoutError:
-        logger.warning("Flashcards generation timed out — returning empty list")
+    except PipelineError as exc:
+        logger.warning(f"Flashcards generation failed (non-fatal): {exc}")
         return []
+
+    return [
+        Flashcard(
+            front=c.front.strip(),
+            back=c.back.strip(),
+            tags=[t.strip() for t in c.tags if t.strip()],
+        )
+        for c in parsed.flashcards
+        if c.front.strip() and c.back.strip()
+    ]

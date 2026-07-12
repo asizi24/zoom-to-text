@@ -2,9 +2,10 @@
 FastAPI application entry point.
 
 Lifespan handles:
-  1. Database initialization (creates tables, marks crashed tasks as failed)
-  2. GCP credentials setup
-  3. Background idle-watcher (unloads Whisper from RAM when not in use)
+  1. Database initialization (creates tables + migrations)
+  2. Pipeline worker pool startup (re-enqueues tasks interrupted by restart)
+  3. GCP credentials setup
+  4. Background idle-watcher (unloads Whisper from RAM when not in use)
 """
 import asyncio
 import logging
@@ -22,7 +23,7 @@ from app import state
 from app.api.routes import router
 from app.api.auth import router as auth_router
 from app.config import settings
-from app.services import transcriber
+from app.services import transcriber, worker
 
 logging.basicConfig(
     level=logging.INFO,
@@ -56,8 +57,11 @@ async def lifespan(app: FastAPI):
     logger.info(f"  {settings.app_title} — starting up")
     logger.info("=" * 60)
 
-    # Initialize SQLite (creates tables + marks interrupted tasks as failed)
+    # Initialize SQLite (creates tables + runs migrations)
     await state.init_db()
+
+    # Start the pipeline worker pool — re-enqueues tasks interrupted by restart
+    await worker.start()
 
     # Configure GCP credentials for Vertex AI / Gemini
     creds_path = settings.google_application_credentials
@@ -86,6 +90,7 @@ async def lifespan(app: FastAPI):
 
     # ── Shutdown ──
     watcher.cancel()
+    await worker.stop()
     await state.close_db()
     logger.info("Server shutting down — goodbye")
 

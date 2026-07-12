@@ -12,8 +12,14 @@ services:
 
       # ── Whisper model cache ─────────────────────────────────────────────────
       # The large-v3 model (~3 GB) is downloaded once and reused across rebuilds.
-      # Without this, every `docker-compose up --build` re-downloads the model.
-      - whisper_model_cache:/root/.cache/faster_whisper
+      # Target must match WHISPER_CACHE_DIR in the Dockerfile — the app runs as
+      # appuser, so /root/... is never read (that was a silent cache miss).
+      - whisper_model_cache:/app/models
+
+      # ── Frontend hot reload (local dev) ─────────────────────────────────────
+      # Read-only bind mount over the baked-in copy: edits to static/ show up
+      # on browser refresh with no rebuild. Python code stays baked-in.
+      - ./static:/app/static:ro
 
     env_file:
       - .env
@@ -24,20 +30,27 @@ services:
       # - WHISPER_MODEL=medium
       # - AUTO_SHUTDOWN_IDLE_MINUTES=30
 
-    # ── Resource limits ─────────────────────────────────────────────────────────
-    # Prevents the container from consuming all RAM on a shared EC2 instance.
-    # Whisper large-v3 on CPU needs ~4 GB; medium needs ~2 GB.
-    # Adjust based on your instance type (m7i-flex.large = 8 GB RAM).
+    # ── Resources ───────────────────────────────────────────────────────────────
+    # Local workstation profile (128 GB RAM, RTX 4070 Ti). The devices block
+    # passes the NVIDIA GPU through (Docker Desktop WSL2 — needs only the
+    # Windows NVIDIA driver). faster-whisper then runs CUDA/float16 via
+    # WHISPER_DEVICE=auto. If `docker compose up` fails with "could not select
+    # device driver nvidia", remove the devices block — the app falls back to
+    # CPU automatically.
     deploy:
       resources:
         limits:
-          memory: 6g
-          cpus: '3.5'
+          memory: 24g
+          cpus: '8'
         reservations:
-          memory: 512m
+          memory: 2g
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
 
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)"]
       interval: 30s
       timeout: 10s
       retries: 3

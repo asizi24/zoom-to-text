@@ -14,103 +14,152 @@ Whisper transcription service — two backends:
       1. Silence removal  — strips dead air with ffmpeg silenceremove
       2. Chunking         — splits into ≤13-min pieces (safely under the limit)
     Each chunk is sent independently; transcripts are joined in order.
+
+Model lifecycle:
+  A single _ModelSlot holds at most ONE Whisper variant (vanilla or ivrit-ai)
+  in RAM at a time. The slot refcounts active transcriptions so the idle
+  watcher can never evict a model that is mid-transcription, and switching
+  variants evicts the old model before loading the new one — worst-case
+  resident memory is exactly one model.
 """
 import asyncio
 import gc
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import httpx
 
 from app.config import settings
+from app.models import TaskStatus
 from app.services import audio_preprocessor
+from app.services.errors import PipelineError
 
 logger = logging.getLogger(__name__)
 
-
-# ── Local model state ─────────────────────────────────────────────────────────
-# Two independent caches — one for vanilla faster-whisper, one for ivrit-ai's
-# Hebrew-tuned model. They are loaded on demand and unloaded separately after
-# _IDLE_THRESHOLD seconds of inactivity. Keeping them separate (rather than
-# one "active model" slot) lets users switch modes per task without paying
-# a reload penalty each time.
-
-_model = None
-_last_used: float = 0.0
-_model_lock = asyncio.Lock()
-
-_ivrit_model = None
-_ivrit_last_used: float = 0.0
-_ivrit_lock = asyncio.Lock()
-
 _IDLE_THRESHOLD = settings.auto_shutdown_idle_minutes * 60
 
+# Dedicated 1-thread pool for model loading + transcription. Serializes the
+# CPU-bound Whisper work and keeps it from starving the default executor
+# used by downloads, DB writes, and Gemini uploads.
+_whisper_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="whisper")
 
-# ── Model lifecycle (local only) ──────────────────────────────────────────────
 
-def _load_model_sync():
-    """Blocking: load the Faster-Whisper model. Runs in a thread executor."""
+# ── Model lifecycle ───────────────────────────────────────────────────────────
+
+class _ModelSlot:
+    """At most one Whisper variant in RAM; never evicted while in use."""
+
+    def __init__(self):
+        self._model = None
+        self._key: str | None = None
+        self._active = 0
+        self._last_used = 0.0
+        self._cond = asyncio.Condition()
+
+    async def acquire(self, key: str, loader):
+        """Return the model for `key`, loading it (and evicting any other
+        variant) if needed. Callers MUST pair with release()."""
+        async with self._cond:
+            # A different variant is mid-transcription — wait for it to finish
+            # rather than pulling its model out from under it.
+            while self._model is not None and self._key != key and self._active > 0:
+                await self._cond.wait()
+            if self._key != key:
+                self._evict()
+                loop = asyncio.get_running_loop()
+                self._model = await loop.run_in_executor(_whisper_pool, loader)
+                self._key = key
+            self._active += 1
+            self._last_used = time.time()
+            return self._model
+
+    async def release(self):
+        async with self._cond:
+            self._active = max(0, self._active - 1)
+            self._last_used = time.time()
+            self._cond.notify_all()
+
+    async def unload_if_idle(self, threshold_s: float):
+        async with self._cond:
+            if self._model is None or self._active > 0:
+                return
+            idle = time.time() - self._last_used
+            if idle > threshold_s:
+                logger.info(
+                    f"Model '{self._key}' idle for {idle / 60:.1f} min "
+                    f"(threshold: {threshold_s / 60:.0f} min) — unloading"
+                )
+                self._evict()
+
+    def _evict(self):
+        if self._model is not None:
+            logger.info(f"Unloading model '{self._key}' from RAM")
+        self._model = None
+        self._key = None
+        gc.collect()
+
+
+_slot = _ModelSlot()
+
+
+def _resolve_device() -> tuple[str, str]:
+    """
+    Resolve (device, compute_type) from settings, honoring "auto".
+
+    CUDA detection goes through ctranslate2 (faster-whisper's runtime) rather
+    than torch — torch is deliberately not installed (see Dockerfile). When
+    the container has no GPU (or the CUDA libs are missing) this silently
+    falls back to CPU/int8, so the same image runs anywhere.
+    """
+    device = settings.whisper_device.lower()
+    compute = settings.whisper_compute_type.lower()
+
+    if device == "auto":
+        cuda_available = False
+        try:
+            import ctranslate2
+            cuda_available = ctranslate2.get_cuda_device_count() > 0
+        except Exception as exc:
+            logger.info(f"CUDA probe failed ({exc}) — using CPU")
+        device = "cuda" if cuda_available else "cpu"
+
+    if compute == "auto":
+        compute = "float16" if device == "cuda" else "int8"
+
+    return device, compute
+
+
+def _load_whisper(model_id: str, label: str):
+    """Blocking: load a faster-whisper model. Runs in the whisper pool."""
     from faster_whisper import WhisperModel
 
-    cache_dir = Path.home() / ".cache" / "faster_whisper"
-    logger.info(
-        f"Loading Whisper model '{settings.whisper_model}' "
-        f"on {settings.whisper_device} ({settings.whisper_compute_type})..."
-    )
+    device, compute = _resolve_device()
+    logger.info(f"Loading {label} model '{model_id}' on {device} ({compute})...")
     model = WhisperModel(
-        settings.whisper_model,
-        device=settings.whisper_device,
-        compute_type=settings.whisper_compute_type,
-        download_root=str(cache_dir),
+        model_id,
+        device=device,
+        compute_type=compute,
+        download_root=str(settings.whisper_cache_dir),
     )
-    logger.info("✅ Whisper model loaded")
+    logger.info(f"✅ {label} model loaded on {device}")
     return model
 
 
-async def _get_model():
-    """Return the loaded model, loading it if necessary (async, thread-safe)."""
-    global _model, _last_used
-    async with _model_lock:
-        if _model is None:
-            loop = asyncio.get_running_loop()
-            _model = await loop.run_in_executor(None, _load_model_sync)
-        _last_used = time.time()
-    return _model
+def _load_model_sync():
+    return _load_whisper(settings.whisper_model, "Whisper")
+
+
+def _load_ivrit_model_sync():
+    return _load_whisper(settings.ivrit_ai_model, "ivrit-ai")
 
 
 async def unload_model_if_idle():
-    """
-    Called every 60s by the idle watcher in main.py.
-    Frees RAM by deleting models that haven't been used recently.
-    Handles both the vanilla Whisper cache and the ivrit-ai cache independently.
-    """
-    global _model, _last_used, _ivrit_model, _ivrit_last_used
-
-    if _model is not None:
-        idle = time.time() - _last_used
-        if idle > _IDLE_THRESHOLD:
-            async with _model_lock:
-                if _model is not None:
-                    logger.info(
-                        f"Whisper idle for {idle / 60:.1f} min "
-                        f"(threshold: {settings.auto_shutdown_idle_minutes} min) — unloading"
-                    )
-                    del _model
-                    _model = None
-                    gc.collect()
-
-    if _ivrit_model is not None:
-        idle = time.time() - _ivrit_last_used
-        if idle > _IDLE_THRESHOLD:
-            async with _ivrit_lock:
-                if _ivrit_model is not None:
-                    logger.info(
-                        f"ivrit-ai idle for {idle / 60:.1f} min — unloading"
-                    )
-                    del _ivrit_model
-                    _ivrit_model = None
-                    gc.collect()
+    """Called every 60s by the idle watcher in main.py. Frees RAM by evicting
+    the loaded model once it has been idle past the threshold. A model with an
+    active transcription is never evicted."""
+    await _slot.unload_if_idle(_IDLE_THRESHOLD)
 
 
 # ── LOCAL transcription ───────────────────────────────────────────────────────
@@ -120,28 +169,57 @@ def _transcribe_sync(
     audio_path: str,
     language: str,
     segment_cb=None,
+    progress_cb=None,
 ) -> tuple[str, str]:
     """
-    Blocking transcription — runs in a thread executor.
+    Blocking transcription — runs in the whisper pool.
     Returns (full_transcript_text, detected_language_code).
 
     segment_cb: optional sync callable(text: str) called every ~10 segments or
     ~5 seconds so callers can stream live text to the DB for the preview panel.
+
+    progress_cb: optional sync callable(fraction: float) called every ~5 seconds
+    with how far into the recording the transcription has reached (0.0–1.0).
+    Transcription is by far the longest pipeline step — without this the task
+    progress bar sits frozen for the entire run.
     """
     lang_hint = language if language != "auto" else None
 
     segments, info = model.transcribe(
         audio_path,
         language=lang_hint,
-        beam_size=5,
-        vad_filter=True,                        # Skip silent segments
-        vad_parameters={"min_silence_duration_ms": 500},
+        # ── Accuracy ──
+        beam_size=settings.whisper_beam_size,
+        best_of=settings.whisper_best_of,
+        # Temperature ladder: greedy/beam first; only when a window fails the
+        # quality thresholds below does decoding retry at higher temperatures.
+        temperature=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+        # ── Anti-hallucination ──
+        # A window is rejected (and retried hotter) when its output is too
+        # repetitive (gzip ratio) or too improbable — the two signatures of
+        # Whisper inventing text over noise/music.
+        compression_ratio_threshold=2.4,
+        log_prob_threshold=-1.0,
+        no_speech_threshold=0.6,
+        # Decoding each window independently prevents one bad window from
+        # poisoning the rest of the lecture with repetition loops.
+        condition_on_previous_text=settings.whisper_condition_on_previous_text,
+        # Domain vocabulary hint (names, technical terms) — biases spelling.
+        initial_prompt=settings.whisper_initial_prompt or None,
+        # ── VAD: skip silence entirely instead of transcribing it ──
+        vad_filter=True,
+        vad_parameters={
+            "min_silence_duration_ms": settings.whisper_vad_min_silence_ms,
+            "speech_pad_ms": settings.whisper_vad_speech_pad_ms,
+        },
         word_timestamps=False,                  # Saves memory
     )
+    total_s = float(getattr(info, "duration", 0) or 0)
 
     full_texts: list[str] = []
     buffer: list[str] = []
     last_flush = time.time()
+    last_progress = time.time()
 
     for seg in segments:
         text = seg.text.strip()
@@ -163,11 +241,82 @@ def _transcribe_sync(
                 buffer = []
                 last_flush = now
 
+        if progress_cb is not None and total_s > 0:
+            now = time.time()
+            if now - last_progress >= 5.0:
+                progress_cb(min(float(getattr(seg, "end", 0) or 0) / total_s, 1.0))
+                last_progress = now
+
     # Final flush — make sure nothing is left in the buffer
     if segment_cb is not None and buffer:
         segment_cb(" ".join(buffer) + " ")
 
     return " ".join(full_texts), info.language
+
+
+def _make_segment_cb(task_id: str | None, loop: asyncio.AbstractEventLoop):
+    """
+    Build a thread-safe segment callback that fires-and-forgets partial
+    transcript writes into the event loop, or None when no task_id is given.
+    Errors from append_partial_transcript are logged via a done-callback so
+    they don't silently disappear inside the Future.
+    """
+    if task_id is None:
+        return None
+
+    from app import state as _state  # local import avoids circular at module level
+
+    def segment_cb(text: str, _tid=task_id, _loop=loop) -> None:
+        future = asyncio.run_coroutine_threadsafe(
+            _state.append_partial_transcript(_tid, text),
+            _loop,
+        )
+        future.add_done_callback(
+            lambda f: f.exception() and logger.warning(
+                "partial transcript write failed for %s: %s", _tid, f.exception()
+            )
+        )
+
+    return segment_cb
+
+
+# Transcription owns the 50→78 slice of the progress bar; the summarizer
+# picks up at 80 (see processor.py milestones), so 78 is the safe ceiling.
+_PROGRESS_FLOOR = 50
+_PROGRESS_CEIL  = 78
+
+
+def _make_progress_cb(task_id: str | None, loop: asyncio.AbstractEventLoop):
+    """
+    Build a thread-safe progress callback mapping audio position (0.0–1.0)
+    into the task's progress column, same fire-and-forget pattern as
+    _make_segment_cb. Skips writes that wouldn't change the integer percent.
+    """
+    if task_id is None:
+        return None
+
+    from app import state as _state  # local import avoids circular at module level
+
+    last_pct = _PROGRESS_FLOOR
+
+    def progress_cb(fraction: float, _tid=task_id, _loop=loop) -> None:
+        nonlocal last_pct
+        pct = _PROGRESS_FLOOR + int(fraction * (_PROGRESS_CEIL - _PROGRESS_FLOOR))
+        if pct <= last_pct:
+            return
+        last_pct = pct
+        message = f"🎙️ מתמלל... {int(fraction * 100)}% מההקלטה"
+        future = asyncio.run_coroutine_threadsafe(
+            _state.update_task(_tid, TaskStatus.TRANSCRIBING, pct, message),
+            _loop,
+        )
+        future.add_done_callback(
+            lambda f: f.exception() and logger.warning(
+                "progress update failed for %s: %s", _tid, f.exception()
+            )
+        )
+
+    return progress_cb
 
 
 async def transcribe(
@@ -182,38 +331,51 @@ async def transcribe(
     Pass task_id to enable live transcript preview: each segment batch is
     appended to the task's partial_transcript column so the UI can poll it.
     """
-    from app import state as _state  # local import avoids circular at module level
-
-    model = await _get_model()
-    loop  = asyncio.get_running_loop()
-
-    # Build a thread-safe segment callback that fires-and-forgets into the event loop.
-    # Errors from append_partial_transcript are logged via a done-callback so they
-    # don't silently disappear inside the Future.
-    if task_id is not None:
-        def segment_cb(text: str, _tid=task_id, _loop=loop) -> None:
-            future = asyncio.run_coroutine_threadsafe(
-                _state.append_partial_transcript(_tid, text),
-                _loop,
-            )
-            future.add_done_callback(
-                lambda f: f.exception() and logger.warning(
-                    "partial transcript write failed for %s: %s", _tid, f.exception()
-                )
-            )
-    else:
-        segment_cb = None
-
-    logger.info(f"[Local Whisper] Transcribing: {audio_path} (language: {language})")
-    transcript, detected_lang = await loop.run_in_executor(
-        None, _transcribe_sync, model, audio_path, language, segment_cb
-    )
-
-    global _last_used
-    _last_used = time.time()
+    model = await _slot.acquire(f"whisper:{settings.whisper_model}", _load_model_sync)
+    try:
+        loop = asyncio.get_running_loop()
+        logger.info(f"[Local Whisper] Transcribing: {audio_path} (language: {language})")
+        transcript, detected_lang = await loop.run_in_executor(
+            _whisper_pool, _transcribe_sync, model, audio_path, language,
+            _make_segment_cb(task_id, loop), _make_progress_cb(task_id, loop),
+        )
+    finally:
+        await _slot.release()
 
     logger.info(
         f"[Local Whisper] Done: {len(transcript):,} chars, "
+        f"detected language: {detected_lang}"
+    )
+    return transcript, detected_lang
+
+
+async def transcribe_ivrit_ai(
+    audio_path: str,
+    language: str = "he",
+    task_id: str | None = None,
+) -> tuple[str, str]:
+    """
+    Transcribe with ivrit-ai's Hebrew-tuned Whisper model.
+
+    Output format is identical to transcribe() (plain-text concatenation of
+    segments, same segment_cb streaming contract) — this is the contract the
+    live-preview panel and Feature 7's timestamp-click flow rely on.
+    """
+    model = await _slot.acquire(f"ivrit:{settings.ivrit_ai_model}", _load_ivrit_model_sync)
+    try:
+        loop = asyncio.get_running_loop()
+        logger.info(f"[ivrit-ai] Transcribing: {audio_path} (language: {language})")
+        # _transcribe_sync is reused — ivrit-ai speaks the same faster-whisper API,
+        # so timestamps, VAD behavior, and segment batching are byte-identical.
+        transcript, detected_lang = await loop.run_in_executor(
+            _whisper_pool, _transcribe_sync, model, audio_path, language,
+            _make_segment_cb(task_id, loop), _make_progress_cb(task_id, loop),
+        )
+    finally:
+        await _slot.release()
+
+    logger.info(
+        f"[ivrit-ai] Done: {len(transcript):,} chars, "
         f"detected language: {detected_lang}"
     )
     return transcript, detected_lang
@@ -244,9 +406,9 @@ async def transcribe_via_api(
     from app import state as _state  # local import avoids circular at module level
 
     if not settings.openai_api_key:
-        raise RuntimeError(
-            "OpenAI API key not configured. "
-            "Set OPENAI_API_KEY in your .env file to use this mode."
+        raise PipelineError(
+            "מפתח OpenAI לא מוגדר בשרת — בחר מצב עיבוד אחר או הוסף OPENAI_API_KEY",
+            detail="OPENAI_API_KEY not configured; WHISPER_API mode unavailable",
         )
 
     loop = asyncio.get_running_loop()
@@ -293,88 +455,3 @@ async def _call_whisper_api(client: httpx.AsyncClient, chunk_path: str, language
 
     response.raise_for_status()
     return response.text
-
-
-# ── ivrit-ai transcription ────────────────────────────────────────────────────
-# Uses ivrit-ai's Hebrew-tuned Whisper checkpoint via faster-whisper (CT2 backend).
-# Model path is settings.ivrit_ai_model (default: ivrit-ai/whisper-large-v3-turbo-ct2).
-# Shares the same cache dir as WHISPER_LOCAL — mounted as a Docker volume so the
-# ~GB download survives container restarts.
-
-def _load_ivrit_model_sync():
-    """Blocking: load the ivrit-ai CT2 model. Runs in a thread executor."""
-    from faster_whisper import WhisperModel
-
-    cache_dir = Path.home() / ".cache" / "faster_whisper"
-    model_repo = settings.ivrit_ai_model
-    logger.info(
-        f"Loading ivrit-ai model '{model_repo}' "
-        f"on {settings.whisper_device} ({settings.whisper_compute_type})..."
-    )
-    model = WhisperModel(
-        model_repo,
-        device=settings.whisper_device,
-        compute_type=settings.whisper_compute_type,
-        download_root=str(cache_dir),
-    )
-    logger.info("✅ ivrit-ai model loaded")
-    return model
-
-
-async def _get_ivrit_model():
-    """Return the loaded ivrit-ai model, loading it if necessary (async, thread-safe)."""
-    global _ivrit_model, _ivrit_last_used
-    async with _ivrit_lock:
-        if _ivrit_model is None:
-            loop = asyncio.get_running_loop()
-            _ivrit_model = await loop.run_in_executor(None, _load_ivrit_model_sync)
-        _ivrit_last_used = time.time()
-    return _ivrit_model
-
-
-async def transcribe_ivrit_ai(
-    audio_path: str,
-    language: str = "he",
-    task_id: str | None = None,
-) -> tuple[str, str]:
-    """
-    Transcribe with ivrit-ai's Hebrew-tuned Whisper model.
-
-    Output format is identical to transcribe() (plain-text concatenation of
-    segments, same segment_cb streaming contract) — this is the contract the
-    live-preview panel and Feature 7's timestamp-click flow rely on.
-    """
-    from app import state as _state  # local import avoids circular at module level
-
-    model = await _get_ivrit_model()
-    loop  = asyncio.get_running_loop()
-
-    if task_id is not None:
-        def segment_cb(text: str, _tid=task_id, _loop=loop) -> None:
-            future = asyncio.run_coroutine_threadsafe(
-                _state.append_partial_transcript(_tid, text),
-                _loop,
-            )
-            future.add_done_callback(
-                lambda f: f.exception() and logger.warning(
-                    "partial transcript write failed for %s: %s", _tid, f.exception()
-                )
-            )
-    else:
-        segment_cb = None
-
-    logger.info(f"[ivrit-ai] Transcribing: {audio_path} (language: {language})")
-    # _transcribe_sync is reused — ivrit-ai speaks the same faster-whisper API,
-    # so timestamps, VAD behavior, and segment batching are byte-identical.
-    transcript, detected_lang = await loop.run_in_executor(
-        None, _transcribe_sync, model, audio_path, language, segment_cb
-    )
-
-    global _ivrit_last_used
-    _ivrit_last_used = time.time()
-
-    logger.info(
-        f"[ivrit-ai] Done: {len(transcript):,} chars, "
-        f"detected language: {detected_lang}"
-    )
-    return transcript, detected_lang

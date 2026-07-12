@@ -1,12 +1,16 @@
 """
 Pipeline orchestrator.
 
-Two entry points:
+Two entry points (invoked by the worker queue — app/services/worker.py):
   run_pipeline()           — URL → download → process → save result
   run_pipeline_from_file() — uploaded file → process → save result
 
 Each step updates the task's progress in SQLite so the frontend can display
 a live progress bar while polling GET /api/tasks/{id}.
+
+Error handling: everything user-facing raises PipelineError (or a subclass
+like ZoomDownloadError) with a ready Hebrew message; the technical cause is
+stored separately in tasks.error_detail so failures stay debuggable.
 
 Progress milestones (GEMINI_DIRECT):
   5%  → Downloading
@@ -26,8 +30,9 @@ Progress milestones (WHISPER paths):
   88% → Merging chunks / Critique running
   95% → Revising low-quality questions (if needed)
   100%→ Complete
+
+TRANSCRIPTION_ONLY jumps 50% → 100% (no Gemini step at all).
 """
-import asyncio
 import logging
 import shutil
 from pathlib import Path
@@ -35,43 +40,28 @@ from pathlib import Path
 from app import state
 from app.config import settings
 from app.models import LessonResult, ProcessingMode, TaskStatus
-from app.services import summarizer, transcriber, zoom_downloader
+from app.services import audio_preprocessor, summarizer, transcriber, zoom_downloader
+from app.services.errors import PipelineError
 
 logger = logging.getLogger(__name__)
 
 
-# ── Error helpers ─────────────────────────────────────────────────────────────────
-
-def _user_friendly_error(exc: Exception) -> str:
-    """Map exception types to Hebrew user-facing error strings."""
-    msg = str(exc)
-    low = msg.lower()
-    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)) or "10 דקות" in msg:
-        return "⏱️ הפעולה לקחה יותר מדי זמן ופסקה — נסה שוב"
-    if "quota" in low or "429" in low or "מכסת" in msg or "rate limit" in low:
-        return "⚠️ מכסת ה-API של Gemini הוצתה — נסה שוב בעוד כמה דקות"
-    if "json" in low or "JSON" in msg or "malformed" in low:
-        return "🔄 Gemini החזיר תוצאה לא תקינה — נסה שוב"
-    if isinstance(exc, zoom_downloader.ZoomDownloadError):
-        return str(exc)
-    return f"שגיאה: {msg[:300]}"
-
-
-def _make_progress_cb(
-    task_id: str,
-    status: TaskStatus,
-    loop: asyncio.AbstractEventLoop,
-):
-    """
-    Return a thread-safe sync callable that fires-and-forgets a progress update.
-    Used to pass into the sync summarizer functions running in a threadpool executor.
-    """
-    def cb(progress: int, message: str) -> None:
-        asyncio.run_coroutine_threadsafe(
-            state.update_task(task_id, status, progress, message),
-            loop,
-        )
+def _make_progress_cb(task_id: str, status: TaskStatus):
+    """Async progress callback passed into the summarizer — a direct await,
+    no thread bridging (the summarizer is fully async)."""
+    async def cb(progress: int, message: str) -> None:
+        await state.update_task(task_id, status, progress, message)
     return cb
+
+
+async def _fail(task_id: str, exc: Exception):
+    """Store a failure: user message in error, technical cause in error_detail."""
+    if isinstance(exc, PipelineError):
+        await state.fail_task(task_id, exc.user_message, detail=exc.detail or repr(exc))
+    else:
+        await state.fail_task(
+            task_id, "שגיאה בלתי צפויה בעיבוד — נסה שוב", detail=repr(exc)
+        )
 
 
 # ── Entry points ──────────────────────────────────────────────────────────────────
@@ -110,15 +100,12 @@ async def run_pipeline(
         await state.complete_task(task_id, result)
         logger.info(f"Task {task_id} completed ✅")
 
-    except zoom_downloader.ZoomDownloadError as exc:
-        logger.error(f"Task {task_id} — download error: {exc}")
-        await state.fail_task(task_id, _user_friendly_error(exc))
-        if audio_path:
-            await zoom_downloader.cleanup_audio(audio_path)
-
     except Exception as exc:
-        logger.exception(f"Task {task_id} — unexpected error")
-        await state.fail_task(task_id, _user_friendly_error(exc))
+        if isinstance(exc, PipelineError):
+            logger.error(f"Task {task_id} failed: {exc.user_message} ({exc.detail})")
+        else:
+            logger.exception(f"Task {task_id} — unexpected error")
+        await _fail(task_id, exc)
         if audio_path:
             await zoom_downloader.cleanup_audio(audio_path)
 
@@ -134,6 +121,25 @@ async def run_pipeline_from_file(
         await state.update_task(
             task_id, TaskStatus.TRANSCRIBING, 10, "📁 קובץ התקבל. מתחיל עיבוד..."
         )
+        # Mirror the URL path's extract_to_mp3 rule: GEMINI_DIRECT sends the
+        # native container (M4A/MP4) straight to the Gemini Files API, so
+        # extraction is wasted CPU there. Every other mode transcribes the
+        # audio locally/via Whisper — swap the heavy upload (e.g. a 1 GB
+        # lecture .mp4) for a lean MP3 and free the disk immediately.
+        if mode != ProcessingMode.GEMINI_DIRECT:
+            await state.update_task(
+                task_id, TaskStatus.TRANSCRIBING, 12, "🎞️ מחלץ אודיו מהקובץ שהועלה..."
+            )
+            extracted = await audio_preprocessor.extract_audio_track(file_path)
+            if extracted != file_path:
+                file_path = extracted
+                # Extraction deleted the original upload, but the durable job
+                # payload still points at it — a restart mid-transcription would
+                # see a missing file and wrongly fail the resume. Repoint it.
+                payload = await state.get_job_payload(task_id)
+                if payload:
+                    payload["file_path"] = file_path
+                    await state.set_job_payload(task_id, payload)
         result = await _process_audio(task_id, file_path, mode, language)
         result = await _generate_flashcards_step(task_id, result)
         file_path = await _persist_audio_for_task(task_id, file_path)
@@ -141,8 +147,11 @@ async def run_pipeline_from_file(
         logger.info(f"Task {task_id} (upload) completed ✅")
 
     except Exception as exc:
-        logger.exception(f"Task {task_id} (upload) — unexpected error")
-        await state.fail_task(task_id, _user_friendly_error(exc))
+        if isinstance(exc, PipelineError):
+            logger.error(f"Task {task_id} (upload) failed: {exc.user_message} ({exc.detail})")
+        else:
+            logger.exception(f"Task {task_id} (upload) — unexpected error")
+        await _fail(task_id, exc)
         await zoom_downloader.cleanup_audio(file_path)
 
 
@@ -158,8 +167,6 @@ async def _process_audio(
     Transcribe and/or summarize the audio depending on the selected mode.
     Returns a populated LessonResult.
     """
-    loop = asyncio.get_running_loop()
-
     if mode == ProcessingMode.GEMINI_DIRECT:
         await state.update_task(
             task_id,
@@ -167,10 +174,26 @@ async def _process_audio(
             50,
             "🤖 שולח אודיו ל-Gemini AI — מייצר סיכום ומבחן...",
         )
-        progress_cb = _make_progress_cb(task_id, TaskStatus.SUMMARIZING, loop)
-        result = await summarizer.summarize_audio(audio_path, progress_cb)
+        return await summarizer.summarize_audio(
+            audio_path, _make_progress_cb(task_id, TaskStatus.SUMMARIZING)
+        )
 
-    elif mode == ProcessingMode.WHISPER_API:
+    if mode == ProcessingMode.TRANSCRIPTION_ONLY:
+        await state.update_task(
+            task_id,
+            TaskStatus.TRANSCRIBING,
+            50,
+            "📝 מתמלל בלבד עם ivrit-ai — ללא סיכום ומבחן...",
+        )
+        transcript, detected_lang = await transcriber.transcribe_ivrit_ai(
+            audio_path, language, task_id=task_id
+        )
+        # Transcript-only result: summary/chapters/quiz deliberately empty.
+        # The flashcards step short-circuits on an empty summary, so this
+        # mode never touches Gemini.
+        return LessonResult(transcript=transcript, language=detected_lang or "he")
+
+    if mode == ProcessingMode.WHISPER_API:
         await state.update_task(
             task_id,
             TaskStatus.TRANSCRIBING,
@@ -178,16 +201,6 @@ async def _process_audio(
             "☁️ מסיר שקט ושולח ל-OpenAI Whisper API...",
         )
         transcript, _ = await transcriber.transcribe_via_api(audio_path, language, task_id=task_id)
-
-        await state.update_task(
-            task_id,
-            TaskStatus.SUMMARIZING,
-            80,
-            "🤖 יוצר סיכום ומבחן עם Gemini AI...",
-        )
-        progress_cb = _make_progress_cb(task_id, TaskStatus.SUMMARIZING, loop)
-        result = await summarizer.summarize_transcript(transcript, progress_cb)
-        result.transcript = transcript
 
     elif mode == ProcessingMode.IVRIT_AI:
         await state.update_task(
@@ -198,16 +211,6 @@ async def _process_audio(
         )
         transcript, _ = await transcriber.transcribe_ivrit_ai(audio_path, language, task_id=task_id)
 
-        await state.update_task(
-            task_id,
-            TaskStatus.SUMMARIZING,
-            80,
-            "🤖 יוצר סיכום ומבחן עם Gemini AI...",
-        )
-        progress_cb = _make_progress_cb(task_id, TaskStatus.SUMMARIZING, loop)
-        result = await summarizer.summarize_transcript(transcript, progress_cb)
-        result.transcript = transcript
-
     else:
         await state.update_task(
             task_id,
@@ -215,18 +218,18 @@ async def _process_audio(
             50,
             "🎙️ מתמלל עם Whisper מקומי (עשוי לקחת מספר דקות)...",
         )
-        transcript, detected_lang = await transcriber.transcribe(audio_path, language, task_id=task_id)
+        transcript, _ = await transcriber.transcribe(audio_path, language, task_id=task_id)
 
-        await state.update_task(
-            task_id,
-            TaskStatus.SUMMARIZING,
-            80,
-            "🤖 יוצר סיכום ומבחן עם Gemini AI...",
-        )
-        progress_cb = _make_progress_cb(task_id, TaskStatus.SUMMARIZING, loop)
-        result = await summarizer.summarize_transcript(transcript, progress_cb)
-        result.transcript = transcript
-
+    await state.update_task(
+        task_id,
+        TaskStatus.SUMMARIZING,
+        80,
+        "🤖 יוצר סיכום ומבחן עם Gemini AI...",
+    )
+    result = await summarizer.summarize_transcript(
+        transcript, _make_progress_cb(task_id, TaskStatus.SUMMARIZING)
+    )
+    result.transcript = transcript
     return result
 
 

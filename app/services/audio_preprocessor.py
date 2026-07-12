@@ -1,17 +1,22 @@
 """
 Audio preprocessor for Whisper transcription.
 
-Two steps applied before transcription:
+Two steps applied before transcription (WHISPER_API mode):
   1. Silence removal — strips segments below -40 dBFS using ffmpeg's silenceremove
      filter, so Whisper doesn't waste time on dead air between topics.
   2. Chunking — splits the result into ≤13-minute pieces. This is the practical
      accuracy/memory sweet spot discovered through use.
 
+Plus one standalone async helper used by the upload pipeline (all non-GEMINI
+modes): extract_audio_track() — swaps a heavy uploaded video for a lean MP3.
+
 All operations use ffmpeg (already available via yt-dlp). No extra dependencies.
 
 The caller always receives NEW temp files it owns and must delete. The original
-audio path is never modified.
+audio path is never modified (except extract_audio_track, which deletes its
+source by design — see its docstring).
 """
+import asyncio
 import logging
 import os
 import subprocess
@@ -22,12 +27,26 @@ from pathlib import Path
 # A 10-hour recording at fast read speeds should finish in < 5 minutes.
 _FFMPEG_TIMEOUT = 600
 
+# Extraction re-encodes the full audio track; on a shared Fly.io CPU a 3-hour
+# lecture can take 15-20 min (same reason zoom_downloader skips it for
+# GEMINI_DIRECT), so this timeout is deliberately generous.
+_EXTRACT_TIMEOUT = 1800
+
 logger = logging.getLogger(__name__)
 
 CHUNK_SECONDS = 13 * 60   # 13 minutes per chunk
 SILENCE_DB    = -40        # dBFS threshold — below this is treated as silence
 SILENCE_MIN_S = 1.0        # minimum silence duration to remove (seconds)
 PAD_S         = 0.2        # seconds of silence to keep around speech (natural transitions)
+
+# Speech normalization applied before Whisper sees the audio:
+#   highpass=80   — cuts HVAC/handling rumble below the speech band
+#   dynaudnorm    — adaptive per-window gain: lifts quiet passages (lecturer
+#                   walking away from the mic, student questions from the back
+#                   of the room) without crushing the loud ones the way a
+#                   single global gain (loudnorm one-pass) would.
+#                   f=250ms frames + g=15 window ≈ responsive but not pumping.
+_NORMALIZE_FILTER = "highpass=f=80,dynaudnorm=f=250:g=15"
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -78,6 +97,76 @@ def preprocess(audio_path: str) -> list[str]:
         return [_copy_to_temp(audio_path)]
 
 
+async def extract_audio_track(src_path: str, delete_source: bool = True) -> str:
+    """
+    Extract the audio track from a local media file into a 96 kbps MP3 —
+    the same codec/bitrate the URL download path produces via yt-dlp, so
+    everything downstream (Whisper, playback persistence) sees identical input.
+
+    Runs ffmpeg via asyncio.create_subprocess_exec: the event loop stays free
+    while a 1 GB lecture .mp4 is re-encoded down to ~45 MB of MP3.
+
+    On success: returns the new .mp3 path; if delete_source (default), the
+    original heavy file is removed immediately to free container disk.
+    On failure: removes any partial output and returns the ORIGINAL path
+    untouched — extraction is an optimization, not a hard requirement, so
+    the pipeline still gets a chance to process the raw upload.
+    """
+    src = Path(src_path)
+    if src.suffix.lower() == ".mp3":
+        # Already an MP3 — re-encoding (even to normalize) would stack a
+        # second generation of lossy compression; Whisper's VAD + temperature
+        # fallbacks cope with unnormalized MP3s well enough.
+        return src_path
+
+    dest = src.with_suffix(".mp3")
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(src),
+        "-vn",                                # drop the video stream entirely
+        "-af", _NORMALIZE_FILTER,             # rumble cut + adaptive loudness
+        "-c:a", "libmp3lame", "-b:a", "96k",  # matches yt-dlp preferredquality=96
+        "-loglevel", "error",
+        str(dest),
+    ]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=_EXTRACT_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise RuntimeError(f"ffmpeg timed out after {_EXTRACT_TIMEOUT}s")
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"ffmpeg exited {proc.returncode}: "
+                f"{stderr.decode(errors='replace')[:500]}"
+            )
+        if not dest.exists() or dest.stat().st_size == 0:
+            raise RuntimeError("ffmpeg produced no output file")
+    except Exception as exc:
+        logger.warning(
+            f"[Preprocessor] Audio extraction failed ({exc}) — using original file"
+        )
+        dest.unlink(missing_ok=True)
+        return src_path
+
+    freed_mb = (src.stat().st_size - dest.stat().st_size) / 1024 / 1024
+    if delete_source:
+        src.unlink(missing_ok=True)
+    logger.info(
+        f"[Preprocessor] Extracted audio track: {dest.name} "
+        f"(freed {freed_mb:.0f} MB of disk)"
+    )
+    return str(dest)
+
+
 def cleanup_chunks(chunk_paths: list[str]) -> None:
     """Delete all temp chunk files created by preprocess()."""
     for path in chunk_paths:
@@ -119,6 +208,8 @@ def _remove_silence(audio_path: str) -> str:
     fd, out = tempfile.mkstemp(suffix=".mp3", prefix="zoom_stripped_")
     os.close(fd)  # ffmpeg will write to the path; close the OS fd we got from mkstemp
 
+    # Normalization runs AFTER silence removal — boosting quiet passages first
+    # would lift room noise above SILENCE_DB and defeat the silence detector.
     silence_filter = (
         f"silenceremove="
         f"start_periods=1:"
@@ -132,7 +223,8 @@ def _remove_silence(audio_path: str) -> str:
         f"start_periods=1:"
         f"start_silence={PAD_S}:"
         f"start_threshold={SILENCE_DB}dB,"
-        f"areverse"
+        f"areverse,"
+        f"{_NORMALIZE_FILTER}"
     )
 
     subprocess.run(

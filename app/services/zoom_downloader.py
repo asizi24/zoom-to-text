@@ -20,11 +20,12 @@ from urllib.parse import parse_qs, urlparse
 import yt_dlp
 
 from app.config import settings
+from app.services.errors import PipelineError
 
 logger = logging.getLogger(__name__)
 
 
-class ZoomDownloadError(Exception):
+class ZoomDownloadError(PipelineError):
     """Raised when a download fails — message is shown directly to the user."""
 
 

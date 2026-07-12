@@ -1,0 +1,7 @@
+# CUDA runtime libraries for faster-whisper GPU inference (CTranslate2 4.x
+# needs cuBLAS + cuDNN 9 built for CUDA 12). Installed as pip wheels so the
+# base image can stay python:3.11-slim — no nvidia/cuda base image needed.
+# The host only needs the NVIDIA driver (Docker Desktop WSL2 passes it through).
+# Skipped when the image is built with --build-arg ENABLE_GPU=0.
+nvidia-cublas-cu12
+nvidia-cudnn-cu12>=9.1,<10

@@ -76,3 +76,6 @@ _legacy_archive/
 
 # Brainstorm session artifacts
 .superpowers/
+
+# Docker build inputs — must be tracked despite *.txt above
+!requirements*.txt

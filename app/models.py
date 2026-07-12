@@ -29,6 +29,9 @@ class ProcessingMode(str, Enum):
     # Higher accuracy on spoken Hebrew than vanilla Whisper, but slower than
     # GEMINI_DIRECT. Model is downloaded on first use and cached on disk.
     IVRIT_AI = "ivrit_ai"
+    # Transcript only — local ivrit-ai transcription, NO Gemini call at all.
+    # Result contains just the transcript; summary/chapters/quiz stay empty.
+    TRANSCRIPTION_ONLY = "transcription_only"
 
 
 # ── Result schemas ──────────────────────────────────────────────────────────────
@@ -53,7 +56,7 @@ class Flashcard(BaseModel):
 
 
 class LessonResult(BaseModel):
-    transcript:        Optional[str] = None  # Raw transcript (only in WHISPER_LOCAL mode)
+    transcript:        Optional[str] = None  # Raw transcript (Whisper modes + TRANSCRIPTION_ONLY)
     summary:           str = ""
     chapters:          list[Chapter] = []
     quiz:              list[QuizQuestion] = []
