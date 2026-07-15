@@ -179,6 +179,20 @@ async def init_db():
         await db.execute("ALTER TABLE tasks ADD COLUMN error_detail TEXT")
         await db.commit()
         logger.info("Migrated tasks table: added error_detail column")
+    # On-demand Smart Summary (Map-Reduce → Obsidian markdown). Independent of
+    # the transcription result_json so re-generating never touches the lesson.
+    if "smart_summary" not in cols:
+        await db.execute("ALTER TABLE tasks ADD COLUMN smart_summary TEXT")
+        await db.commit()
+        logger.info("Migrated tasks table: added smart_summary column")
+    if "smart_summary_status" not in cols:
+        await db.execute("ALTER TABLE tasks ADD COLUMN smart_summary_status TEXT")
+        await db.commit()
+        logger.info("Migrated tasks table: added smart_summary_status column")
+    if "smart_summary_error" not in cols:
+        await db.execute("ALTER TABLE tasks ADD COLUMN smart_summary_error TEXT")
+        await db.commit()
+        logger.info("Migrated tasks table: added smart_summary_error column")
 
     # Create indexes now that all columns are guaranteed to exist.
     # (user_id, created_at DESC) serves the history listing exactly
@@ -250,4 +264,10 @@ from app.repositories.config import (   # noqa: E402
     get_all_config,
     get_config,
     set_config,
+)
+from app.repositories.smart_summary import (   # noqa: E402
+    get_smart_summary,
+    reset_running_smart_summaries,
+    save_smart_summary,
+    set_smart_summary_status,
 )

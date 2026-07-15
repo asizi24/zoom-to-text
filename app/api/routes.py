@@ -16,6 +16,7 @@ from app.api.routers.audio import router as audio_router
 from app.api.routers.chat import router as chat_router
 from app.api.routers.events import router as events_router
 from app.api.routers.flashcards import router as flashcards_router
+from app.api.routers.smart_summary import router as smart_summary_router
 from app.api.routers.tasks import router as tasks_router
 
 router = APIRouter()
@@ -24,6 +25,7 @@ router.include_router(events_router)
 router.include_router(chat_router)
 router.include_router(audio_router)
 router.include_router(flashcards_router)
+router.include_router(smart_summary_router)
 
 # ── Backward-compat re-exports ────────────────────────────────────────────────────
 from app.api.routers.audio import (   # noqa: E402,F401

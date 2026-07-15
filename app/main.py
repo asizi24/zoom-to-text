@@ -214,6 +214,13 @@ async def lifespan(app: FastAPI):
         if adopted:
             logger.info(f"Adopted {adopted} legacy ownerless task(s) → {first_email}")
 
+    # Smart Summary jobs run as in-process background tasks (not the durable
+    # queue), so a restart orphans any in-flight run — reset them to failed so
+    # the UI offers a re-run instead of spinning forever.
+    reset = await state.reset_running_smart_summaries()
+    if reset:
+        logger.info(f"Reset {reset} interrupted Smart Summary job(s) to failed")
+
     # Start the pipeline worker pool — re-enqueues tasks interrupted by restart
     await worker.start()
 
