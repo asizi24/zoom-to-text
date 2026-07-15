@@ -27,14 +27,25 @@ services:
       - path: .env
         required: false
 
+    depends_on:
+      # Ordering only (not a health gate): the api can start before the model is
+      # pulled — the Setup Wizard drives the pull on first boot. Compose's
+      # default network lets the api reach the ollama service by name.
+      - ollama
+
     environment:
       - PYTHONUNBUFFERED=1
       # Structured logs in the container: one JSON object per line, ready for
       # docker logs / Loki / CloudWatch. Local `uvicorn` runs keep text format.
       - LOG_FORMAT=json
+      # Local Ollama container for the on-demand Smart Summary feature. Reached
+      # over compose's internal DNS — no host port needed.
+      - OLLAMA_HOST=http://ollama:11434
       # Override these per-environment as needed:
       # - WHISPER_MODEL=medium
       # - AUTO_SHUTDOWN_IDLE_MINUTES=30
+      # - SUMMARY_BACKEND=ollama       # ollama | gemini (wizard persists this)
+      # - OLLAMA_MODEL=gemma2:9b
 
     # ── Resources ───────────────────────────────────────────────────────────────
     # Local workstation profile (128 GB RAM, RTX 4070 Ti). The devices block
@@ -75,7 +86,47 @@ services:
         max-size: "20m"
         max-file: "5"
 
+  # ── Local LLM server (Smart Summary Map-Reduce backend) ─────────────────────
+  # Pulled models persist in the ollama_models volume so a container recreate
+  # never re-downloads gemma2:9b. GPU is shared with the api service (both
+  # reserve the NVIDIA device); on a CPU-only host remove the deploy block and
+  # the Setup Wizard will recommend the Gemini cloud fallback instead.
+  ollama:
+    image: ollama/ollama:latest
+    container_name: zoom_ollama
+    environment:
+      # Bind to all interfaces — the default 127.0.0.1 bind would be
+      # unreachable from the api container over the compose network.
+      - OLLAMA_HOST=0.0.0.0
+    volumes:
+      - ollama_models:/root/.ollama
+    # Uncomment to reach Ollama directly from the host (debugging / `ollama` CLI):
+    # ports:
+    #   - "11434:11434"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 volumes:
   whisper_model_cache:
     name: zoom_whisper_model_cache
     # To clear the model cache and re-download: docker volume rm zoom_whisper_model_cache
+  ollama_models:
+    name: zoom_ollama_models
+    # To clear pulled LLMs and re-download: docker volume rm zoom_ollama_models

@@ -81,6 +81,18 @@ CREATE TABLE IF NOT EXISTS sessions (
 )
 """
 
+# Runtime-mutable configuration (first-boot Setup Wizard choices). Settings in
+# app/config.py are import-time and immutable; values the wizard persists
+# (summary backend, model name, Gemini key, setup_complete flag) live here so
+# they take effect without a container restart. See app/services/runtime_config.
+CREATE_APP_CONFIG_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS app_config (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+)
+"""
+
 
 # ── Lifecycle ─────────────────────────────────────────────────────────────────────
 
@@ -137,6 +149,7 @@ async def init_db():
     await db.execute(CREATE_USERS_TABLE_SQL)
     await db.execute(CREATE_MAGIC_TOKENS_TABLE_SQL)
     await db.execute(CREATE_SESSIONS_TABLE_SQL)
+    await db.execute(CREATE_APP_CONFIG_TABLE_SQL)
     await db.commit()
 
     # Migrate: add missing columns to tasks table if needed
@@ -231,4 +244,10 @@ from app.repositories.chat import (   # noqa: E402
     append_chat_message,
     clear_chat_history,
     get_chat_history,
+)
+from app.repositories.config import (   # noqa: E402
+    delete_config,
+    get_all_config,
+    get_config,
+    set_config,
 )

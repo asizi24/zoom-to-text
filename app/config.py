@@ -37,6 +37,23 @@ class Settings(BaseSettings):
     # ── OpenAI (optional — for WHISPER_API mode) ────────────────────────────────
     openai_api_key: str = ""
 
+    # ── Local LLM (Ollama — for the on-demand Smart Summary feature) ─────────────
+    # The backend talks to a local Ollama container over Docker's internal
+    # network. In docker-compose this is overridden to http://ollama:11434;
+    # a bare `uvicorn` run on the host reaches a native Ollama on localhost.
+    ollama_host: str = "http://localhost:11434"
+    # Default model the Setup Wizard pulls when a strong GPU is detected.
+    # gemma2:9b (~5.5GB) balances Hebrew prose with English technical terms and
+    # fits an RTX 4070 Ti (12GB). Overridable at runtime via the wizard (kv store).
+    ollama_model: str = "gemma2:9b"
+    # Generous ceiling — a Map-Reduce reduce step over a long lecture can be slow
+    # on first load (model paging into VRAM).
+    ollama_timeout: float = 600.0
+    # Which engine backs the Smart Summary Map-Reduce. The Setup Wizard persists
+    # an explicit choice in the app_config kv table; this is only the fallback
+    # used before setup runs (the GPU box defaults to local Ollama).
+    summary_backend: str = "ollama"   # ollama | gemini
+
     # ── Faster-Whisper ──────────────────────────────────────────────────────────
     # Model sizes: tiny | base | small | medium | large-v3
     # CPU memory requirements: tiny=~400MB, medium=~2GB, large-v3=~4GB
