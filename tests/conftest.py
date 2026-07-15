@@ -14,9 +14,8 @@ import app.state as state_module
 from app.config import settings
 
 
-@pytest.fixture
-def client(tmp_path, monkeypatch):
-    """FastAPI TestClient with an isolated temp database."""
+def _isolate(tmp_path, monkeypatch):
+    """Common per-test isolation: fresh DB + deterministic settings."""
     monkeypatch.setattr(state_module, "DB_PATH", tmp_path / "test.db")
     monkeypatch.setattr(state_module, "_db", None, raising=False)  # added in Task 3
     monkeypatch.setattr(settings, "allowed_emails", "allowed@example.com", raising=False)  # added in Task 2
@@ -28,6 +27,37 @@ def client(tmp_path, monkeypatch):
     # tests log in / submit rapidly). The rate-limit tests re-enable it.
     monkeypatch.setattr(settings, "environment", "development", raising=False)
     monkeypatch.setattr(settings, "rate_limit_enabled", False, raising=False)
+
+
+@pytest.fixture
+def client(tmp_path, monkeypatch):
+    """FastAPI TestClient with an isolated temp database.
+
+    Setup is forced 'complete' so GET / behaves as it always did (login gate,
+    not the first-boot wizard). Wizard-flow tests use `wizard_client` instead.
+    """
+    _isolate(tmp_path, monkeypatch)
+
+    import app.services.runtime_config as runtime_config
+
+    async def _already_complete() -> bool:
+        return True
+
+    monkeypatch.setattr(runtime_config, "is_setup_complete", _already_complete)
+
+    from app.main import app
+    from fastapi.testclient import TestClient
+
+    with TestClient(app, raise_server_exceptions=True) as c:
+        yield c
+
+
+@pytest.fixture
+def wizard_client(tmp_path, monkeypatch):
+    """TestClient for the first-boot Setup Wizard: setup_complete starts false
+    (the real kv flag on a fresh DB), so GET / serves the wizard and the
+    /api/setup/* endpoints are active until POST /api/setup/complete."""
+    _isolate(tmp_path, monkeypatch)
 
     from app.main import app
     from fastapi.testclient import TestClient

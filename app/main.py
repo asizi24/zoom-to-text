@@ -25,9 +25,10 @@ from app import __version__, state
 from app.api.errors import register_exception_handlers
 from app.api.routes import router
 from app.api.auth import router as auth_router
+from app.api.routers.setup import router as setup_router
 from app.config import settings
 from app.logging_config import RequestContextMiddleware, setup_logging
-from app.services import transcriber, worker
+from app.services import runtime_config, transcriber, worker
 
 setup_logging(settings.log_format)
 logger = logging.getLogger(__name__)
@@ -295,6 +296,8 @@ register_exception_handlers(app)
 
 app.include_router(router, prefix="/api", tags=["tasks"])
 app.include_router(auth_router, prefix="/api", tags=["auth"])
+# First-boot Setup Wizard — unauthenticated but self-disabling once setup runs.
+app.include_router(setup_router, prefix="/api", tags=["setup"])
 
 if Path("static").exists():
     app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -337,7 +340,21 @@ async def login_page():
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def index(request: Request):
-    """Serve the frontend. Redirect to /login if not authenticated."""
+    """Serve the frontend.
+
+    Order of precedence:
+      1. First boot (no Smart Summary backend configured yet) → the Setup Wizard,
+         served BEFORE the login gate so a fresh install is reachable with no
+         session. The wizard self-disables once setup_complete is set.
+      2. Not authenticated → redirect to /login.
+      3. Authenticated → the app.
+    """
+    if not await runtime_config.is_setup_complete():
+        setup_path = Path("static/setup.html")
+        if setup_path.exists():
+            return FileResponse(setup_path)
+        # No wizard asset shipped — fall through to the normal flow rather than 404.
+
     session_id = request.cookies.get("session_id")
     user_id = await state.get_session_user(session_id) if session_id else None
     if not user_id:
