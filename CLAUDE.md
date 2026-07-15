@@ -24,22 +24,40 @@ app/models.py                  # Pydantic schemas
 app/logging_config.py          # JSON/text logging + request_id/task_id contextvars
 app/ratelimit.py               # In-process token-bucket rate limiting
 app/state.py                   # SQLite connection lifecycle + data-access facade
-app/repositories/              # Domain queries: tasks / jobs / auth / chat
+app/repositories/              # Domain queries: tasks / jobs / auth / chat / config / smart_summary
+app/services/runtime_config.py # Runtime-mutable config (app_config kv) — wizard writes here
 app/api/routes.py              # Router aggregator (+ compat re-exports)
-app/api/routers/               # Endpoints by concern: tasks / events / chat / audio / flashcards
+app/api/routers/               # tasks / events / chat / audio / flashcards / setup / smart_summary
 app/api/errors.py              # Standard error envelope {detail, code, request_id}
 app/services/processor.py      # Main pipeline orchestrator
 app/services/transcriber.py    # Faster-Whisper + OpenAI API
 app/services/audio_preprocessor.py  # ffmpeg chunking + silence removal
 app/services/summarizer.py     # Gemini — summary + exam
+app/services/hardware.py       # GPU probe (nvidia-smi) for the Setup Wizard
+app/services/llm/              # Smart Summary providers: Ollama + Gemini + factory
+app/services/smart_summary.py  # On-demand Map-Reduce → Obsidian markdown
 app/services/zoom_downloader.py     # yt-dlp + cookie handling + SSRF guard
-static/index.html              # UI markup (355 lines)
+static/setup.html              # First-boot Setup Wizard (served by GET / until configured)
+static/index.html              # UI markup
 static/css/app.css             # All styles
 static/js/                     # ES modules: main, store, api, sse, live, upload,
                                #   progress, transcript, results, chat, player,
-                               #   flashcards, history, exports, ui
+                               #   flashcards, history, exports, ui, setup, smartSummary
 extension/                     # Chrome extension
 ```
+
+## First-Boot Setup Wizard + Smart Summary (added 2026-07)
+- **Runtime config**: `app_config` kv table (`app/services/runtime_config.py`) holds
+  wizard choices (`summary_backend`, `ollama_model`, `gemini_api_key`,
+  `setup_complete`) — applied live, no restart.
+- **Wizard**: `GET /` serves `static/setup.html` until `setup_complete`; the
+  unauthenticated `/api/setup/*` endpoints self-disable (403) afterward. Hardware
+  is probed via `nvidia-smi` → recommends local Ollama (strong GPU) or Gemini (CPU).
+- **Ollama**: added as a compose service (`http://ollama:11434`); models persist in
+  the `ollama_models` volume; the wizard pulls the model over an SSE progress stream.
+- **Smart Summary**: `POST /api/tasks/{id}/smart-summary` runs Map-Reduce (~4000-word
+  chunks → partials → Obsidian master doc) on the configured LLM, as an in-process
+  background job (status in the `smart_summary` task columns; not the durable queue).
 
 ## Processing Pipeline
 ```
