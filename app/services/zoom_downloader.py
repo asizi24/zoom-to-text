@@ -11,8 +11,10 @@ Audio is extracted with ffmpeg and saved as mp3 at 96kbps, which is more than
 sufficient for speech and keeps file sizes small (~43 MB/hour).
 """
 import asyncio
+import ipaddress
 import logging
 import os
+import socket
 import tempfile
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -27,6 +29,77 @@ logger = logging.getLogger(__name__)
 
 class ZoomDownloadError(PipelineError):
     """Raised when a download fails — message is shown directly to the user."""
+
+
+# ── URL policy (SSRF guard) ───────────────────────────────────────────────────────
+# yt-dlp's generic extractor will fetch almost anything, so a submitted URL is
+# vetted before it ever reaches yt-dlp. Defense in depth, sized for the LAN
+# deployment: it stops a submitted link from probing loopback/private targets;
+# it does not chase redirects or re-resolve mid-download (yt-dlp owns those).
+
+async def _resolve_host(host: str) -> set[str]:
+    """Resolve a hostname to its addresses (both families). Separate function
+    so tests can stub DNS without touching the event loop."""
+    loop = asyncio.get_running_loop()
+    infos = await loop.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    # sockaddr[0] is the address for both AF_INET and AF_INET6; strip any
+    # IPv6 zone suffix ("fe80::1%eth0") so ipaddress can parse it.
+    return {info[4][0].split("%")[0] for info in infos}
+
+
+async def ensure_url_allowed(url: str) -> None:
+    """Raise ZoomDownloadError unless the URL passes the download policy.
+
+    1. Optional allowlist (settings.allowed_download_hosts, suffix match).
+    2. When settings.block_private_download_targets: the host must not be —
+       or resolve to — a loopback/private/link-local/reserved address.
+
+    Called twice: at submission (routes.create_task → immediate 400) and again
+    inside download_audio after URL normalization, which also covers retries
+    replaying a stored payload.
+    """
+    host = urlparse(url).hostname
+    if not host:
+        raise ZoomDownloadError(
+            "כתובת לא תקינה — לא נמצא שם שרת בקישור.",
+            detail=f"no hostname in url {url!r}",
+        )
+
+    allowed = [
+        h.strip().lower().lstrip("*.")
+        for h in settings.allowed_download_hosts.split(",")
+        if h.strip()
+    ]
+    if allowed:
+        h = host.lower()
+        if not any(h == a or h.endswith("." + a) for a in allowed):
+            raise ZoomDownloadError(
+                "הורדה מהאתר הזה אינה מאושרת בהגדרות השרת.",
+                detail=f"host {host!r} not in allowed_download_hosts={allowed}",
+            )
+
+    if not settings.block_private_download_targets:
+        return
+
+    try:
+        # Literal IP → check directly; hostname → resolve and check every address.
+        ips = {str(ipaddress.ip_address(host))}
+    except ValueError:
+        try:
+            ips = await _resolve_host(host)
+        except socket.gaierror as exc:
+            raise ZoomDownloadError(
+                "לא ניתן לפענח את כתובת השרת שבקישור — בדוק את הקישור.",
+                detail=f"DNS resolution failed for {host!r}: {exc}",
+            ) from exc
+
+    for ip_str in ips:
+        ip = ipaddress.ip_address(ip_str)
+        if not ip.is_global:
+            raise ZoomDownloadError(
+                "הקישור מצביע על כתובת רשת פנימית — נחסם מטעמי אבטחה.",
+                detail=f"host {host!r} resolves to non-global address {ip}",
+            )
 
 
 # ── Public interface ──────────────────────────────────────────────────────────────
@@ -70,6 +143,9 @@ async def download_audio(
                     completely unnecessary.
     """
     url = _normalize_zoom_url(url)
+    # Re-check after normalization: originRequestUrl may point anywhere, and
+    # retries replay stored payloads without passing through the API guard.
+    await ensure_url_allowed(url)
     settings.downloads_dir.mkdir(parents=True, exist_ok=True)
     output_template = str(settings.downloads_dir / f"{task_id}.%(ext)s")
 

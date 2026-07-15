@@ -9,12 +9,13 @@ import logging
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter, Cookie, HTTPException
+from fastapi import APIRouter, Cookie, Depends, HTTPException
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 from app import state
 from app.config import settings
+from app.ratelimit import rate_limit
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -24,7 +25,10 @@ class MagicLinkRequest(BaseModel):
     email: str
 
 
-@router.post("/auth/request")
+@router.post(
+    "/auth/request",
+    dependencies=[Depends(rate_limit("auth", "rate_limit_auth_per_minute"))],
+)
 async def request_magic_link(body: MagicLinkRequest):
     """
     Send a magic link to the given email if it is on the whitelist.
@@ -37,17 +41,25 @@ async def request_magic_link(body: MagicLinkRequest):
         user_id = await state.get_or_create_user(email)
         token = await state.create_magic_token(user_id)
         if not settings.resend_configured:
-            # Local dev bypass: without a real Resend key we couldn't email
-            # anyway (e.g. developing offline), so print the link to the
-            # terminal for copy-paste. Logging the token is safe here exactly
-            # because this branch is unreachable once a real key is set.
-            magic_url = f"{settings.base_url}/api/auth/verify?token={token}"
-            logger.info(
-                "\n" + "─" * 62 + "\n"
-                f"🔑 [DEV LOGIN] Resend not configured — magic link for {email}:\n"
-                f"   {magic_url}\n"
-                + "─" * 62
-            )
+            if settings.is_production:
+                # Startup validation (app/main.py) makes this unreachable, but
+                # if it's ever hit, the login token must NEVER go to the logs.
+                logger.error(
+                    "Magic link NOT sent: Resend is not configured and the "
+                    "dev bypass is disabled in production."
+                )
+            else:
+                # Local dev bypass: without a real Resend key we couldn't email
+                # anyway (e.g. developing offline), so print the link to the
+                # terminal for copy-paste. Gated on environment != production —
+                # a leaked log must never contain a usable login token there.
+                magic_url = f"{settings.base_url}/api/auth/verify?token={token}"
+                logger.info(
+                    "\n" + "─" * 62 + "\n"
+                    f"🔑 [DEV LOGIN] Resend not configured — magic link for {email}:\n"
+                    f"   {magic_url}\n"
+                    + "─" * 62
+                )
         else:
             try:
                 await _send_magic_link_email(email, token)
@@ -73,12 +85,19 @@ async def verify_magic_link(token: str):
 
     session_id = await state.create_session(user_id)
 
+    # COOKIE_SECURE overrides explicitly (e.g. plain-http LAN serving);
+    # None keeps the historical localhost heuristic.
+    secure = (
+        settings.cookie_secure
+        if settings.cookie_secure is not None
+        else not settings.base_url.startswith("http://localhost")
+    )
     response = RedirectResponse(url="/", status_code=302)
     response.set_cookie(
         key="session_id",
         value=session_id,
         httponly=True,
-        secure=not settings.base_url.startswith("http://localhost"),
+        secure=secure,
         samesite="lax",
         max_age=30 * 24 * 60 * 60,
     )

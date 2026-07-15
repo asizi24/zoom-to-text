@@ -1,5 +1,5 @@
 """
-Persistent task state manager backed by SQLite (via aiosqlite).
+SQLite connection lifecycle + data-access facade.
 
 Why SQLite instead of an in-memory dict?
   - Tasks survive server restarts (the original bug: "Server restarted during processing")
@@ -11,19 +11,21 @@ Connection strategy:
   A single cached aiosqlite connection is reused for all operations.
   This avoids the overhead of opening/closing on every request (the old pattern),
   while staying safe for async code via WAL mode.
+
+Layout (since the repository split):
+  This module owns the connection (DB_PATH/_get_db/close_db), the schema +
+  migrations (init_db), and the readiness ping. The domain queries live in
+  app/repositories/{tasks,jobs,auth,chat}.py and are re-exported here, so
+  `state.<fn>` remains the stable seam for callers and for the test suite's
+  monkeypatching (state.DB_PATH, state._db, state.consume_magic_token, …).
+  New code may import from the specific repository directly.
 """
 import asyncio
-import json
-import uuid
-import aiosqlite
 import logging
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Optional
+
+import aiosqlite
 
 from app.config import settings
-from app.events import hub as _events
-from app.models import TaskStatus, TaskResponse, LessonResult
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +100,8 @@ async def _get_db() -> aiosqlite.Connection:
         # protects against transient contention from external readers
         # (sqlite3 CLI, backup scripts) hitting the same file.
         await _db.execute("PRAGMA busy_timeout=5000")
+        # SQLite leaves REFERENCES clauses unenforced unless this is on.
+        await _db.execute("PRAGMA foreign_keys=ON")
         # Set row_factory once on the shared connection so all cursors return
         # aiosqlite.Row objects — avoids repeated mutation of the shared connection.
         _db.row_factory = aiosqlite.Row
@@ -114,6 +118,18 @@ async def close_db():
         logger.info("SQLite connection closed")
 
 
+async def ping() -> bool:
+    """Readiness check: True iff the DB connection answers a trivial query."""
+    try:
+        db = await _get_db()
+        async with db.execute("SELECT 1") as cursor:
+            await cursor.fetchone()
+        return True
+    except Exception as exc:
+        logger.warning(f"DB ping failed: {exc}")
+        return False
+
+
 async def init_db():
     """Create all tables on startup. Migrate tasks table. Mark interrupted tasks as failed."""
     db = await _get_db()
@@ -122,10 +138,6 @@ async def init_db():
     await db.execute(CREATE_MAGIC_TOKENS_TABLE_SQL)
     await db.execute(CREATE_SESSIONS_TABLE_SQL)
     await db.commit()
-
-    # Add index on user_id for fast per-user task listings
-    # (must run after user_id column exists, so after migration below)
-
 
     # Migrate: add missing columns to tasks table if needed
     async with db.execute("PRAGMA table_info(tasks)") as cursor:
@@ -169,476 +181,54 @@ async def init_db():
     logger.info(f"Database ready: {DB_PATH}")
 
 
-# ── Job queue persistence ─────────────────────────────────────────────────────────
-# The tasks table doubles as a durable job queue: payload_json holds everything
-# needed to (re)run the pipeline. It is cleared when the task finishes because
-# it may contain the user's Zoom session cookies.
-
-_IN_FLIGHT_STATUSES = [
-    TaskStatus.PENDING.value,
-    TaskStatus.DOWNLOADING.value,
-    TaskStatus.TRANSCRIBING.value,
-    TaskStatus.SUMMARIZING.value,
-]
-
-
-async def set_job_payload(task_id: str, payload: dict) -> None:
-    db = await _get_db()
-    await db.execute(
-        "UPDATE tasks SET payload_json=? WHERE id=?",
-        [json.dumps(payload, ensure_ascii=False), task_id],
-    )
-    await db.commit()
-
-
-async def get_job_payload(task_id: str) -> Optional[dict]:
-    db = await _get_db()
-    async with db.execute(
-        "SELECT payload_json FROM tasks WHERE id=?", [task_id]
-    ) as cursor:
-        row = await cursor.fetchone()
-    if row is None or not row["payload_json"]:
-        return None
-    return json.loads(row["payload_json"])
-
-
-async def clear_job_payload(task_id: str) -> None:
-    """Wipe the job payload once processing ends — cookies must not linger."""
-    db = await _get_db()
-    await db.execute("UPDATE tasks SET payload_json=NULL WHERE id=?", [task_id])
-    await db.commit()
-
-
-async def reset_interrupted_tasks() -> list[str]:
-    """
-    Called on startup by the worker. Tasks that were mid-flight when the server
-    died are re-queued if their job payload is intact (and, for uploads, the
-    source file still exists on disk); the rest are marked failed.
-
-    Returns the list of task ids to re-enqueue, oldest first.
-    """
-    db = await _get_db()
-    placeholders = ",".join("?" * len(_IN_FLIGHT_STATUSES))
-    async with db.execute(
-        f"SELECT id, payload_json FROM tasks WHERE status IN ({placeholders}) "
-        "ORDER BY created_at ASC",
-        _IN_FLIGHT_STATUSES,
-    ) as cursor:
-        rows = await cursor.fetchall()
-
-    resumable: list[str] = []
-    dead: list[str] = []
-    for row in rows:
-        payload = None
-        if row["payload_json"]:
-            try:
-                payload = json.loads(row["payload_json"])
-            except ValueError:
-                payload = None
-        file_path = (payload or {}).get("file_path")
-        if payload and (file_path is None or Path(file_path).exists()):
-            resumable.append(row["id"])
-        else:
-            dead.append(row["id"])
-
-    if resumable:
-        marks = ",".join("?" * len(resumable))
-        await db.execute(
-            f"UPDATE tasks SET status=?, progress=0, message=? WHERE id IN ({marks})",
-            [TaskStatus.PENDING.value, "ממתין בתור (חודש אחרי הפעלה מחדש)"] + resumable,
-        )
-        logger.warning(f"Re-queued {len(resumable)} interrupted task(s) on startup")
-    if dead:
-        marks = ",".join("?" * len(dead))
-        await db.execute(
-            f"UPDATE tasks SET status=?, progress=0, message=?, error=? WHERE id IN ({marks})",
-            [
-                TaskStatus.FAILED.value,
-                "השרת הופעל מחדש — המשימה הופסקה",
-                "השרת הופעל מחדש — נסה שוב",
-            ] + dead,
-        )
-        logger.warning(f"Marked {len(dead)} interrupted task(s) as failed on startup")
-    await db.commit()
-    return resumable
-
-
-# ── CRUD ──────────────────────────────────────────────────────────────────────────
-
-async def create_task(task_id: str, url: str, user_id: Optional[str] = None) -> TaskResponse:
-    now = datetime.now(timezone.utc).isoformat()
-    db = await _get_db()
-    await db.execute(
-        "INSERT INTO tasks (id, status, progress, message, created_at, url, user_id) VALUES (?,?,?,?,?,?,?)",
-        [task_id, TaskStatus.PENDING.value, 0, "Task queued", now, url, user_id],
-    )
-    await db.commit()
-    return TaskResponse(
-        task_id=task_id,
-        status=TaskStatus.PENDING,
-        progress=0,
-        message="Task queued",
-        created_at=now,
-        url=url,
-    )
-
-
-async def update_task(task_id: str, status: TaskStatus, progress: int, message: str):
-    db = await _get_db()
-    await db.execute(
-        "UPDATE tasks SET status=?, progress=?, message=? WHERE id=?",
-        [status.value, progress, message, task_id],
-    )
-    await db.commit()
-    _events.publish(task_id, {
-        "type": "status",
-        "status": status.value,
-        "progress": progress,
-        "message": message,
-    })
-
-
-async def complete_task(task_id: str, result: LessonResult):
-    db = await _get_db()
-    # Clear the live-preview column on completion — the full transcript is
-    # stored in result_json, so partial_transcript is no longer needed and
-    # would only waste space in the DB.
-    await db.execute(
-        "UPDATE tasks SET status=?, progress=100, message=?, result_json=?, partial_transcript=NULL WHERE id=?",
-        [TaskStatus.COMPLETED.value, "Processing complete ✅", result.model_dump_json(), task_id],
-    )
-    await db.commit()
-    _events.publish(task_id, {"type": "done", "status": TaskStatus.COMPLETED.value})
-
-
-async def fail_task(task_id: str, error: str, detail: str = ""):
-    """Mark a task failed. `error` is the user-facing message; `detail` keeps
-    the technical cause in error_detail so failures are debuggable later."""
-    # Truncate long error messages so they fit cleanly in the DB
-    short_error = error[:500] if len(error) > 500 else error
-    db = await _get_db()
-    await db.execute(
-        "UPDATE tasks SET status=?, message=?, error=?, error_detail=? WHERE id=?",
-        [TaskStatus.FAILED.value, f"Failed: {short_error}", short_error, detail[:2000], task_id],
-    )
-    await db.commit()
-    _events.publish(task_id, {"type": "done", "status": TaskStatus.FAILED.value})
-
-
-async def get_task(task_id: str) -> Optional[TaskResponse]:
-    db = await _get_db()
-    async with db.execute("SELECT * FROM tasks WHERE id=?", [task_id]) as cursor:
-        row = await cursor.fetchone()
-
-    if row is None:
-        return None
-
-    result = None
-    if row["result_json"]:
-        result = LessonResult.model_validate_json(row["result_json"])
-
-    audio_path = row["audio_path"] if "audio_path" in row.keys() else None
-    has_audio = bool(audio_path) and Path(audio_path).exists()
-
-    return TaskResponse(
-        task_id=row["id"],
-        status=TaskStatus(row["status"]),
-        progress=row["progress"],
-        message=row["message"],
-        created_at=row["created_at"],
-        url=row["url"],
-        result=result,
-        error=row["error"],
-        has_audio=has_audio,
-    )
-
-
-async def get_task_for_user(task_id: str, user_id: str) -> Optional[TaskResponse]:
-    """
-    Return a task only if it belongs to user_id.
-    Returns None if not found OR if owned by a different user — both look like 404
-    to prevent task-id enumeration across users.
-    """
-    db = await _get_db()
-    async with db.execute(
-        "SELECT * FROM tasks WHERE id=? AND (user_id=? OR user_id IS NULL)",
-        [task_id, user_id],
-    ) as cursor:
-        row = await cursor.fetchone()
-
-    if row is None:
-        return None
-
-    result = None
-    if row["result_json"]:
-        result = LessonResult.model_validate_json(row["result_json"])
-
-    audio_path = row["audio_path"] if "audio_path" in row.keys() else None
-    has_audio = bool(audio_path) and Path(audio_path).exists()
-
-    return TaskResponse(
-        task_id=row["id"],
-        status=TaskStatus(row["status"]),
-        progress=row["progress"],
-        message=row["message"],
-        created_at=row["created_at"],
-        url=row["url"],
-        result=result,
-        error=row["error"],
-        has_audio=has_audio,
-    )
-
-
-async def list_tasks(limit: int = 50, user_id: Optional[str] = None) -> list[dict]:
-    db = await _get_db()
-    if user_id:
-        async with db.execute(
-            "SELECT id, status, progress, message, created_at, url FROM tasks "
-            "WHERE user_id=? ORDER BY created_at DESC LIMIT ?",
-            [user_id, limit],
-        ) as cursor:
-            rows = await cursor.fetchall()
-    else:
-        async with db.execute(
-            "SELECT id, status, progress, message, created_at, url FROM tasks "
-            "ORDER BY created_at DESC LIMIT ?",
-            [limit],
-        ) as cursor:
-            rows = await cursor.fetchall()
-    return [dict(row) for row in rows]
-
-
-async def delete_task(task_id: str):
-    db = await _get_db()
-    await db.execute("DELETE FROM tasks WHERE id=?", [task_id])
-    await db.commit()
-
-
-# ── Auth CRUD ─────────────────────────────────────────────────────────────────────
-
-async def get_or_create_user(email: str) -> str:
-    """Return user_id for the email, creating the user row if this is their first login."""
-    db = await _get_db()
-    async with db.execute("SELECT id FROM users WHERE email=?", [email.lower()]) as cursor:
-        row = await cursor.fetchone()
-    if row:
-        return row["id"]
-    user_id = str(uuid.uuid4())
-    now = datetime.now(timezone.utc).isoformat()
-    await db.execute(
-        "INSERT INTO users (id, email, created_at) VALUES (?,?,?)",
-        [user_id, email.lower(), now],
-    )
-    await db.commit()
-    return user_id
-
-
-async def create_magic_token(user_id: str) -> str:
-    """Create a 15-minute single-use token. Returns the token string."""
-    from datetime import timedelta
-    token = str(uuid.uuid4())
-    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat()
-    db = await _get_db()
-    await db.execute(
-        "INSERT INTO magic_tokens (token, user_id, expires_at) VALUES (?,?,?)",
-        [token, user_id, expires_at],
-    )
-    await db.commit()
-    return token
-
-
-async def consume_magic_token(token: str) -> Optional[str]:
-    """
-    Validate and consume a magic token.
-    Returns user_id if valid, None if expired/used/unknown.
-    Marks the token used=1 on success.
-    """
-    db = await _get_db()
-    async with db.execute(
-        "SELECT user_id, expires_at, used FROM magic_tokens WHERE token=?", [token]
-    ) as cursor:
-        row = await cursor.fetchone()
-    if row is None or row["used"]:
-        return None
-    expires_at = datetime.fromisoformat(row["expires_at"])
-    if datetime.now(timezone.utc) > expires_at:
-        return None
-    await db.execute("UPDATE magic_tokens SET used=1 WHERE token=?", [token])
-    await db.commit()
-    return row["user_id"]
-
-
-async def create_session(user_id: str) -> str:
-    """Create a 30-day session. Returns the session_id (stored in cookie)."""
-    from datetime import timedelta
-    session_id = str(uuid.uuid4())
-    now = datetime.now(timezone.utc)
-    expires_at = (now + timedelta(days=30)).isoformat()
-    db = await _get_db()
-    await db.execute(
-        "INSERT INTO sessions (id, user_id, created_at, expires_at) VALUES (?,?,?,?)",
-        [session_id, user_id, now.isoformat(), expires_at],
-    )
-    await db.commit()
-    return session_id
-
-
-async def get_session_user(session_id: str) -> Optional[str]:
-    """Return user_id if session exists and has not expired. None otherwise."""
-    db = await _get_db()
-    async with db.execute(
-        "SELECT user_id, expires_at FROM sessions WHERE id=?", [session_id]
-    ) as cursor:
-        row = await cursor.fetchone()
-    if row is None:
-        return None
-    expires_at = datetime.fromisoformat(row["expires_at"])
-    if datetime.now(timezone.utc) > expires_at:
-        return None
-    return row["user_id"]
-
-
-async def delete_session(session_id: str):
-    """Delete a session (logout)."""
-    db = await _get_db()
-    await db.execute("DELETE FROM sessions WHERE id=?", [session_id])
-    await db.commit()
-
-
-# ── Live transcript preview ───────────────────────────────────────────────────────
-
-# Maximum characters stored in partial_transcript (~500 KB of Hebrew text).
-# Prevents runaway growth on very long recordings; the final transcript in
-# result_json has no such limit — this only caps the live preview column.
-_MAX_PARTIAL_TRANSCRIPT_CHARS = 300_000
-
-
-async def append_partial_transcript(task_id: str, text: str) -> None:
-    """
-    Append a chunk of text to the task's live transcript column.
-    Called from transcriber.py as segments arrive (WHISPER modes only).
-    Uses SQLite's native || string concatenation — safe for concurrent WAL writers.
-    Silently drops writes once the column reaches _MAX_PARTIAL_TRANSCRIPT_CHARS.
-    """
-    if not text:
-        return
-    db = await _get_db()
-    # Guard: skip write if we are already at or above the size cap to prevent
-    # the column from growing unboundedly on multi-hour recordings.
-    # RETURNING gives the post-append length so the SSE event carries the
-    # authoritative total — the client uses it to detect missed deltas.
-    async with db.execute(
-        """
-        UPDATE tasks
-           SET partial_transcript = COALESCE(partial_transcript, '') || ?
-         WHERE id = ?
-           AND LENGTH(COALESCE(partial_transcript, '')) < ?
-     RETURNING LENGTH(partial_transcript)
-        """,
-        [text, task_id, _MAX_PARTIAL_TRANSCRIPT_CHARS],
-    ) as cursor:
-        row = await cursor.fetchone()
-    await db.commit()
-    if row is not None:
-        _events.publish(task_id, {"type": "transcript", "text": text, "total": row[0]})
-
-
-async def get_partial_transcript(task_id: str, from_offset: int = 0) -> tuple[str, int]:
-    """
-    Return new transcript text since from_offset, plus the current total length.
-    Used by the GET /api/tasks/{id}/transcript endpoint so the frontend only
-    fetches the delta on each poll rather than the entire growing string.
-
-    Returns (delta_text, total_length).
-    """
-    db = await _get_db()
-    async with db.execute(
-        "SELECT partial_transcript FROM tasks WHERE id=?", [task_id]
-    ) as cursor:
-        row = await cursor.fetchone()
-
-    if row is None or row["partial_transcript"] is None:
-        return "", 0
-
-    full: str = row["partial_transcript"]
-    total = len(full)
-    delta = full[from_offset:] if from_offset < total else ""
-    return delta, total
-
-
-# ── Chat history ──────────────────────────────────────────────────────────────────
-
-# Keep at most this many messages in the stored history (user + model turns combined).
-# Older messages are trimmed from the front so the most recent context is preserved.
-_MAX_CHAT_MESSAGES = 40
-
-
-async def get_chat_history(task_id: str) -> list[dict]:
-    """
-    Return the stored chat history for a task as a list of
-    {"role": "user"|"model", "content": "..."} dicts.
-    Returns an empty list if no history yet.
-    """
-    import json as _json
-    db = await _get_db()
-    async with db.execute(
-        "SELECT chat_history FROM tasks WHERE id=?", [task_id]
-    ) as cursor:
-        row = await cursor.fetchone()
-    if row is None or not row["chat_history"]:
-        return []
-    try:
-        return _json.loads(row["chat_history"])
-    except (ValueError, TypeError):
-        return []
-
-
-async def append_chat_message(task_id: str, role: str, content: str) -> None:
-    """
-    Append one message to the task's chat history and persist it.
-    Trims the history to _MAX_CHAT_MESSAGES (oldest messages dropped first).
-    """
-    import json as _json
-    history = await get_chat_history(task_id)
-    history.append({"role": role, "content": content})
-    # Trim from front to keep within the message cap
-    if len(history) > _MAX_CHAT_MESSAGES:
-        history = history[-_MAX_CHAT_MESSAGES:]
-    db = await _get_db()
-    await db.execute(
-        "UPDATE tasks SET chat_history=? WHERE id=?",
-        [_json.dumps(history, ensure_ascii=False), task_id],
-    )
-    await db.commit()
-
-
-async def clear_chat_history(task_id: str) -> None:
-    """Delete the chat history for a task (user-initiated reset)."""
-    db = await _get_db()
-    await db.execute(
-        "UPDATE tasks SET chat_history=NULL WHERE id=?", [task_id]
-    )
-    await db.commit()
-
-
-# ── Audio path tracking (Feature 7) ───────────────────────────────────────────────
-
-async def set_audio_path(task_id: str, audio_path: str) -> None:
-    """Store the persistent audio file path so the UI can stream it back."""
-    db = await _get_db()
-    await db.execute(
-        "UPDATE tasks SET audio_path=? WHERE id=?", [audio_path, task_id]
-    )
-    await db.commit()
-
-
-async def get_audio_path(task_id: str) -> Optional[str]:
-    """Return the stored audio file path for a task, or None if not set."""
-    db = await _get_db()
-    async with db.execute(
-        "SELECT audio_path FROM tasks WHERE id=?", [task_id]
-    ) as cursor:
-        row = await cursor.fetchone()
-    if row is None:
-        return None
-    return row["audio_path"]
+# ── Facade re-exports ─────────────────────────────────────────────────────────────
+# Imported at the bottom so the repositories (which call state._get_db() at
+# runtime) can `from app import state` while this module is still initializing.
+
+from app.repositories.tasks import (   # noqa: E402
+    _MAX_PARTIAL_TRANSCRIPT_CHARS,
+    _NOT_TERMINAL_GUARD,
+    _TERMINAL_STATUSES,
+    _row_to_task_response,
+    append_partial_transcript,
+    backfill_task_owners,
+    cancel_task,
+    clear_audio_path,
+    complete_task,
+    create_task,
+    delete_task,
+    fail_task,
+    get_audio_path,
+    get_partial_transcript,
+    get_task,
+    get_task_for_user,
+    list_reclaimable_media,
+    list_tasks,
+    requeue_task,
+    set_audio_path,
+    update_task,
+)
+from app.repositories.jobs import (   # noqa: E402
+    _IN_FLIGHT_STATUSES,
+    clear_job_payload,
+    finalize_job_payload,
+    get_job_payload,
+    list_payload_file_paths,
+    reset_interrupted_tasks,
+    set_job_payload,
+)
+from app.repositories.auth import (   # noqa: E402
+    consume_magic_token,
+    create_magic_token,
+    create_session,
+    delete_session,
+    get_or_create_user,
+    get_session_user,
+    purge_expired_auth,
+)
+from app.repositories.chat import (   # noqa: E402
+    _MAX_CHAT_MESSAGES,
+    append_chat_message,
+    clear_chat_history,
+    get_chat_history,
+)

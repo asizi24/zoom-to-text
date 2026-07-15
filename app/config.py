@@ -89,6 +89,14 @@ class Settings(BaseSettings):
     # queue. Raise only if RAM allows a second Whisper transcription.
     pipeline_concurrency: int = 1
 
+    # ── Storage retention ───────────────────────────────────────────────────────
+    # A background sweep deletes heavy media (persisted playback audio + the
+    # upload sources kept for retryable failed/cancelled tasks) for tasks that
+    # reached a terminal state more than this many days ago. The DB row and its
+    # transcript/summary stay intact — only the audio bytes are reclaimed.
+    # Set to 0 to disable the sweep entirely.
+    media_retention_days: int = 7
+
     # ── Paths ───────────────────────────────────────────────────────────────────
     # Override with DATA_DIR=/tmp/data on Cloud Run / Fly.io
     data_dir: Path = Path("data")
@@ -112,6 +120,18 @@ class Settings(BaseSettings):
 
     # ── App ─────────────────────────────────────────────────────────────────────
     app_title: str = "Zoom Transcriber"
+    # Explicit deployment stage. "production" changes safety behavior:
+    # the dev magic-link bypass (token logged to terminal) is refused, and a
+    # missing/placeholder Resend key becomes a STARTUP error instead of a
+    # silent fallback. Anything else counts as development.
+    environment: str = "development"   # development | production
+    # Log output format: "text" for local terminals, "json" (one object per
+    # line) for aggregation — docker-compose sets LOG_FORMAT=json.
+    log_format: str = "text"
+
+    @property
+    def is_production(self) -> bool:
+        return self.environment.strip().lower() == "production"
     # Base URL shown in responses (used by the Chrome extension to know where to post)
     base_url: str = "http://localhost:8000"
 
@@ -122,6 +142,27 @@ class Settings(BaseSettings):
     resend_api_key: str = ""
     # Allowed CORS origin — set to your Fly.io domain in production
     cors_origin: str = "http://localhost:8000"
+    # Session-cookie Secure flag. None (default) keeps the historical
+    # heuristic: secure unless base_url starts with http://localhost.
+    # Set explicitly (true/false) when serving over plain http on a LAN.
+    cookie_secure: Optional[bool] = None
+
+    # ── Download URL policy (SSRF guard) ────────────────────────────────────────
+    # yt-dlp's generic extractor will fetch almost any URL, so submitted links
+    # are vetted first. When True, hosts resolving to loopback/private/
+    # link-local addresses are rejected — a submitted URL can't be used to
+    # probe the LAN or the server itself.
+    block_private_download_targets: bool = True
+    # Optional comma-separated host allowlist (suffix match), e.g.
+    # "zoom.us,us02web.zoom.us". Empty = any public host is allowed.
+    allowed_download_hosts: str = ""
+
+    # ── Rate limiting (in-process token bucket, per client IP) ──────────────────
+    rate_limit_enabled: bool = True
+    # Magic-link requests: low — each one sends (or logs) an email.
+    rate_limit_auth_per_minute: int = 5
+    # Task submissions (create/upload/retry): each one queues heavy pipeline work.
+    rate_limit_tasks_per_minute: int = 10
 
     @property
     def resend_configured(self) -> bool:
@@ -130,7 +171,6 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
-
-# Ensure required directories exist at import time
-settings.data_dir.mkdir(parents=True, exist_ok=True)
-settings.downloads_dir.mkdir(parents=True, exist_ok=True)
+# NOTE: no filesystem side effects here — importing config must be pure.
+# Directories are created where they're first needed: the lifespan startup
+# (app/main.py) plus defensive mkdirs at each write site.

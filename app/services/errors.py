@@ -18,3 +18,14 @@ class PipelineError(Exception):
         super().__init__(detail or user_message)
         self.user_message = user_message
         self.detail = detail
+
+
+class TaskCancelled(Exception):
+    """Raised at a cooperative checkpoint when the task has been cancelled by
+    the user. NOT a PipelineError — it is a normal, expected control-flow
+    signal, not a failure, so the pipeline unwinds without marking the task
+    FAILED (the cancel endpoint has already set status=CANCELLED)."""
+
+    def __init__(self, task_id: str = ""):
+        super().__init__(f"task {task_id} cancelled")
+        self.task_id = task_id

@@ -12,23 +12,32 @@ A FastAPI service that receives a Zoom recording (URL or file upload) and return
 - **Summarization**: Gemini 2.5 Flash via google-genai SDK, returns raw JSON (no markdown fences)
 - **Download**: yt-dlp + ffmpeg, supports private recordings via Chrome cookie injection
 - **DB**: SQLite with aiosqlite (async), stores full result_json per task
-- **Frontend**: Single-file SPA at `static/index.html` (3 tabs: Link / Upload / History)
+- **Frontend**: SPA — markup in `static/index.html`, styles in `static/css/app.css`, no-build ES modules in `static/js/` (SSE with exponential-backoff reconnect + polling fallback)
 - **Infrastructure**: Docker + docker-compose
 - **Auth**: Chrome extension sends Netscape-format cookies directly to the server
 
 ## Key Files
 ```
-app/main.py                    # FastAPI app, lifespan, idle watcher
-app/config.py                  # Settings from .env (pydantic-settings)
+app/main.py                    # FastAPI app, lifespan, watchers, /health + /ready
+app/config.py                  # Settings from .env (pydantic-settings) — pure import, no side effects
 app/models.py                  # Pydantic schemas
-app/state.py                   # SQLite CRUD
-app/api/routes.py              # REST endpoints
+app/logging_config.py          # JSON/text logging + request_id/task_id contextvars
+app/ratelimit.py               # In-process token-bucket rate limiting
+app/state.py                   # SQLite connection lifecycle + data-access facade
+app/repositories/              # Domain queries: tasks / jobs / auth / chat
+app/api/routes.py              # Router aggregator (+ compat re-exports)
+app/api/routers/               # Endpoints by concern: tasks / events / chat / audio / flashcards
+app/api/errors.py              # Standard error envelope {detail, code, request_id}
 app/services/processor.py      # Main pipeline orchestrator
 app/services/transcriber.py    # Faster-Whisper + OpenAI API
 app/services/audio_preprocessor.py  # ffmpeg chunking + silence removal
 app/services/summarizer.py     # Gemini — summary + exam
-app/services/zoom_downloader.py     # yt-dlp + cookie handling
-static/index.html              # Full UI
+app/services/zoom_downloader.py     # yt-dlp + cookie handling + SSRF guard
+static/index.html              # UI markup (355 lines)
+static/css/app.css             # All styles
+static/js/                     # ES modules: main, store, api, sse, live, upload,
+                               #   progress, transcript, results, chat, player,
+                               #   flashcards, history, exports, ui
 extension/                     # Chrome extension
 ```
 

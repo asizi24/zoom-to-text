@@ -22,10 +22,16 @@ services:
       - ./static:/app/static:ro
 
     env_file:
-      - .env
+      # Optional: settings fall back to safe defaults, and pydantic-settings
+      # reads .env itself when present — a fresh clone must still compose up.
+      - path: .env
+        required: false
 
     environment:
       - PYTHONUNBUFFERED=1
+      # Structured logs in the container: one JSON object per line, ready for
+      # docker logs / Loki / CloudWatch. Local `uvicorn` runs keep text format.
+      - LOG_FORMAT=json
       # Override these per-environment as needed:
       # - WHISPER_MODEL=medium
       # - AUTO_SHUTDOWN_IDLE_MINUTES=30
@@ -55,6 +61,11 @@ services:
       timeout: 10s
       retries: 3
       start_period: 90s   # Give time for first-run model download
+
+    # The app never needs to escalate privileges (it already runs as appuser);
+    # this blocks setuid/setgid escalation even if a dependency is compromised.
+    security_opt:
+      - no-new-privileges:true
 
     restart: unless-stopped
 

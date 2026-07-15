@@ -3,7 +3,7 @@ Pydantic schemas for request/response validation.
 """
 from enum import Enum
 from typing import Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # ── Enums ───────────────────────────────────────────────────────────────────────
@@ -15,6 +15,10 @@ class TaskStatus(str, Enum):
     SUMMARIZING  = "summarizing"
     COMPLETED    = "completed"
     FAILED       = "failed"
+    # User-requested abort. Terminal, but retryable (POST /tasks/{id}/retry)
+    # exactly like FAILED. Cooperative: the worker/transcriber poll the
+    # cancellation registry and stop at the next safe checkpoint.
+    CANCELLED    = "cancelled"
 
 
 class ProcessingMode(str, Enum):
@@ -69,12 +73,23 @@ class LessonResult(BaseModel):
 # ── API request/response schemas ────────────────────────────────────────────────
 
 class TaskCreate(BaseModel):
-    url:      str = Field(..., description="Zoom recording URL")
+    url:      str = Field(..., max_length=4096, description="Zoom recording URL")
     mode:     ProcessingMode = ProcessingMode.GEMINI_DIRECT
     # Netscape-format cookie string extracted by the Chrome extension.
     # Required for private/institutional Zoom recordings (e.g. admin-ort-org-il.zoom.us).
     cookies:  Optional[str] = Field(None, description="Zoom session cookies (Netscape format)")
     language: str = Field("he", description="Audio language hint for Whisper (he, en, auto)")
+
+    @field_validator("url")
+    @classmethod
+    def _validate_url(cls, v: str) -> str:
+        # The URL is handed to yt-dlp, whose generic extractor will fetch
+        # almost anything — reject non-web schemes (file:, data:, javascript:)
+        # at the front door instead of relying on downstream behavior.
+        v = v.strip()
+        if not v.lower().startswith(("http://", "https://")):
+            raise ValueError("url must start with http:// or https://")
+        return v
 
 
 class TaskResponse(BaseModel):

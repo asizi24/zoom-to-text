@@ -23,6 +23,11 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "resend_api_key", "test_key", raising=False)  # added in Task 2
     monkeypatch.setattr(settings, "base_url", "http://testserver")
     monkeypatch.setattr(settings, "cors_origin", "http://testserver", raising=False)  # added in Task 2
+    # Deterministic regardless of the host machine's env: dev mode (prod mode
+    # refuses to start without a real Resend key) and no rate limiting (many
+    # tests log in / submit rapidly). The rate-limit tests re-enable it.
+    monkeypatch.setattr(settings, "environment", "development", raising=False)
+    monkeypatch.setattr(settings, "rate_limit_enabled", False, raising=False)
 
     from app.main import app
     from fastapi.testclient import TestClient

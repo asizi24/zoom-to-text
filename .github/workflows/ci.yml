@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [local-monolith, main]
+  pull_request:
+
+jobs:
+  test:
+    name: pytest (Python 3.11)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      # audio_preprocessor and the download pipeline shell out to ffmpeg/ffprobe
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run test suite
+        run: pytest -q
+
+  docker:
+    name: docker build (CPU-only image)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # ENABLE_GPU=0 skips the ~800 MB CUDA wheels — CI only needs to prove
+      # the image builds; the GPU variant is built on the workstation.
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          build-args: |
+            ENABLE_GPU=0
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

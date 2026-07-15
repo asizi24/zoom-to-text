@@ -65,11 +65,13 @@ def authed_client(client, monkeypatch, tmp_path):
       - get_current_user is overridden to return a fixed user_id
     """
     from app.main import app as fastapi_app
-    from app.api import routes as routes_module
+    # Patch the owning module (routers/audio) — routes.py only re-exports the
+    # name, and patching a re-export doesn't reach the endpoint's lookup.
+    from app.api.routers import audio as audio_module
 
     audio_root = (tmp_path / "audio").resolve()
     audio_root.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(routes_module, "_AUDIO_ROOT", audio_root)
+    monkeypatch.setattr(audio_module, "_AUDIO_ROOT", audio_root)
 
     fastapi_app.dependency_overrides[get_current_user] = lambda: "test-user"
 
@@ -83,7 +85,9 @@ def _seed_task_with_audio(audio_root: Path, task_id: str, body: bytes) -> Path:
     p.write_bytes(body)
 
     async def _setup():
-        await state_module.create_task(task_id, url="http://test/rec", user_id=None)
+        # Owned by the overridden current user — ownerless rows are no longer
+        # visible through the API (strict owner check + startup backfill).
+        await state_module.create_task(task_id, url="http://test/rec", user_id="test-user")
         await state_module.set_audio_path(task_id, str(p))
 
     asyncio.get_event_loop().run_until_complete(_setup())
@@ -102,7 +106,7 @@ def test_task_without_audio_returns_404(authed_client):
     client, _, _ = authed_client
 
     async def setup():
-        await state_module.create_task("t-no-audio", url="x", user_id=None)
+        await state_module.create_task("t-no-audio", url="x", user_id="test-user")
 
     asyncio.get_event_loop().run_until_complete(setup())
     r = client.get("/api/tasks/t-no-audio/audio")
@@ -116,7 +120,7 @@ def test_audio_path_outside_root_is_rejected(authed_client, tmp_path):
     evil.write_bytes(b"PWNED" * 10)
 
     async def setup():
-        await state_module.create_task("t-escape", url="x", user_id=None)
+        await state_module.create_task("t-escape", url="x", user_id="test-user")
         await state_module.set_audio_path("t-escape", str(evil))
 
     asyncio.get_event_loop().run_until_complete(setup())

@@ -31,10 +31,12 @@ from pathlib import Path
 
 import httpx
 
+from app import cancellation
+from app import state as _state
 from app.config import settings
 from app.models import TaskStatus
 from app.services import audio_preprocessor
-from app.services.errors import PipelineError
+from app.services.errors import PipelineError, TaskCancelled
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +164,36 @@ async def unload_model_if_idle():
     await _slot.unload_if_idle(_IDLE_THRESHOLD)
 
 
+async def drain(timeout: float = 30.0) -> bool:
+    """Wait until the whisper thread pool has no in-flight work.
+
+    Called during shutdown AFTER worker.stop() flagged in-flight tasks for
+    cancellation and BEFORE state.close_db(): the pool has one FIFO worker, so
+    a no-op submitted now completes only once the running transcription has
+    unwound past its next per-segment cancel checkpoint — guaranteeing no
+    thread-side run_coroutine_threadsafe callback can land on a closed DB.
+
+    Deliberately drains rather than shutting the pool down: the executor is
+    module-level and tests start/stop the app repeatedly in one process.
+    Returns False if the pool didn't quiesce within `timeout` (wedged decode);
+    shutdown proceeds anyway and Docker's stop grace period is the backstop.
+    """
+    loop = asyncio.get_running_loop()
+    try:
+        await asyncio.wait_for(
+            loop.run_in_executor(_whisper_pool, lambda: None), timeout
+        )
+        return True
+    except asyncio.TimeoutError:
+        logger.warning(
+            f"Whisper pool did not drain within {timeout:.0f}s — continuing shutdown"
+        )
+        return False
+    except RuntimeError:
+        # Pool already shut down (interpreter teardown) — nothing to wait for.
+        return True
+
+
 # ── LOCAL transcription ───────────────────────────────────────────────────────
 
 def _transcribe_sync(
@@ -170,6 +202,7 @@ def _transcribe_sync(
     language: str,
     segment_cb=None,
     progress_cb=None,
+    cancel_cb=None,
 ) -> tuple[str, str]:
     """
     Blocking transcription — runs in the whisper pool.
@@ -182,6 +215,12 @@ def _transcribe_sync(
     with how far into the recording the transcription has reached (0.0–1.0).
     Transcription is by far the longest pipeline step — without this the task
     progress bar sits frozen for the entire run.
+
+    cancel_cb: optional sync callable() -> bool, polled once per segment. When
+    it returns True we raise TaskCancelled immediately — the generator stops
+    pulling audio, the model slot is released by the caller's finally, and the
+    GPU is freed. A lecture is thousands of ~5s segments, so the check is both
+    cheap (a set lookup) and responsive (abort within one segment).
     """
     lang_hint = language if language != "auto" else None
 
@@ -222,6 +261,14 @@ def _transcribe_sync(
     last_progress = time.time()
 
     for seg in segments:
+        # Cooperative cancellation checkpoint. Checked before doing any work on
+        # the segment so an abort takes effect at the very next window. Flush
+        # whatever partial text we already have so the live preview isn't lost.
+        if cancel_cb is not None and cancel_cb():
+            if segment_cb is not None and buffer:
+                segment_cb(" ".join(buffer) + " ")
+            raise TaskCancelled()
+
         text = seg.text.strip()
         if not text:
             continue
@@ -254,6 +301,18 @@ def _transcribe_sync(
     return " ".join(full_texts), info.language
 
 
+def _make_cancel_cb(task_id: str | None):
+    """
+    Return a sync predicate the transcription thread polls to learn whether the
+    task has been cancelled, or None when no task_id is given. Pure in-memory
+    (app.cancellation) — no event-loop bridging, so it is safe and cheap to call
+    from the worker thread on every segment.
+    """
+    if task_id is None:
+        return None
+    return lambda _tid=task_id: cancellation.is_cancelled(_tid)
+
+
 def _make_segment_cb(task_id: str | None, loop: asyncio.AbstractEventLoop):
     """
     Build a thread-safe segment callback that fires-and-forgets partial
@@ -264,17 +323,20 @@ def _make_segment_cb(task_id: str | None, loop: asyncio.AbstractEventLoop):
     if task_id is None:
         return None
 
-    from app import state as _state  # local import avoids circular at module level
-
     def segment_cb(text: str, _tid=task_id, _loop=loop) -> None:
-        future = asyncio.run_coroutine_threadsafe(
-            _state.append_partial_transcript(_tid, text),
-            _loop,
-        )
-        future.add_done_callback(
-            lambda f: f.exception() and logger.warning(
-                "partial transcript write failed for %s: %s", _tid, f.exception()
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                _state.append_partial_transcript(_tid, text),
+                _loop,
             )
+        except RuntimeError:
+            # Loop closed mid-shutdown — nowhere to persist to; the restart
+            # recovery re-runs this task anyway.
+            return
+        future.add_done_callback(
+            lambda f: f.cancelled() or (f.exception() and logger.warning(
+                "partial transcript write failed for %s: %s", _tid, f.exception()
+            ))
         )
 
     return segment_cb
@@ -295,8 +357,6 @@ def _make_progress_cb(task_id: str | None, loop: asyncio.AbstractEventLoop):
     if task_id is None:
         return None
 
-    from app import state as _state  # local import avoids circular at module level
-
     last_pct = _PROGRESS_FLOOR
 
     def progress_cb(fraction: float, _tid=task_id, _loop=loop) -> None:
@@ -306,14 +366,17 @@ def _make_progress_cb(task_id: str | None, loop: asyncio.AbstractEventLoop):
             return
         last_pct = pct
         message = f"🎙️ מתמלל... {int(fraction * 100)}% מההקלטה"
-        future = asyncio.run_coroutine_threadsafe(
-            _state.update_task(_tid, TaskStatus.TRANSCRIBING, pct, message),
-            _loop,
-        )
-        future.add_done_callback(
-            lambda f: f.exception() and logger.warning(
-                "progress update failed for %s: %s", _tid, f.exception()
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                _state.update_task(_tid, TaskStatus.TRANSCRIBING, pct, message),
+                _loop,
             )
+        except RuntimeError:
+            return  # loop closed mid-shutdown — see segment_cb
+        future.add_done_callback(
+            lambda f: f.cancelled() or (f.exception() and logger.warning(
+                "progress update failed for %s: %s", _tid, f.exception()
+            ))
         )
 
     return progress_cb
@@ -338,8 +401,11 @@ async def transcribe(
         transcript, detected_lang = await loop.run_in_executor(
             _whisper_pool, _transcribe_sync, model, audio_path, language,
             _make_segment_cb(task_id, loop), _make_progress_cb(task_id, loop),
+            _make_cancel_cb(task_id),
         )
     finally:
+        # Runs on cancellation too: the slot is released, its refcount drops,
+        # and the idle watcher can evict the model to reclaim VRAM.
         await _slot.release()
 
     logger.info(
@@ -370,6 +436,7 @@ async def transcribe_ivrit_ai(
         transcript, detected_lang = await loop.run_in_executor(
             _whisper_pool, _transcribe_sync, model, audio_path, language,
             _make_segment_cb(task_id, loop), _make_progress_cb(task_id, loop),
+            _make_cancel_cb(task_id),
         )
     finally:
         await _slot.release()
@@ -403,8 +470,6 @@ async def transcribe_via_api(
     Requires settings.openai_api_key to be set.
     Returns (transcript_text, language).
     """
-    from app import state as _state  # local import avoids circular at module level
-
     if not settings.openai_api_key:
         raise PipelineError(
             "מפתח OpenAI לא מוגדר בשרת — בחר מצב עיבוד אחר או הוסף OPENAI_API_KEY",
@@ -421,6 +486,10 @@ async def transcribe_via_api(
         transcripts: list[str] = []
         async with httpx.AsyncClient(timeout=300) as client:
             for i, chunk_path in enumerate(chunks, start=1):
+                # Cooperative cancellation between chunks — the finally below
+                # still cleans up the temp chunk files on the way out.
+                if task_id is not None and cancellation.is_cancelled(task_id):
+                    raise TaskCancelled(task_id)
                 logger.info(f"[OpenAI Whisper] Chunk {i}/{len(chunks)}: {chunk_path}")
                 text = await _call_whisper_api(client, chunk_path, language)
                 if text.strip():

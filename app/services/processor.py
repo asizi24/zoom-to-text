@@ -37,11 +37,11 @@ import logging
 import shutil
 from pathlib import Path
 
-from app import state
+from app import cancellation, state
 from app.config import settings
 from app.models import LessonResult, ProcessingMode, TaskStatus
 from app.services import audio_preprocessor, summarizer, transcriber, zoom_downloader
-from app.services.errors import PipelineError
+from app.services.errors import PipelineError, TaskCancelled
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +64,18 @@ async def _fail(task_id: str, exc: Exception):
         )
 
 
+def _raise_if_cancelled(task_id: str) -> None:
+    """Cooperative cancellation checkpoint between major pipeline steps.
+
+    Mid-transcription aborts are handled inside the transcriber (per segment);
+    this covers the gaps — cancelled-while-queued, and cancelled during the
+    long download/summarize awaits — so the work stops at the next boundary
+    instead of running to completion after the user hit cancel.
+    """
+    if cancellation.is_cancelled(task_id):
+        raise TaskCancelled(task_id)
+
+
 # ── Entry points ──────────────────────────────────────────────────────────────────
 
 async def run_pipeline(
@@ -76,6 +88,7 @@ async def run_pipeline(
     """Full pipeline starting from a Zoom URL."""
     audio_path: str | None = None
     try:
+        _raise_if_cancelled(task_id)
         await state.update_task(
             task_id, TaskStatus.DOWNLOADING, 5, "⬇️ מוריד את ההקלטה מ-Zoom..."
         )
@@ -92,14 +105,27 @@ async def run_pipeline(
             task_id, TaskStatus.DOWNLOADING, 40, "✅ ההורדה הושלמה. מעבד אודיו..."
         )
 
+        _raise_if_cancelled(task_id)
         result = await _process_audio(task_id, audio_path, mode, language)
         result = await _generate_flashcards_step(task_id, result)
         # Move the audio into a persistent per-task location so the UI player
         # can stream it back. Replaces the old "cleanup in finally" pattern.
         audio_path = await _persist_audio_for_task(task_id, audio_path)
-        await state.complete_task(task_id, result)
-        logger.info(f"Task {task_id} completed ✅")
+        if await state.complete_task(task_id, result):
+            logger.info(f"Task {task_id} completed ✅")
+        else:
+            # A cancel landed in the pipeline's final moments — the terminal
+            # CANCELLED row is sticky, so the result is discarded.
+            logger.info(f"Task {task_id} was cancelled at the finish line — result discarded")
 
+    except TaskCancelled:
+        # Not a failure — status is already CANCELLED (set by the cancel
+        # endpoint). Drop the temp download: a URL retry re-downloads from
+        # scratch, so keeping it would only orphan bytes on disk.
+        logger.info(f"Task {task_id} cancelled — cleaning up download")
+        cancellation.clear(task_id)
+        if audio_path:
+            await zoom_downloader.cleanup_audio(audio_path)
     except Exception as exc:
         if isinstance(exc, PipelineError):
             logger.error(f"Task {task_id} failed: {exc.user_message} ({exc.detail})")
@@ -118,6 +144,7 @@ async def run_pipeline_from_file(
 ):
     """Pipeline starting from an already-saved uploaded file."""
     try:
+        _raise_if_cancelled(task_id)
         await state.update_task(
             task_id, TaskStatus.TRANSCRIBING, 10, "📁 קובץ התקבל. מתחיל עיבוד..."
         )
@@ -140,19 +167,30 @@ async def run_pipeline_from_file(
                 if payload:
                     payload["file_path"] = file_path
                     await state.set_job_payload(task_id, payload)
+        _raise_if_cancelled(task_id)
         result = await _process_audio(task_id, file_path, mode, language)
         result = await _generate_flashcards_step(task_id, result)
         file_path = await _persist_audio_for_task(task_id, file_path)
-        await state.complete_task(task_id, result)
-        logger.info(f"Task {task_id} (upload) completed ✅")
+        if await state.complete_task(task_id, result):
+            logger.info(f"Task {task_id} (upload) completed ✅")
+        else:
+            logger.info(f"Task {task_id} (upload) was cancelled at the finish line — result discarded")
 
+    except TaskCancelled:
+        # Keep the uploaded source file on disk so POST /tasks/{id}/retry can
+        # replay it without a re-upload. The retention sweep reclaims it after
+        # settings.media_retention_days if the user never retries.
+        logger.info(f"Task {task_id} (upload) cancelled — keeping source for retry")
+        cancellation.clear(task_id)
     except Exception as exc:
         if isinstance(exc, PipelineError):
             logger.error(f"Task {task_id} (upload) failed: {exc.user_message} ({exc.detail})")
         else:
             logger.exception(f"Task {task_id} (upload) — unexpected error")
         await _fail(task_id, exc)
-        await zoom_downloader.cleanup_audio(file_path)
+        # NOTE: the uploaded file is deliberately NOT deleted here — a failure
+        # is often transient (Gemini 5xx, network) and retry reuses this exact
+        # file. Retention (app/main.py) reclaims it later if never retried.
 
 
 # ── Core processing logic ─────────────────────────────────────────────────────────
