@@ -24,6 +24,9 @@ import {
 import { sendChat, clearChat, hideChatPanel } from './chat.js';
 import { togglePlayback, scrubAudio, hideAudioPlayer, initPlayerKeys } from './player.js';
 import { toggleHistory } from './history.js';
+import {
+  generateSmartSummary, copySmartSummary, downloadSmartSummary, resetSmartSummary,
+} from './smartSummary.js';
 
 // ── Full view reset ("process another lesson") ────────────────────────────────
 function reset() {
@@ -51,6 +54,7 @@ function reset() {
   document.getElementById('transcript-section').style.display = 'none';
   document.getElementById('flashcards-section').style.display = 'none';
   resetFlashcards();
+  resetSmartSummary();
   hideError();
   switchTab('url');
 }
@@ -91,6 +95,7 @@ Object.assign(window, {
   toggleHistory,
   reset,
   checkAnswer,
+  generateSmartSummary, copySmartSummary, downloadSmartSummary,
 });
 
 // ── Startup ───────────────────────────────────────────────────────────────────

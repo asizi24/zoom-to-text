@@ -1521,3 +1521,73 @@
 @media (prefers-reduced-motion: reduce) {
   .toast { animation: none; transition: none; }
 }
+
+/* ── Smart Summary (on-demand Map-Reduce → Obsidian) ─────────────────────────── */
+/* Make the trigger stand out from the neutral export buttons. */
+.action-btn.ss-cta {
+  background: linear-gradient(135deg, #7c3aed, #db2777);
+  border-color: transparent;
+  color: #fff;
+  font-weight: 600;
+}
+.action-btn.ss-cta:hover { opacity: .92; }
+.action-btn.ss-cta:disabled { opacity: .6; cursor: default; }
+
+#smart-summary-section { margin-top: 20px; }
+.ss-panel {
+  border: 1px solid rgba(139, 92, 246, .28);
+  background: rgba(124, 58, 237, .06);
+  border-radius: 16px;
+  padding: 18px 20px;
+}
+.ss-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; flex-wrap: wrap; margin-bottom: 12px;
+}
+.ss-title { font-size: 1.05rem; font-weight: 700; }
+.ss-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.ss-status { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: .92rem; padding: 8px 0; }
+.ss-spinner {
+  width: 16px; height: 16px; border-radius: 50%;
+  border: 2px solid rgba(255,255,255,.2);
+  border-top-color: #a78bfa;
+  animation: ss-spin .8s linear infinite;
+  flex: 0 0 auto;
+}
+@keyframes ss-spin { to { transform: rotate(360deg); } }
+
+.ss-error {
+  padding: 10px 14px; border-radius: 10px;
+  background: rgba(239, 68, 68, .12);
+  border: 1px solid rgba(239, 68, 68, .3);
+  color: #fca5a5; font-size: .9rem;
+}
+
+/* Rendered markdown. dir=auto per block keeps Hebrew RTL and code LTR clean. */
+.ss-render { line-height: 1.7; }
+.ss-render .ss-h { margin: 18px 0 8px; font-weight: 700; }
+.ss-render h3.ss-h { font-size: 1.15rem; }
+.ss-render h4.ss-h { font-size: 1.02rem; color: var(--muted); }
+.ss-render .ss-p { margin: 8px 0; }
+.ss-render .ss-ul { margin: 8px 24px; }
+.ss-render .ss-ul li { margin: 4px 0; }
+.ss-inline-code {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: .88em; padding: 1px 6px; border-radius: 6px;
+  background: rgba(255,255,255,.08); unicode-bidi: embed;
+}
+.ss-code {
+  direction: ltr; text-align: left;
+  margin: 12px 0; padding: 14px 16px; overflow-x: auto;
+  border-radius: 12px;
+  background: rgba(0,0,0,.35);
+  border: 1px solid rgba(255,255,255,.08);
+}
+.ss-code code {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: .86rem; color: #e6e6f0; white-space: pre;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ss-spinner { animation: none; }
+}

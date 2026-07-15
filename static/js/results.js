@@ -8,6 +8,7 @@ import { linkifyTimestamps, showAudioPlayer } from './player.js';
 import { renderFlashcards } from './flashcards.js';
 import { showChatPanel } from './chat.js';
 import { buildMarkdown } from './exports.js';
+import { hydrateSmartSummary } from './smartSummary.js';
 
 let quizScore = { correct: 0, total: 0 };
 
@@ -122,6 +123,7 @@ export function showResults(result, taskId, hasAudio) {
 
   renderFlashcards(result.flashcards || [], taskId);
   if (taskId) showChatPanel(taskId);
+  hydrateSmartSummary(taskId);
 }
 
 export function checkAnswer(btn, selected, correct) {

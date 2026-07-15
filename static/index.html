@@ -244,10 +244,31 @@
 
   <!-- Action bar -->
   <div class="results-actions">
+    <button class="action-btn ss-cta" id="smart-summary-btn" onclick="generateSmartSummary()">✨ צור סיכום חכם</button>
     <button class="action-btn" onclick="exportObsidian()">🟣 ייצוא ל-Obsidian</button>
     <button class="action-btn" onclick="exportMarkdown()">⬇️ ייצוא Markdown</button>
     <button class="action-btn" id="copy-all-btn" onclick="copyAll()">📋 העתק הכל</button>
     <button class="action-btn" onclick="window.print()">🖨️ הדפסה</button>
+  </div>
+
+  <!-- Smart Summary (on-demand Map-Reduce → Obsidian) -->
+  <div id="smart-summary-section" style="display:none;">
+    <div class="ss-panel">
+      <div class="ss-head">
+        <span class="ss-title">✨ סיכום חכם ל-Obsidian</span>
+        <div class="ss-actions" id="ss-actions" style="display:none;">
+          <button class="action-btn" onclick="copySmartSummary(this)">📋 העתק</button>
+          <button class="action-btn" onclick="downloadSmartSummary()">⬇️ הורד .md</button>
+          <button class="action-btn" onclick="generateSmartSummary()">🔄 צור מחדש</button>
+        </div>
+      </div>
+      <div class="ss-status" id="ss-status" style="display:none;">
+        <span class="ss-spinner" aria-hidden="true"></span>
+        <span id="ss-status-text">יוצר סיכום חכם… זה עשוי לקחת דקה.</span>
+      </div>
+      <div class="ss-error" id="ss-error" style="display:none;"></div>
+      <div class="ss-render" id="ss-render" dir="auto"></div>
+    </div>
   </div>
 
   <!-- Summary -->
