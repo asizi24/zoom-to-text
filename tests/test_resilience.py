@@ -226,7 +226,7 @@ def test_delete_task_reclaims_retained_upload_source(
     remove that file too — the task row was its only reference."""
     import app.services.transcriber as transcriber
 
-    async def boom(audio_path, language, task_id=None):
+    async def boom(audio_path, language, task_id=None, **kwargs):
         raise RuntimeError("simulated crash")
 
     monkeypatch.setattr(transcriber, "transcribe", boom)

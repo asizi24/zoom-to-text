@@ -83,7 +83,7 @@ def test_upload_gemini_direct_completes(
     """GEMINI_DIRECT upload: no extraction, straight to summarize_audio."""
     import app.services.summarizer as summarizer
 
-    async def fake_summarize_audio(audio_path, progress_cb):
+    async def fake_summarize_audio(audio_path, progress_cb, language="he"):
         return fake_result
 
     async def fake_flashcards(summary, transcript=None):
@@ -134,7 +134,7 @@ def test_upload_whisper_local_completes(
     import app.services.summarizer as summarizer
     import app.services.transcriber as transcriber
 
-    async def fake_transcribe(audio_path, language, task_id=None):
+    async def fake_transcribe(audio_path, language, task_id=None, **kwargs):
         return "טקסט מתומלל", "he"
 
     async def fake_summarize_transcript(transcript, progress_cb):
@@ -201,7 +201,7 @@ def test_upload_payload_repointed_after_extraction(
         payloads.append(dict(payload))
         await real_set(task_id, payload)
 
-    async def fake_transcribe(audio_path, language, task_id=None):
+    async def fake_transcribe(audio_path, language, task_id=None, **kwargs):
         return "טקסט", "he"
 
     async def fake_summarize_transcript(transcript, progress_cb):

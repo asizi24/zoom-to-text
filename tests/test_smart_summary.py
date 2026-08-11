@@ -174,7 +174,7 @@ def isolated_dirs(tmp_path, monkeypatch):
 def test_smart_summary_end_to_end(client, mock_email, monkeypatch, isolated_dirs):
     import app.services.summarizer as summarizer
 
-    async def fake_summarize_audio(audio_path, progress_cb):
+    async def fake_summarize_audio(audio_path, progress_cb, language="he"):
         return LessonResult(summary="סיכום קצר של שיעור", chapters=[], quiz=[], language="he")
 
     async def fake_flashcards(summary, transcript=None):

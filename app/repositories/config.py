@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from app import state
+from app.state import get_write_lock
 
 logger = logging.getLogger(__name__)
 
@@ -33,21 +34,23 @@ async def get_config(key: str) -> Optional[str]:
 
 async def set_config(key: str, value: str) -> None:
     """Upsert a config value. One atomic statement (no read-modify-write)."""
-    db = await state._get_db()
-    now = datetime.now(timezone.utc).isoformat()
-    await db.execute(
-        "INSERT INTO app_config (key, value, updated_at) VALUES (?, ?, ?) "
-        "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
-        [key, value, now],
-    )
-    await db.commit()
+    async with get_write_lock():
+        db = await state._get_db()
+        now = datetime.now(timezone.utc).isoformat()
+        await db.execute(
+            "INSERT INTO app_config (key, value, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+            [key, value, now],
+        )
+        await db.commit()
 
 
 async def delete_config(key: str) -> None:
     """Remove a config key (e.g. clearing a stored API key)."""
-    db = await state._get_db()
-    await db.execute("DELETE FROM app_config WHERE key=?", [key])
-    await db.commit()
+    async with get_write_lock():
+        db = await state._get_db()
+        await db.execute("DELETE FROM app_config WHERE key=?", [key])
+        await db.commit()
 
 
 async def get_all_config() -> dict[str, str]:

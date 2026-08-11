@@ -109,7 +109,7 @@ def _parse_sse(body: str) -> list[dict]:
 def test_events_stream_for_completed_task(client, mock_email, monkeypatch, isolated_dirs):
     import app.services.summarizer as summarizer
 
-    async def fake_summarize_audio(audio_path, progress_cb):
+    async def fake_summarize_audio(audio_path, progress_cb, language="he"):
         return LessonResult(summary="סיכום", chapters=[], quiz=[], language="he")
 
     async def fake_flashcards(summary, transcript=None):

@@ -34,12 +34,14 @@ Progress milestones (WHISPER paths):
 TRANSCRIPTION_ONLY jumps 50% → 100% (no Gemini step at all).
 """
 import logging
+import re
 import shutil
 from pathlib import Path
 
 from app import cancellation, state
 from app.config import settings
 from app.models import LessonResult, ProcessingMode, TaskStatus
+from app.services import runtime_config
 from app.services import audio_preprocessor, summarizer, transcriber, zoom_downloader
 from app.services.errors import PipelineError, TaskCancelled
 
@@ -74,6 +76,27 @@ def _raise_if_cancelled(task_id: str) -> None:
     """
     if cancellation.is_cancelled(task_id):
         raise TaskCancelled(task_id)
+
+
+async def _get_resume_offset(task_id: str) -> float:
+    """Return a start-time offset (seconds) derived from the task's partial transcript.
+
+    Scans for the last ``[MM:SS]`` or ``[HH:MM:SS]`` timestamp; converts it to
+    total seconds and returns it, or ``0.0`` when no timestamps exist.
+    """
+    text, _ = await state.get_partial_transcript(task_id)
+    if not text:
+        return 0.0
+    # Match the last [MM:SS] or [HH:MM:SS] in the transcript
+    matches = re.findall(r"\[(\d{1,2}:\d{2}(:\d{2})?)\]", text)
+    if not matches:
+        return 0.0
+    _, last_ts = matches[-1]
+    parts = last_ts.split(":")
+    if len(parts) == 3:  # HH:MM:SS
+        return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+    else:                  # MM:SS
+        return int(parts[0]) * 60 + int(parts[1])
 
 
 # ── Entry points ──────────────────────────────────────────────────────────────────
@@ -204,68 +227,137 @@ async def _process_audio(
     """
     Transcribe and/or summarize the audio depending on the selected mode.
     Returns a populated LessonResult.
+
+    Local-only pipeline (default):
+      WHISPER_LOCAL  → Faster-Whisper transcript + Ollama summary/exam
+      WHISPER_API     → OpenAI whisper transcript + Ollama summary/exam
+      IVRIT_AI        → ivrit-ai transcript + Ollama summary/exam
+
+    Cloud paths (DISABLED — safely bypassed for local-first operation):
+      GEMINI_DIRECT   → raw audio uploaded to Gemini Files API  [bypassed]
+      TRANSCRIPTION_ONLY → transcript only, no LLM call         [still works]
     """
     if mode == ProcessingMode.GEMINI_DIRECT:
         await state.update_task(
             task_id,
             TaskStatus.SUMMARIZING,
             50,
-            "🤖 שולח אודיו ל-Gemini AI — מייצר סיכום ומבחן...",
+            "🎧 שולח את האודיו ישירות ל-Gemini Files API...",
         )
-        return await summarizer.summarize_audio(
-            audio_path, _make_progress_cb(task_id, TaskStatus.SUMMARIZING)
+        result = await summarizer.summarize_audio(
+            audio_path,
+            _make_progress_cb(task_id, TaskStatus.SUMMARIZING),
+            language=language,
         )
+        return result
 
-    if mode == ProcessingMode.TRANSCRIPTION_ONLY:
-        await state.update_task(
-            task_id,
-            TaskStatus.TRANSCRIBING,
-            50,
-            "📝 מתמלל בלבד עם ivrit-ai — ללא סיכום ומבחן...",
-        )
-        transcript, detected_lang = await transcriber.transcribe_ivrit_ai(
-            audio_path, language, task_id=task_id
-        )
-        # Transcript-only result: summary/chapters/quiz deliberately empty.
-        # The flashcards step short-circuits on an empty summary, so this
-        # mode never touches Gemini.
-        return LessonResult(transcript=transcript, language=detected_lang or "he")
+    payload = await state.get_job_payload(task_id)
+    if payload is None:
+        payload = {}
 
-    if mode == ProcessingMode.WHISPER_API:
-        await state.update_task(
-            task_id,
-            TaskStatus.TRANSCRIBING,
-            50,
-            "☁️ מסיר שקט ושולח ל-OpenAI Whisper API...",
-        )
-        transcript, _ = await transcriber.transcribe_via_api(audio_path, language, task_id=task_id)
+    # ── Resume from cached full transcript ────────────────────────────────
+    final_transcript = payload.get("final_transcript")
+    detected_lang = payload.get("cached_language", language)
 
-    elif mode == ProcessingMode.IVRIT_AI:
-        await state.update_task(
-            task_id,
-            TaskStatus.TRANSCRIBING,
-            50,
-            "🇮🇱 מתמלל עם ivrit-ai (מודל מותאם לעברית)...",
-        )
-        transcript, _ = await transcriber.transcribe_ivrit_ai(audio_path, language, task_id=task_id)
+    if final_transcript:
+        logger.info(f"Task {task_id}: Resuming from cached full transcript ({len(final_transcript)} chars)")
+        transcript = final_transcript
+        # Skip transcription entirely; proceed to summarization below.
+    elif detected_lang is None or detected_lang == "":
+        detected_lang = language
 
-    else:
-        await state.update_task(
-            task_id,
-            TaskStatus.TRANSCRIBING,
-            50,
-            "🎙️ מתמלל עם Whisper מקומי (עשוי לקחת מספר דקות)...",
+    if not final_transcript:
+        # ── Compute resume offset from partial transcript ───────────────
+        resume_offset = await _get_resume_offset(task_id)
+
+        if mode == ProcessingMode.TRANSCRIPTION_ONLY:
+            await state.update_task(
+                task_id,
+                TaskStatus.TRANSCRIBING,
+                50,
+                "📝 מתמלל בלבד — ללא סיכום ומבחן...",
+            )
+            transcript, detected_lang = await transcriber.transcribe_ivrit_ai(
+                audio_path, language, task_id=task_id
+            )
+            if resume_offset > 0:
+                partial_text, _ = await state.get_partial_transcript(task_id)
+                if partial_text:
+                    # Strip timestamps from the partial so we can concat cleanly
+                    clean_partial = re.sub(r"\[\d{1,2}:\d{2}(?::\d{2})?\]\s*", "", partial_text)
+                    transcript = clean_partial + " " + transcript
+
+            payload["cached_transcript"] = transcript
+            payload["cached_language"] = detected_lang
+            await state.set_job_payload(task_id, payload)
+            return LessonResult(transcript=transcript, language=detected_lang or "he")
+
+        # ── Whisper transcription ───────────────────────────────────────
+        if mode == ProcessingMode.WHISPER_API:
+            await state.update_task(
+                task_id,
+                TaskStatus.TRANSCRIBING,
+                50,
+                "☁️ מסיר שקט ושולח ל-OpenAI Whisper API...",
+            )
+            transcript, detected_lang = await transcriber.transcribe_via_api(
+                audio_path, language, task_id=task_id, resume_offset=resume_offset
+            )
+
+        elif mode == ProcessingMode.IVRIT_AI:
+            await state.update_task(
+                task_id,
+                TaskStatus.TRANSCRIBING,
+                50,
+                "🇮🇱 מתמלל עם ivrit-ai (מודל מותאם לעברית)...",
+            )
+            transcript, detected_lang = await transcriber.transcribe_ivrit_ai(
+                audio_path, language, task_id=task_id, resume_offset=resume_offset
+            )
+
+        else:
+            # Default / WHISPER_LOCAL — the primary local path
+            await state.update_task(
+                task_id,
+                TaskStatus.TRANSCRIBING,
+                50,
+                "🎙️ מתמלל עם Whisper מקומי (עשוי לקחת מספר דקות)...",
+            )
+            transcript, detected_lang = await transcriber.transcribe(
+                audio_path, language, task_id=task_id, resume_offset=resume_offset
+            )
+
+        # ── Save full transcript as checkpoint BEFORE summarization ───────
+        if resume_offset > 0:
+            partial_text, _ = await state.get_partial_transcript(task_id)
+            if partial_text:
+                clean_partial = re.sub(r"\[\d{1,2}:\d{2}(?::\d{2})?\]\s*", "", partial_text)
+                transcript = clean_partial + " " + transcript
+
+        payload["cached_transcript"] = transcript
+        payload["final_transcript"] = transcript
+        payload["cached_language"] = detected_lang
+        await state.set_job_payload(task_id, payload)
+
+    # ── Ollama summarization (local LLM) ────────────────────────────────────
+    if not transcript:
+        raise PipelineError(
+            "⚠️ התמלול נכשל — לא קיבלתי תוצאה מה-Mודל",
+            detail="transcription returned None transcript for mode={mode}",
         )
-        transcript, _ = await transcriber.transcribe(audio_path, language, task_id=task_id)
 
     await state.update_task(
         task_id,
         TaskStatus.SUMMARIZING,
         80,
-        "🤖 יוצר סיכום ומבחן עם Gemini AI...",
+        "🤖 יוצר סיכום ומבחן עם Ollama מקומי...",
     )
-    result = await summarizer.summarize_transcript(
-        transcript, _make_progress_cb(task_id, TaskStatus.SUMMARIZING)
+    result = await summarizer.summarize_transcript_with_ollama(
+        transcript,
+        ollama_host=settings.ollama_host,
+        model=(await runtime_config.get(runtime_config.KEY_OLLAMA_MODEL))
+            or settings.ollama_model,
+        timeout=settings.ollama_timeout,
     )
     result.transcript = transcript
     return result
@@ -330,7 +422,7 @@ async def _generate_flashcards_step(task_id: str, result) -> "LessonResult":
         "🃏 מייצר כרטיסיות לחזרה...",
     )
     try:
-        cards = await summarizer.generate_flashcards(result.summary, result.transcript)
+        cards = await summarizer.generate_flashcards(result.summary, result.transcript, language=result.language)
         result.flashcards = cards
         logger.info(f"Task {task_id}: generated {len(cards)} flashcards")
     except Exception as exc:

@@ -35,7 +35,17 @@ DB_PATH = settings.data_dir / "tasks.db"
 _db: aiosqlite.Connection | None = None
 _db_lock = asyncio.Lock()
 
-# ── Schema ───────────────────────────────────────────────────────────────────────
+# ── Write serialization lock ─────────────────────────────────────────────────
+_write_lock: asyncio.Lock | None = None
+
+def get_write_lock() -> asyncio.Lock:
+    global _write_lock
+    if _write_lock is None:
+        _write_lock = asyncio.Lock()
+    return _write_lock
+
+
+DB_PATH = settings.data_dir / "tasks.db"
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS tasks (
@@ -114,6 +124,9 @@ async def _get_db() -> aiosqlite.Connection:
         await _db.execute("PRAGMA busy_timeout=5000")
         # SQLite leaves REFERENCES clauses unenforced unless this is on.
         await _db.execute("PRAGMA foreign_keys=ON")
+        # Reduce lock contention under concurrent writes by using a busy
+        # retry strategy inside sqlite instead of failing immediately.
+        await _db.execute("PRAGMA journal_size_limit=1048576")
         # Set row_factory once on the shared connection so all cursors return
         # aiosqlite.Row objects — avoids repeated mutation of the shared connection.
         _db.row_factory = aiosqlite.Row
@@ -150,6 +163,7 @@ async def init_db():
     await db.execute(CREATE_MAGIC_TOKENS_TABLE_SQL)
     await db.execute(CREATE_SESSIONS_TABLE_SQL)
     await db.execute(CREATE_APP_CONFIG_TABLE_SQL)
+    await db.execute("CREATE TABLE IF NOT EXISTS job_payload (task_id TEXT PRIMARY KEY, payload_json TEXT NOT NULL)")
     await db.commit()
 
     # Migrate: add missing columns to tasks table if needed
@@ -193,6 +207,10 @@ async def init_db():
         await db.execute("ALTER TABLE tasks ADD COLUMN smart_summary_error TEXT")
         await db.commit()
         logger.info("Migrated tasks table: added smart_summary_error column")
+    if "updated_at" not in cols:
+        await db.execute("ALTER TABLE tasks ADD COLUMN updated_at TEXT")
+        await db.commit()
+        logger.info("Migrated tasks table: added updated_at column")
 
     # Create indexes now that all columns are guaranteed to exist.
     # (user_id, created_at DESC) serves the history listing exactly

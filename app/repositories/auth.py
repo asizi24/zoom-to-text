@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from app import state
+from app.state import get_write_lock
 
 logger = logging.getLogger(__name__)
 
@@ -20,17 +21,18 @@ async def get_or_create_user(email: str) -> str:
     the old pattern let both pass the SELECT and one INSERT blow up on the
     UNIQUE constraint. The conflict-tolerant INSERT + fresh SELECT is race-free.
     """
-    db = await state._get_db()
-    now = datetime.now(timezone.utc).isoformat()
-    await db.execute(
-        "INSERT INTO users (id, email, created_at) VALUES (?,?,?) "
-        "ON CONFLICT(email) DO NOTHING",
-        [str(uuid.uuid4()), email.lower(), now],
-    )
-    await db.commit()
-    async with db.execute("SELECT id FROM users WHERE email=?", [email.lower()]) as cursor:
-        row = await cursor.fetchone()
-    return row["id"]
+    async with get_write_lock():
+        db = await state._get_db()
+        now = datetime.now(timezone.utc).isoformat()
+        await db.execute(
+            "INSERT INTO users (id, email, created_at) VALUES (?,?,?) "
+            "ON CONFLICT(email) DO NOTHING",
+            [str(uuid.uuid4()), email.lower(), now],
+        )
+        await db.commit()
+        async with db.execute("SELECT id FROM users WHERE email=?", [email.lower()]) as cursor:
+            row = await cursor.fetchone()
+        return row["id"]
 
 
 async def create_magic_token(user_id: str) -> str:
@@ -39,13 +41,14 @@ async def create_magic_token(user_id: str) -> str:
     # meant for secrets, with more entropy (256 bits vs uuid4's 122).
     token = secrets.token_urlsafe(32)
     expires_at = (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat()
-    db = await state._get_db()
-    await db.execute(
-        "INSERT INTO magic_tokens (token, user_id, expires_at) VALUES (?,?,?)",
-        [token, user_id, expires_at],
-    )
-    await db.commit()
-    return token
+    async with get_write_lock():
+        db = await state._get_db()
+        await db.execute(
+            "INSERT INTO magic_tokens (token, user_id, expires_at) VALUES (?,?,?)",
+            [token, user_id, expires_at],
+        )
+        await db.commit()
+        return token
 
 
 async def consume_magic_token(token: str) -> Optional[str]:
@@ -58,19 +61,20 @@ async def consume_magic_token(token: str) -> Optional[str]:
     old check-then-update pattern had exactly that window. An expired token is
     also burned by the UPDATE, which is fine: it was unusable either way.
     """
-    db = await state._get_db()
-    async with db.execute(
-        "UPDATE magic_tokens SET used=1 WHERE token=? AND used=0 "
-        "RETURNING user_id, expires_at",
-        [token],
-    ) as cursor:
-        row = await cursor.fetchone()
-    await db.commit()
-    if row is None:
-        return None
-    if datetime.now(timezone.utc) > datetime.fromisoformat(row["expires_at"]):
-        return None
-    return row["user_id"]
+    async with get_write_lock():
+        db = await state._get_db()
+        async with db.execute(
+            "UPDATE magic_tokens SET used=1 WHERE token=? AND used=0 "
+            "RETURNING user_id, expires_at",
+            [token],
+        ) as cursor:
+            row = await cursor.fetchone()
+        await db.commit()
+        if row is None:
+            return None
+        if datetime.now(timezone.utc) > datetime.fromisoformat(row["expires_at"]):
+            return None
+        return row["user_id"]
 
 
 async def create_session(user_id: str) -> str:
@@ -78,13 +82,14 @@ async def create_session(user_id: str) -> str:
     session_id = secrets.token_urlsafe(32)  # credential — CSPRNG, not uuid4
     now = datetime.now(timezone.utc)
     expires_at = (now + timedelta(days=30)).isoformat()
-    db = await state._get_db()
-    await db.execute(
-        "INSERT INTO sessions (id, user_id, created_at, expires_at) VALUES (?,?,?,?)",
-        [session_id, user_id, now.isoformat(), expires_at],
-    )
-    await db.commit()
-    return session_id
+    async with get_write_lock():
+        db = await state._get_db()
+        await db.execute(
+            "INSERT INTO sessions (id, user_id, created_at, expires_at) VALUES (?,?,?,?)",
+            [session_id, user_id, now.isoformat(), expires_at],
+        )
+        await db.commit()
+        return session_id
 
 
 async def get_session_user(session_id: str) -> Optional[str]:
@@ -104,9 +109,10 @@ async def get_session_user(session_id: str) -> Optional[str]:
 
 async def delete_session(session_id: str):
     """Delete a session (logout)."""
-    db = await state._get_db()
-    await db.execute("DELETE FROM sessions WHERE id=?", [session_id])
-    await db.commit()
+    async with get_write_lock():
+        db = await state._get_db()
+        await db.execute("DELETE FROM sessions WHERE id=?", [session_id])
+        await db.commit()
 
 
 async def purge_expired_auth() -> tuple[int, int]:
@@ -118,12 +124,13 @@ async def purge_expired_auth() -> tuple[int, int]:
     Returns (sessions_deleted, tokens_deleted).
     """
     now = datetime.now(timezone.utc).isoformat()
-    db = await state._get_db()
-    cur_sessions = await db.execute(
-        "DELETE FROM sessions WHERE expires_at < ?", [now]
-    )
-    cur_tokens = await db.execute(
-        "DELETE FROM magic_tokens WHERE expires_at < ? OR used=1", [now]
-    )
-    await db.commit()
-    return cur_sessions.rowcount, cur_tokens.rowcount
+    async with get_write_lock():
+        db = await state._get_db()
+        cur_sessions = await db.execute(
+            "DELETE FROM sessions WHERE expires_at < ?", [now]
+        )
+        cur_tokens = await db.execute(
+            "DELETE FROM magic_tokens WHERE expires_at < ? OR used=1", [now]
+        )
+        await db.commit()
+        return cur_sessions.rowcount, cur_tokens.rowcount

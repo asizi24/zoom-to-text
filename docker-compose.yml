@@ -42,13 +42,13 @@ services:
       # over compose's internal DNS — no host port needed.
       - OLLAMA_HOST=http://ollama:11434
       # Override these per-environment as needed:
-      # - WHISPER_MODEL=medium
+      - WHISPER_MODEL=large-v3
       # - AUTO_SHUTDOWN_IDLE_MINUTES=30
       # - SUMMARY_BACKEND=ollama       # ollama | gemini (wizard persists this)
-      # - OLLAMA_MODEL=gemma2:9b
+      - OLLAMA_MODEL=qwen2.5:32b
 
     # ── Resources ───────────────────────────────────────────────────────────────
-    # Local workstation profile (128 GB RAM, RTX 4070 Ti). The devices block
+    # Hardware profile (128 GB RAM, dual Xeon CPUs, RTX 6000 Ada 47GB VRAM). No CPU limit — container can use all Xeon cores. The devices block
     # passes the NVIDIA GPU through (Docker Desktop WSL2 — needs only the
     # Windows NVIDIA driver). faster-whisper then runs CUDA/float16 via
     # WHISPER_DEVICE=auto. If `docker compose up` fails with "could not select
@@ -57,8 +57,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 24g
-          cpus: '8'
+          memory: 64g
         reservations:
           memory: 2g
           devices:

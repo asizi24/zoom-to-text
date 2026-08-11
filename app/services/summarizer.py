@@ -30,6 +30,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -121,6 +122,54 @@ quiz.options, quiz.correct_answer, quiz.explanation.
   ✅ ההסבר יציין במפורש מדוע כל אחת מ-3 האפשרויות השגויות אינה נכונה
 """
 
+_SYSTEM_PROMPT_EN = """
+You are an expert in education and lecture analysis.
+Your task is to analyze the lecture recording and produce a structured, comprehensive output in English.
+
+Field requirements (the schema is enforced automatically — you are responsible
+for content quality):
+  • summary — a thorough lecture summary (3-5 paragraphs). Cover all main
+    topics and explain why, not just what.
+  • chapters — logical topic sections as presented in lecture. Each chapter
+    should include title, content (detailed explanation, at least 3-4 sentences),
+    and key_points (2-4 bullet points).
+  • quiz — a multiple-choice exam following the rules below. Each question
+    must include 4 options, a correct_answer identical to one of the options,
+    and an explanation.
+  • language — the output language code ("en").
+
+══════════════════════════════════════════════════
+Critical instruction — preserve English technical terms:
+══════════════════════════════════════════════════
+In technical lectures, the instructor may mix local language with English
+technical terms. Preserve those terms exactly as spoken — do not translate,
+transliterate, or substitute them.
+
+Required examples:
+  ✅ "We defined useState in the React component"        (not: "We defined state usage in the component")
+  ✅ "The API returns JSON with status code 200"         (not: "The interface returns JSON with code 200")
+  ✅ "Run pip install fastapi in the terminal"           (not: "Install the fast package")
+  ✅ "TCP guarantees delivery, UDP does not"              (not: "The control protocol guarantees delivery")
+  ✅ "ACE-inhibitors are a class of drugs"               (not: "enzyme-converting inhibitor drugs")
+
+This applies to all output fields: summary, chapters.content, key_points,
+quiz.question, quiz.options, quiz.correct_answer, quiz.explanation.
+
+Use English for the output but preserve technical names and acronyms in English.
+
+══════════════════════════════════════════════════
+Critical instruction — include timestamps:
+══════════════════════════════════════════════════
+If the transcript includes timestamps in the format [MM:SS], include them
+when referring to specific segments. The timestamp appears at the start of the
+relevant segment and becomes a link in the UI.
+
+Examples:
+  ✅ "The instructor introduced the concept at [15:42] and expanded on it later [23:10]"
+  ✅ key_points: ["Definition of useState appears at [05:22]", "Practical example at [18:45]"]
+  ✅ explanation: "See the instructor's example at [42:15] — it demonstrates this mistake."
+"""
+
 # ── Critique prompt ───────────────────────────────────────────────────────────────
 
 _CRITIQUE_PROMPT = """
@@ -157,13 +206,47 @@ avg = ממוצע ארבעת הציונים.
   feedback: "ניתן לשפר את האפשרויות השגויות"
 """
 
+_CRITIQUE_PROMPT_EN = """
+You are an expert at evaluating academic exam questions.
+You received a list of multiple-choice questions from a test on a lecture.
+Rate each question on a scale of 1-5 in four criteria:
+
+- clarity    (1-5): Is the question clear and unambiguous?
+- difficulty (1-5): Does the question require real understanding (not rote recall)? 1=recall, 5=analysis/synthesis
+- distractors(1-5): Do the three wrong options represent common reasoning mistakes?
+- accuracy   (1-5): Is the correct answer actually correct and properly justified?
+
+avg = the average of the four scores.
+Return the original index of each question in the index field.
+Use the feedback field for a short comment in English.
+
+════════════════════════════════════════════════════════════════════════════════
+Few-shot examples:
+════════════════════════════════════════════════════════════════════════════════
+
+Poor question (low avg):
+  ❌ "What year was special relativity published?"
+  → clarity:5, difficulty:1, distractors:2, accuracy:5 → avg:3.25
+  feedback: "Simple recall question. A student with good memory can answer it without understanding."
+
+Good question (high avg):
+  ✅ "Why does local time slow down for an observer moving at high speed compared to a stationary observer?"
+  → clarity:5, difficulty:5, distractors:4, accuracy:5 → avg:4.75
+  feedback: "Requires understanding of time dilation. The wrong options represent classic misconceptions."
+
+Mediocre question (borderline avg):
+  🟡 "Which of the following is an advantage of TCP over UDP?"
+  → clarity:4, difficulty:3, distractors:3, accuracy:5 → avg:3.75
+  feedback: "The distractors can be improved."
+"""
+
 _REVISE_PROMPT_HEADER = """
 אתה מומחה לכתיבת שאלות בחינה ברמה אקדמית.
-קיבלת מבחן שעבר ביקורת — חלק מהשאלות קיבלו ציון ממוצע נמוך מ-THRESHOLD_PLACEHOLDER.
+קיבלת מבחן שעבר ביקורת — חלק מההשאלות קיבלו ציון ממוצע נמוך מ-THRESHOLD_PLACEHOLDER.
 עליך לכתוב מחדש את השאלות שסומנו כ-NEEDS_REVISION, תוך שמירה על השאלות הטובות כמות שהן.
 החזר את רשימת כל השאלות המעודכנות — כולל OK, כולל NEEDS_REVISION.
 
-חוקי שכתוב:
+ חוקי שכתוב:
   • כל שאלה שתחליף את NEEDS_REVISION חייבת לבדוק הבנה, יישום, ניתוח — לא שינון
   • ארבע האפשרויות יהיו באותו אורך ובאותה מבנה דקדוקי
   • כל אפשרות שגויה מייצגת טעות חשיבה שכיחה
@@ -173,6 +256,23 @@ _REVISE_PROMPT_HEADER = """
     אנגליים משובצים, כמו שהמרצה דיבר.
 
 מבחן מקורי עם סימון NEEDS_REVISION:
+"""
+
+_REVISE_PROMPT_HEADER_EN = """
+You are an expert in writing academic exam questions.
+You received a reviewed exam — some questions scored below THRESHOLD_PLACEHOLDER.
+Rewrite only the questions marked NEEDS_REVISION, while preserving the good questions unchanged.
+Return the full updated exam list including OK and NEEDS_REVISION statuses.
+
+Rewrite rules:
+  • Any question you replace as NEEDS_REVISION must test understanding, application, or analysis — not recall.
+  • All 4 options must use the same length and grammatical structure.
+  • Each wrong option must represent a plausible common thinking error.
+  • The explanation must explicitly state why each of the 3 wrong options is incorrect.
+  • Preserve technical terms in English exactly as written — React, API, TCP, JSON, JWT,
+    ACE-inhibitors, etc. Do not translate them.
+
+Original exam with NEEDS_REVISION markings:
 """
 
 
@@ -264,6 +364,10 @@ _BASE_KWARGS = dict(
 )
 
 
+def _is_english_language(language: str | None) -> bool:
+    return str(language or "he").strip().lower() == "en"
+
+
 def _json_config(system_instruction: str | None, schema: type[BaseModel]) -> types.GenerateContentConfig:
     return types.GenerateContentConfig(
         **_BASE_KWARGS,
@@ -273,9 +377,37 @@ def _json_config(system_instruction: str | None, schema: type[BaseModel]) -> typ
     )
 
 
+def _lesson_config(language: str | None = "he") -> types.GenerateContentConfig:
+    return _json_config(
+        _SYSTEM_PROMPT_EN if _is_english_language(language) else _SYSTEM_PROMPT,
+        _LessonSchema,
+    )
+
+
+def _critique_config(language: str | None = "he") -> types.GenerateContentConfig:
+    return _json_config(
+        _CRITIQUE_PROMPT_EN if _is_english_language(language) else _CRITIQUE_PROMPT,
+        _CritiqueSchema,
+    )
+
+
+def _revise_config(language: str | None = "he") -> types.GenerateContentConfig:
+    return _json_config(
+        _REVISE_PROMPT_HEADER_EN if _is_english_language(language) else _REVISE_PROMPT_HEADER,
+        _RevisedQuizSchema,
+    )
+
+
+def _flashcards_config(language: str | None = "he") -> types.GenerateContentConfig:
+    return _json_config(
+        _FLASHCARDS_PROMPT_EN if _is_english_language(language) else _FLASHCARDS_PROMPT,
+        _FlashcardsSchema,
+    )
+
+
 _LESSON_CONFIG = _json_config(_SYSTEM_PROMPT, _LessonSchema)
 _CRITIQUE_CONFIG = _json_config(_CRITIQUE_PROMPT, _CritiqueSchema)
-_REVISE_CONFIG = _json_config(None, _RevisedQuizSchema)
+_REVISE_CONFIG = _json_config(_REVISE_PROMPT_HEADER, _RevisedQuizSchema)
 
 # Timeout for each individual Gemini call
 _GEMINI_TIMEOUT = 600.0   # 10 minutes — full lesson generation
@@ -367,7 +499,7 @@ def _to_lesson_result(parsed: _LessonSchema) -> LessonResult:
 
 # ── Exam critique pipeline ────────────────────────────────────────────────────────
 
-async def critique_exam(exam: list, summary: str) -> dict:
+async def critique_exam(exam: list, summary: str, language: str = "he") -> dict:
     """
     Score each question 1-5 on 4 rubrics via Gemini.
 
@@ -395,7 +527,7 @@ async def critique_exam(exam: list, summary: str) -> dict:
 
     try:
         parsed: _CritiqueSchema = await _generate_structured(
-            f"שאלות המבחן:\n{exam_text}", _CRITIQUE_CONFIG
+            f"שאלות המבחן:\n{exam_text}", _critique_config(language)
         )
     except PipelineError as exc:
         logger.error(f"Critique pass failed (non-fatal): {exc}")
@@ -403,7 +535,7 @@ async def critique_exam(exam: list, summary: str) -> dict:
     return parsed.model_dump()
 
 
-async def revise_exam(exam: list, critique: dict, summary: str) -> list:
+async def revise_exam(exam: list, critique: dict, summary: str, language: str = "he") -> list:
     """
     Rewrite questions whose avg score < settings.exam_critique_threshold.
     Returns a new list[QuizQuestion] — preserving good questions, replacing bad
@@ -439,7 +571,10 @@ async def revise_exam(exam: list, critique: dict, summary: str) -> list:
     prompt = header + marked_json + "\n\nסיכום השיעור להקשר:\n" + summary
 
     try:
-        parsed: _RevisedQuizSchema = await _generate_structured(prompt, _REVISE_CONFIG)
+        parsed: _RevisedQuizSchema = await _generate_structured(
+            prompt,
+            _revise_config(language),
+        )
     except PipelineError as exc:
         logger.error(f"Revise pass failed (non-fatal, keeping original exam): {exc}")
         return exam
@@ -465,6 +600,7 @@ def _needs_revision(critique: dict, threshold: float) -> bool:
 async def _apply_critique_pipeline(
     result: LessonResult,
     progress_cb: _ProgressCallback | None = None,
+    language: str = "he",
 ) -> LessonResult:
     """
     Run the critique → revise pipeline on a finished LessonResult.
@@ -485,7 +621,7 @@ async def _apply_critique_pipeline(
     if progress_cb:
         await progress_cb(90, "🔍 בודק איכות שאלות המבחן...")
 
-    critique = await critique_exam(result.quiz, result.summary)
+    critique = await critique_exam(result.quiz, result.summary, language)
     result.exam_critique_log = critique  # always save for debugging
 
     # Log per-question scores
@@ -507,7 +643,7 @@ async def _apply_critique_pipeline(
         if progress_cb:
             await progress_cb(95, f"✏️ משפר {low_count} שאלות שלא עמדו בסף האיכות...")
 
-        result.quiz = await revise_exam(result.quiz, critique, result.summary)
+        result.quiz = await revise_exam(result.quiz, critique, result.summary, language)
     else:
         logger.info("All questions above threshold — skipping revise pass")
         if progress_cb:
@@ -521,9 +657,16 @@ async def _apply_critique_pipeline(
 async def summarize_audio(
     audio_path: str,
     progress_cb: _ProgressCallback | None = None,
+    language: str = "he",
 ) -> LessonResult:
     """Upload audio to Gemini and get summary + quiz in one call (GEMINI_DIRECT)."""
     client = _get_client()
+
+    audio_prompt = (
+        "Analyze the attached lecture recording and produce the required output."
+        if _is_english_language(language)
+        else "נתח את הקלטת השיעור המצורפת והפק את הפלט הנדרש."
+    )
 
     logger.info(f"Uploading audio to Gemini Files API: {audio_path}")
     try:
@@ -560,8 +703,8 @@ async def summarize_audio(
 
     try:
         parsed = await _generate_structured(
-            ["נתח את הקלטת השיעור המצורפת והפק את הפלט הנדרש.", audio_file],
-            _LESSON_CONFIG,
+            [audio_prompt, audio_file],
+            _lesson_config(language),
         )
     finally:
         try:
@@ -585,25 +728,30 @@ _MAX_CHUNK_CHARS = 350_000
 async def summarize_transcript(
     transcript: str,
     progress_cb: _ProgressCallback | None = None,
+    language: str = "he",
 ) -> LessonResult:
     """
     Summarize a text transcript (WHISPER_LOCAL / WHISPER_API / IVRIT_AI modes).
     Handles chunking for very long classes, then runs the critique pipeline.
     """
+    transcript_prefix = (
+        "Transcript:\n" if _is_english_language(language) else "תמלול השיעור:\n"
+    )
     if len(transcript) <= _MAX_CHUNK_CHARS:
         parsed = await _generate_structured(
-            f"תמלול השיעור:\n{transcript}", _LESSON_CONFIG
+            f"{transcript_prefix}{transcript}", _lesson_config(language)
         )
         result = _to_lesson_result(parsed)
     else:
-        result = await _summarize_long_transcript(transcript, progress_cb)
+        result = await _summarize_long_transcript(transcript, progress_cb, language)
 
-    return await _apply_critique_pipeline(result, progress_cb)
+    return await _apply_critique_pipeline(result, progress_cb, language)
 
 
 async def _summarize_long_transcript(
     transcript: str,
     progress_cb: _ProgressCallback | None = None,
+    language: str = "he",
 ) -> LessonResult:
     """Long transcript: chunk → plain-text partial summaries → structured merge."""
     chunks = [
@@ -617,30 +765,40 @@ async def _summarize_long_transcript(
     # final merge prompt, so JSON here would be pointless overhead.
     partial_config = types.GenerateContentConfig(**_BASE_KWARGS)
     partial_prompt = (
-        "להלן חלק מתמלול שיעור. סכם בטקסט חופשי את הנקודות המרכזיות "
-        "בחלק זה בלבד: פסקה-שתיים של סיכום ואז רשימת נקודות מפתח. "
-        "שמור מונחים באנגלית וסימוני זמן [MM:SS] כפי שהם."
+        "Here is a part of the lecture transcript. Summarize the key points in free text for this part only: one to two paragraphs followed by a list of key points. Preserve English technical terms and any [MM:SS] timestamps as they appear."
+        if _is_english_language(language)
+        else (
+            "להלן חלק מתמלול שיעור. סכם בטקסט חופשי את הנקודות המרכזיות "
+            "בחלק זה בלבד: פסקה-שתיים של סיכום ואז רשימת נקודות מפתח. "
+            "שמור מונחים באנגלית וסימוני זמן [MM:SS] כפי שהם."
+        )
     )
 
     partial_summaries: list[str] = []
+    chunk_label = "Part" if _is_english_language(language) else "חלק"
+    progress_template = (
+        "🔄 Summarizing part {i} of {n}..."
+        if _is_english_language(language)
+        else "🔄 מסכם חלק {i} מתוך {n}..."
+    )
+    merge_intro = (
+        "Here are intermediate summaries of the lecture parts. Build a complete summary, chapters, and a multiple-choice quiz as required:\n\n"
+        if _is_english_language(language)
+        else "להלן סיכומי ביניים של חלקי השיעור. בנה מהם סיכום מלא, פרקים ומבחן אמריקאי כפי שנדרש:\n\n"
+    )
+
     for i, chunk in enumerate(chunks, 1):
         logger.info(f"Summarizing chunk {i}/{n}")
         if progress_cb:
-            # Map chunk progress proportionally into the 82–88% range
-            # (leaving 88-95 for critique + revise)
-            await progress_cb(82 + int(6 * i / n), f"🔄 מסכם חלק {i} מתוך {n}...")
-        resp = await _generate(f"{partial_prompt}\n\nחלק {i}:\n{chunk}", partial_config)
+            await progress_cb(82 + int(6 * i / n), progress_template.format(i=i, n=n))
+        resp = await _generate(f"{partial_prompt}\n\n{chunk_label} {i}:\n{chunk}", partial_config)
         partial_summaries.append(resp.text or "")
 
     if progress_cb:
-        await progress_cb(86, "🔗 מאחד את כל החלקים לסיכום מלא ומבחן...")
+        await progress_cb(86, "🔗 מאחד את כל החלקים לסיכום מלא ומבחן..." if not _is_english_language(language) else "🔗 Merging all parts into a full summary and quiz...")
 
-    merge_prompt = (
-        "להלן סיכומי ביניים של חלקי השיעור. "
-        "בנה מהם סיכום מלא, פרקים ומבחן אמריקאי כפי שנדרש:\n\n"
-        + "\n\n---\n\n".join(partial_summaries)
-    )
-    parsed = await _generate_structured(merge_prompt, _LESSON_CONFIG)
+    merge_prompt = merge_intro + "\n\n---\n\n".join(partial_summaries)
+    parsed = await _generate_structured(merge_prompt, _lesson_config(language))
     return _to_lesson_result(parsed)
 
 
@@ -759,6 +917,7 @@ _FLASHCARDS_CONFIG = _json_config(_FLASHCARDS_PROMPT, _FlashcardsSchema)
 async def generate_flashcards(
     summary: str,
     transcript: str | None = None,
+    language: str = "he",
 ) -> list[Flashcard]:
     """Generate 15-25 flashcards from a lesson summary (+ optional transcript).
 
@@ -777,7 +936,7 @@ async def generate_flashcards(
     try:
         parsed: _FlashcardsSchema = await _generate_structured(
             "\n\n".join(context_parts),
-            _FLASHCARDS_CONFIG,
+            _flashcards_config(language),
             timeout=_FLASHCARDS_TIMEOUT,
         )
     except PipelineError as exc:
@@ -793,3 +952,138 @@ async def generate_flashcards(
         for c in parsed.flashcards
         if c.front.strip() and c.back.strip()
     ]
+
+
+# ── Local Ollama summarization (no Gemini dependency) ───────────────────────
+
+_LOCAL_SYSTEM_PROMPT = """
+אתה מומחה לחינוך וניתוח שיעורים אקדמיים.
+המשימה שלך: לנתח את תמלול השיעור ולהפיק פלט מובנה **בעברית** בלבד.
+
+תוכן השדות הנדרש (החזר JSON חוקי בלבד):
+  • summary — סיכום מקיף של השיעור כולו (3-5 פסקאות). כסה את כל הנושאים המרכזיים.
+  • chapters — חלוקה לוגית: [{title, content (3-4 משפטים), key_points (2-4)}]
+  • quiz — מבחן אמריקאי 8-10 שאלות: [{question, options(4), correct_answer, explanation}]
+  • language — "he"
+
+⚠️ חשוב ביותר: החזר **רק** אובייקט JSON חוקי. אל תעטוף ב-```json או ``` או כל markdown אחר.
+התחלה חייבת להיות { והסיום } — לא קודם ולא אחריו.
+
+שמור מונחים באנגלית כפי שהם: React, API, TCP, JSON וכו' לא מתורגמים.
+
+══════════════════════════════════════════════════
+הנחיה קריטית — ציטוט timestamps:
+אם בתמלול יש סימוני זמן [MM:SS], שלב אותם בתשובות כשאתה מתייחס לקטע ספציפי.
+אל תמציא timestamps שלא מופיעים במקור.
+"""
+
+
+async def summarize_transcript_with_ollama(
+    transcript: str,
+    ollama_host: str = "http://localhost:11434",
+    model: str = "llama3.2",
+    timeout: float = 600.0,
+) -> LessonResult:
+    """
+    Summarize a text transcript using a local Ollama instance instead of Gemini.
+
+    Constructs a prompt from the existing _SYSTEM_PROMPT content (adapted for
+    plain-text JSON output), calls ollama.complete(), and parses the raw JSON
+    into a LessonResult. Handles markdown fence stripping if the model still
+    hallucinates them.
+    """
+    from app.services.llm import OllamaProvider
+
+    provider = OllamaProvider(
+        host=ollama_host,
+        model=model,
+        timeout=timeout,
+    )
+
+    prompt = (
+        f"להלן תמלול השיעור:\n\n{transcript}"
+    )
+
+    try:
+        raw = await provider.complete(
+            prompt=prompt,
+            system=_LOCAL_SYSTEM_PROMPT,
+            temperature=0.3,
+            timeout=timeout,
+        )
+    except Exception as exc:
+        raise PipelineError(
+            "⚠️ נכשל ביצירת סיכום עם Ollama — נסה שוב",
+            detail=f"ollama complete failed: {exc}",
+        ) from exc
+
+    if not raw:
+        raise PipelineError(
+            "⚠️ Ollama החזיר תגובה ריקה — ודא שהמודל מותקן ופועל",
+            detail="ollama returned empty response",
+        )
+
+    response_text = raw.strip()
+
+    # Strip markdown fences that the LLM may have hallucinated around JSON output
+    for _ in range(3):  # loop handles nested or double-wrapped cases
+        if response_text.startswith("```json"):
+            response_text = response_text[7:]
+        elif response_text.startswith("```"):
+            response_text = response_text[3:]
+        if response_text.endswith("```"):
+            response_text = response_text[:-3]
+    response_text = response_text.strip()
+
+    match = re.search(r"\{.*\}", response_text, re.DOTALL)
+    cleaned_text = match.group(0) if match else response_text
+
+    try:
+        data = json.loads(cleaned_text)
+    except json.JSONDecodeError as exc:
+        raise PipelineError(
+            "⚠️ Ollama החזר פלט לא תקין — נסה שוב",
+            detail=f"ollama returned invalid JSON (first 200 chars): {cleaned_text[:200]}",
+        ) from exc
+
+    # Build LessonResult from the raw dict
+    try:
+        return _lesson_from_dict(data)
+    except Exception as exc:
+        raise PipelineError(
+            "⚠️ מבנה הפלט מ-Ollama לא תואם — נסה שוב",
+            detail=f"failed to parse ollama result into LessonResult: {exc}",
+        ) from exc
+
+
+def _lesson_from_dict(data: dict) -> LessonResult:
+    """Convert a raw dict (from JSON parse) into a LessonResult."""
+    summary = data.get("summary", "")
+    chapters_data = data.get("chapters", [])
+    quiz_data = data.get("quiz", [])
+
+    chapters = [
+        Chapter(
+            title=ch.get("title", ""),
+            content=ch.get("content", ""),
+            key_points=ch.get("key_points", []),
+        )
+        for ch in chapters_data
+    ]
+
+    quiz = [
+        QuizQuestion(
+            question=q.get("question", ""),
+            options=q.get("options", []),
+            correct_answer=q.get("correct_answer", ""),
+            explanation=q.get("explanation", ""),
+        )
+        for q in quiz_data
+    ]
+
+    return LessonResult(
+        summary=summary,
+        chapters=chapters,
+        quiz=quiz,
+        language=data.get("language", "he"),
+    )

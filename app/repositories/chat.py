@@ -5,6 +5,7 @@ import json
 import logging
 
 from app import state
+from app.state import get_write_lock
 
 logger = logging.getLogger(__name__)
 
@@ -45,12 +46,13 @@ async def append_chat_message(task_id: str, role: str, content: str) -> None:
     the cap holds). A NULL or corrupt column falls back to a fresh array.
     """
     message = json.dumps({"role": role, "content": content}, ensure_ascii=False)
-    db = await state._get_db()
-    await db.execute(
-        """
-        UPDATE tasks
-           SET chat_history = (
-               SELECT CASE
+    async with get_write_lock():
+        db = await state._get_db()
+        await db.execute(
+            """
+            UPDATE tasks
+               SET chat_history = (
+                   SELECT CASE
                           WHEN json_array_length(appended.j) > ?
                           THEN json_remove(appended.j, '$[0]')
                           ELSE appended.j
@@ -66,14 +68,15 @@ async def append_chat_message(task_id: str, role: str, content: str) -> None:
          WHERE id = ?
         """,
         [_MAX_CHAT_MESSAGES, message, task_id],
-    )
-    await db.commit()
+        )
+        await db.commit()
 
 
 async def clear_chat_history(task_id: str) -> None:
     """Delete the chat history for a task (user-initiated reset)."""
-    db = await state._get_db()
-    await db.execute(
-        "UPDATE tasks SET chat_history=NULL WHERE id=?", [task_id]
-    )
-    await db.commit()
+    async with get_write_lock():
+        db = await state._get_db()
+        await db.execute(
+            "UPDATE tasks SET chat_history=NULL WHERE id=?", [task_id]
+        )
+        await db.commit()

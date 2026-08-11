@@ -22,6 +22,7 @@ import aiosqlite
 from app import state
 from app.events import hub as _events
 from app.models import LessonResult, TaskResponse, TaskStatus
+from app.state import get_write_lock
 
 logger = logging.getLogger(__name__)
 
@@ -38,41 +39,42 @@ _NOT_TERMINAL_GUARD = (
 # ── CRUD ──────────────────────────────────────────────────────────────────────────
 
 async def create_task(task_id: str, url: str, user_id: Optional[str] = None) -> TaskResponse:
-    now = datetime.now(timezone.utc).isoformat()
-    db = await state._get_db()
-    await db.execute(
-        "INSERT INTO tasks (id, status, progress, message, created_at, url, user_id) VALUES (?,?,?,?,?,?,?)",
-        [task_id, TaskStatus.PENDING.value, 0, "Task queued", now, url, user_id],
-    )
-    await db.commit()
-    return TaskResponse(
-        task_id=task_id,
-        status=TaskStatus.PENDING,
-        progress=0,
-        message="Task queued",
-        created_at=now,
-        url=url,
-    )
+    async with get_write_lock():
+        now = datetime.now(timezone.utc).isoformat()
+        db = await state._get_db()
+        await db.execute(
+            "INSERT INTO tasks (id, status, progress, message, created_at, url, user_id) VALUES (?,?,?,?,?,?,?)",
+            [task_id, TaskStatus.PENDING.value, 0, "Task queued", now, url, user_id],
+        )
+        await db.commit()
+        return TaskResponse(
+            task_id=task_id,
+            status=TaskStatus.PENDING,
+            progress=0,
+            message="Task queued",
+            created_at=now,
+            url=url,
+        )
 
 
-async def update_task(task_id: str, status: TaskStatus, progress: int, message: str):
-    db = await state._get_db()
-    cursor = await db.execute(
-        f"UPDATE tasks SET status=?, progress=?, message=? "
-        f"WHERE id=? AND {_NOT_TERMINAL_GUARD}",
-        [status.value, progress, message, task_id, *_TERMINAL_STATUSES],
-    )
-    await db.commit()
-    if cursor.rowcount == 0:
-        # Terminal states are sticky — a late progress callback (e.g. from the
-        # transcription thread, after a cancel) must not resurrect the task.
-        return
-    _events.publish(task_id, {
-        "type": "status",
-        "status": status.value,
-        "progress": progress,
-        "message": message,
-    })
+async def update_task(task_id: str, status: TaskStatus, progress: int = 0, message: str = ""):
+    async with get_write_lock():
+        db = await state._get_db()
+        await db.execute(
+            "UPDATE tasks SET status=?, progress=?, message=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+            [status.value, progress, message, task_id]
+        )
+        await db.commit()
+
+
+async def append_partial_transcript(task_id: str, text: str):
+    async with get_write_lock():
+        db = await state._get_db()
+        await db.execute(
+            "INSERT INTO partial_transcripts (task_id, transcript_text) VALUES (?, ?)",
+            [task_id, text]
+        )
+        await db.commit()
 
 
 async def complete_task(task_id: str, result: LessonResult) -> bool:
@@ -80,21 +82,22 @@ async def complete_task(task_id: str, result: LessonResult) -> bool:
     already reached a terminal state — e.g. a cancel won the race in the final
     moments of the pipeline. The SSE `done` event is only published on a real
     transition; the losing side already published its own."""
-    db = await state._get_db()
-    # Clear the live-preview column on completion — the full transcript is
-    # stored in result_json, so partial_transcript is no longer needed and
-    # would only waste space in the DB.
-    cursor = await db.execute(
-        f"UPDATE tasks SET status=?, progress=100, message=?, result_json=?, "
-        f"partial_transcript=NULL WHERE id=? AND {_NOT_TERMINAL_GUARD}",
-        [TaskStatus.COMPLETED.value, "Processing complete ✅",
-         result.model_dump_json(), task_id, *_TERMINAL_STATUSES],
-    )
-    await db.commit()
-    if cursor.rowcount == 0:
-        return False
-    _events.publish(task_id, {"type": "done", "status": TaskStatus.COMPLETED.value})
-    return True
+    async with get_write_lock():
+        db = await state._get_db()
+        # Clear the live-preview column on completion — the full transcript is
+        # stored in result_json, so partial_transcript is no longer needed and
+        # would only waste space in the DB.
+        cursor = await db.execute(
+            f"UPDATE tasks SET status=?, progress=100, message=?, result_json=?, "
+            f"partial_transcript=NULL WHERE id=? AND {_NOT_TERMINAL_GUARD}",
+            [TaskStatus.COMPLETED.value, "Processing complete ✅",
+             result.model_dump_json(), task_id, *_TERMINAL_STATUSES],
+        )
+        await db.commit()
+        if cursor.rowcount == 0:
+            return False
+        _events.publish(task_id, {"type": "done", "status": TaskStatus.COMPLETED.value})
+        return True
 
 
 async def fail_task(task_id: str, error: str, detail: str = "") -> bool:
@@ -104,18 +107,19 @@ async def fail_task(task_id: str, error: str, detail: str = "") -> bool:
     existing terminal state wins and no event is published."""
     # Truncate long error messages so they fit cleanly in the DB
     short_error = error[:500] if len(error) > 500 else error
-    db = await state._get_db()
-    cursor = await db.execute(
-        f"UPDATE tasks SET status=?, message=?, error=?, error_detail=? "
-        f"WHERE id=? AND {_NOT_TERMINAL_GUARD}",
-        [TaskStatus.FAILED.value, f"Failed: {short_error}", short_error,
-         detail[:2000], task_id, *_TERMINAL_STATUSES],
-    )
-    await db.commit()
-    if cursor.rowcount == 0:
-        return False
-    _events.publish(task_id, {"type": "done", "status": TaskStatus.FAILED.value})
-    return True
+    async with get_write_lock():
+        db = await state._get_db()
+        cursor = await db.execute(
+            f"UPDATE tasks SET status=?, message=?, error=?, error_detail=? "
+            f"WHERE id=? AND {_NOT_TERMINAL_GUARD}",
+            [TaskStatus.FAILED.value, f"Failed: {short_error}", short_error,
+             detail[:2000], task_id, *_TERMINAL_STATUSES],
+        )
+        await db.commit()
+        if cursor.rowcount == 0:
+            return False
+        _events.publish(task_id, {"type": "done", "status": TaskStatus.FAILED.value})
+        return True
 
 
 async def cancel_task(task_id: str) -> bool:
@@ -126,31 +130,33 @@ async def cancel_task(task_id: str) -> bool:
     the UI reflects the click immediately. `done` closes any open SSE stream.
     Returns False if the task finished (completed/failed) between the caller's
     status check and this write — the finished state wins."""
-    db = await state._get_db()
-    cursor = await db.execute(
-        f"UPDATE tasks SET status=?, message=? WHERE id=? AND {_NOT_TERMINAL_GUARD}",
-        [TaskStatus.CANCELLED.value, "בוטל על ידי המשתמש", task_id, *_TERMINAL_STATUSES],
-    )
-    await db.commit()
-    if cursor.rowcount == 0:
-        return False
-    _events.publish(task_id, {"type": "done", "status": TaskStatus.CANCELLED.value})
-    return True
+    async with get_write_lock():
+        db = await state._get_db()
+        cursor = await db.execute(
+            f"UPDATE tasks SET status=?, message=? WHERE id=? AND {_NOT_TERMINAL_GUARD}",
+            [TaskStatus.CANCELLED.value, "בוטל על ידי המשתמש", task_id, *_TERMINAL_STATUSES],
+        )
+        await db.commit()
+        if cursor.rowcount == 0:
+            return False
+        _events.publish(task_id, {"type": "done", "status": TaskStatus.CANCELLED.value})
+        return True
 
 
 async def requeue_task(task_id: str) -> None:
     """Reset a FAILED/CANCELLED task back to PENDING for a fresh run.
 
-    Clears the previous error and the stale live-transcript preview so the
-    retry starts clean. The caller (retry endpoint) re-enqueues the id after
-    this returns. The stored payload is deliberately left intact — it is what
-    the retry replays.
+    Clears the previous error so the retry starts clean. The partial transcript,
+    payload_json (final_transcript), and audio_path are deliberately left intact
+    so that _process_audio can detect a mid-transcription resume point or a
+    cached full transcript and avoid redundant work.
     """
-    db = await state._get_db()
+    async with get_write_lock():
+        db = await state._get_db()
     msg = "ממתין בתור (ניסיון חוזר)"
     await db.execute(
         "UPDATE tasks SET status=?, progress=0, message=?, error=NULL, "
-        "error_detail=NULL, partial_transcript=NULL WHERE id=?",
+        "error_detail=NULL WHERE id=?",
         [TaskStatus.PENDING.value, msg, task_id],
     )
     await db.commit()
@@ -160,6 +166,11 @@ async def requeue_task(task_id: str) -> None:
         "progress": 0,
         "message": msg,
     })
+
+    # Keep any cancellation flag from a previous run from affecting the retry.
+    # This is intentionally done here so the retry endpoint remains idempotent
+    # and the new run starts cleanly.
+    cancellation.clear(task_id)
 
 
 def _row_to_task_response(row: aiosqlite.Row) -> TaskResponse:
@@ -219,12 +230,13 @@ async def backfill_task_owners(owner_user_id: str) -> int:
     rows; with the old rule, every logged-in user could read AND delete them.
     Returns the number of rows adopted.
     """
-    db = await state._get_db()
-    cursor = await db.execute(
-        "UPDATE tasks SET user_id=? WHERE user_id IS NULL", [owner_user_id]
-    )
-    await db.commit()
-    return cursor.rowcount
+    async with get_write_lock():
+        db = await state._get_db()
+        cursor = await db.execute(
+            "UPDATE tasks SET user_id=? WHERE user_id IS NULL", [owner_user_id]
+        )
+        await db.commit()
+        return cursor.rowcount
 
 
 async def list_tasks(limit: int = 50, user_id: Optional[str] = None) -> list[dict]:

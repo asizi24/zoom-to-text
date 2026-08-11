@@ -23,8 +23,11 @@ Model lifecycle:
   resident memory is exactly one model.
 """
 import asyncio
+import functools
 import gc
 import logging
+import os
+import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -203,6 +206,7 @@ def _transcribe_sync(
     segment_cb=None,
     progress_cb=None,
     cancel_cb=None,
+    resume_offset: float = 0.0,
 ) -> tuple[str, str]:
     """
     Blocking transcription — runs in the whisper pool.
@@ -342,7 +346,32 @@ def _make_segment_cb(task_id: str | None, loop: asyncio.AbstractEventLoop):
     return segment_cb
 
 
-# Transcription owns the 50→78 slice of the progress bar; the summarizer
+# ── Resume helpers ───────────────────────────────────────────────────────────
+
+async def _trim_audio(audio_path: str, offset: float) -> str:
+    """Trim *audio_path* starting at *offset* seconds and return the temp MP3 path."""
+    trimmed = str(Path(settings.data_dir) / "downloads" / f"_resume_{id(audio_path):x}.mp3")
+    trimmed_parent = Path(trimmed).parent
+    trimmed_parent.mkdir(parents=True, exist_ok=True)
+    await asyncio.create_subprocess_exec(
+        "ffmpeg", "-y",
+        "-ss", str(offset),
+        "-i", audio_path,
+        "-c:a", "libmp3lame", "-q:a", "2",
+        trimmed,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    return trimmed
+
+
+def _format_timestamp(seconds: float) -> str:
+    """Return ``[MM:SS]`` for a given time in seconds."""
+    total = int(round(seconds))
+    mm, ss = divmod(total, 60)
+    return f"[{mm:02d}:{ss:02d}]"
+
+
 # picks up at 80 (see processor.py milestones), so 78 is the safe ceiling.
 _PROGRESS_FLOOR = 50
 _PROGRESS_CEIL  = 78
@@ -386,6 +415,7 @@ async def transcribe(
     audio_path: str,
     language: str = "he",
     task_id: str | None = None,
+    resume_offset: float = 0.0,
 ) -> tuple[str, str]:
     """
     Transcribe an audio file locally with Faster-Whisper.
@@ -398,11 +428,18 @@ async def transcribe(
     try:
         loop = asyncio.get_running_loop()
         logger.info(f"[Local Whisper] Transcribing: {audio_path} (language: {language})")
-        transcript, detected_lang = await loop.run_in_executor(
-            _whisper_pool, _transcribe_sync, model, audio_path, language,
-            _make_segment_cb(task_id, loop), _make_progress_cb(task_id, loop),
-            _make_cancel_cb(task_id),
+        seg_cb = _make_segment_cb(task_id, loop)
+        prog_cb = _make_progress_cb(task_id, loop)
+        cancel_fn = (lambda t=task_id: cancellation.is_cancelled(t)) if task_id else None
+        func = functools.partial(
+            _transcribe_sync,
+            model, audio_path, language,
+            segment_cb=seg_cb,
+            progress_cb=prog_cb,
+            cancel_cb=cancel_fn,
+            resume_offset=0.0
         )
+        transcript, detected_lang = await loop.run_in_executor(_whisper_pool, func)
     finally:
         # Runs on cancellation too: the slot is released, its refcount drops,
         # and the idle watcher can evict the model to reclaim VRAM.
@@ -419,6 +456,7 @@ async def transcribe_ivrit_ai(
     audio_path: str,
     language: str = "he",
     task_id: str | None = None,
+    resume_offset: float = 0.0,
 ) -> tuple[str, str]:
     """
     Transcribe with ivrit-ai's Hebrew-tuned Whisper model.
@@ -433,11 +471,18 @@ async def transcribe_ivrit_ai(
         logger.info(f"[ivrit-ai] Transcribing: {audio_path} (language: {language})")
         # _transcribe_sync is reused — ivrit-ai speaks the same faster-whisper API,
         # so timestamps, VAD behavior, and segment batching are byte-identical.
-        transcript, detected_lang = await loop.run_in_executor(
-            _whisper_pool, _transcribe_sync, model, audio_path, language,
-            _make_segment_cb(task_id, loop), _make_progress_cb(task_id, loop),
-            _make_cancel_cb(task_id),
+        seg_cb = _make_segment_cb(task_id, loop)
+        prog_cb = _make_progress_cb(task_id, loop)
+        cancel_fn = (lambda t=task_id: cancellation.is_cancelled(t)) if task_id else None
+        func = functools.partial(
+            _transcribe_sync,
+            model, audio_path, language,
+            segment_cb=seg_cb,
+            progress_cb=prog_cb,
+            cancel_cb=cancel_fn,
+            resume_offset=0.0
         )
+        transcript, detected_lang = await loop.run_in_executor(_whisper_pool, func)
     finally:
         await _slot.release()
 

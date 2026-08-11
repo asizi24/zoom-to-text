@@ -1,4 +1,4 @@
-"""
+﻿"""
 Ollama provider — talks to a local Ollama server over HTTP.
 
 In docker-compose the backend reaches the ollama container at
@@ -14,6 +14,7 @@ extra test dependency.
 """
 import json
 import logging
+import re
 from typing import AsyncIterator, Optional
 
 import httpx
@@ -21,6 +22,29 @@ import httpx
 from app.services.llm.base import LLMError
 
 logger = logging.getLogger(__name__)
+
+
+def _unwrap_ollama_fence(text: str) -> str:
+    """Remove an outer ```json / ````markdown fence that some models wrap
+    inside the Ollama response string.  Works for both streaming and
+    non-streaming responses.
+
+    This is a lightweight regex approach — it does NOT handle nested fences
+    or embedded backtick sequences; those are extremely rare in practice.
+    """
+    # Leading fence:  ```json  or  ```markdown  or  ```
+    stripped = text.lstrip()
+    match = re.match(r"^```(?:json|markdown)?\s*\n", stripped)
+    if match:
+        stripped = stripped[match.end():]
+
+    # Trailing fence
+    if stripped.endswith("\n```"):
+        stripped = stripped[:-4].rstrip("\n")
+    elif stripped.rstrip().endswith("```"):
+        stripped = stripped.rstrip()[:-3].rstrip("\n")
+
+    return stripped.strip()
 
 
 class OllamaProvider:
@@ -54,11 +78,18 @@ class OllamaProvider:
         temperature: float = 0.3,
         timeout: Optional[float] = None,
     ) -> str:
+        # Ollama defaults to streaming NDJSON for /api/generate — we must
+        # disable it so the response body is a single complete JSON object.
+        # When "format": "json" is set the model may still wrap its output in
+        # stray markdown fences (```json … ```).  We strip those before the
+        # caller does json.loads on the cleaned text.
         payload = {
             "model": self.model,
             "prompt": prompt,
-            "stream": False,
-            "options": {"temperature": temperature},
+            "stream": False,                  # force non-streaming response
+            "format": "json",
+            "max_tokens": 8192,
+            "options": {"temperature": temperature, "num_predict": 8192},
         }
         if system:
             payload["system"] = system
@@ -66,7 +97,8 @@ class OllamaProvider:
             async with self._client(timeout or self.timeout) as client:
                 resp = await client.post("/api/generate", json=payload)
                 resp.raise_for_status()
-                data = resp.json()
+                result_data = resp.json()
+
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
                 raise LLMError(
@@ -83,7 +115,31 @@ class OllamaProvider:
                 detail=f"ollama transport error: {exc}",
             ) from exc
 
-        return (data.get("response") or "").strip()
+        # ── Aggressive brace-extraction to ignore preamble/postamble text ──
+        raw_text = (result_data.get("response") or "").strip()
+
+        if raw_text.startswith("```json"):
+            raw_text = raw_text[7:]
+        if raw_text.startswith("```"):
+            raw_text = raw_text[3:]
+        if raw_text.endswith("```"):
+            raw_text = raw_text[:-3]
+
+        start_idx = raw_text.find('{')
+        end_idx = raw_text.rfind('}')
+
+        if start_idx != -1 and end_idx != -1:
+            clean_json = raw_text[start_idx : end_idx + 1]
+        else:
+            clean_json = raw_text
+
+        # Validate that it's actually parseable JSON before returning
+        try:
+            json.loads(clean_json)
+            return clean_json
+        except json.JSONDecodeError as exc:
+            logger.error("Failed to parse Ollama JSON. Raw text: %s", raw_text)
+            raise ValueError(f"Ollama returned invalid JSON: {exc}") from exc
 
     async def is_available(self) -> bool:
         """True iff the Ollama server answers — used by the Setup Wizard."""

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for the task-management suite: cancel, retry, and storage retention.
 
 Split into:
@@ -11,7 +11,7 @@ Split into:
 import asyncio
 import time
 
-import pytest
+import pytest  # type: ignore[import-not-found]
 
 from app import cancellation, state
 from app.config import settings
@@ -81,10 +81,10 @@ def test_cancel_task_sets_cancelled(tmp_path, monkeypatch):
     _run_with_db(tmp_path, monkeypatch, scenario)
 
 
-def test_requeue_task_resets_error_and_partial(tmp_path, monkeypatch):
+def test_requeue_task_preserves_partial_transcript(tmp_path, monkeypatch):
     async def scenario():
         await state.create_task("t1", "upload:x", user_id="u1")
-        await state.append_partial_transcript("t1", "[00:00] חלק מהתמלול ")
+        await state.append_partial_transcript("t1", "[00:00] partial ")
         await state.fail_task("t1", "boom", detail="stacktrace")
         assert (await state.get_task("t1")).status == TaskStatus.FAILED
 
@@ -92,9 +92,10 @@ def test_requeue_task_resets_error_and_partial(tmp_path, monkeypatch):
         t = await state.get_task("t1")
         assert t.status == TaskStatus.PENDING
         assert t.error is None
-        # Stale live-transcript preview must be cleared for the fresh run
-        _, total = await state.get_partial_transcript("t1")
-        assert total == 0
+        # Partial transcript must be PRESERVED for the resume/checkpoint feature
+        partial_text, total = await state.get_partial_transcript("t1")
+        assert total > 0
+        assert "[00:00] " in partial_text
 
     _run_with_db(tmp_path, monkeypatch, scenario)
 

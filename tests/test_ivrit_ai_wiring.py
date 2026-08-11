@@ -61,11 +61,11 @@ async def test_processor_routes_ivrit_mode_to_ivrit_transcriber(monkeypatch, tmp
         called["which"] = "ivrit"
         return "שלום", "he"
 
-    async def fake_whisper(audio_path, language, task_id=None):
+    async def fake_whisper(audio_path, language, task_id=None, **kwargs):
         called["which"] = "whisper"
         return "hello", "he"
 
-    async def fake_whisper_api(audio_path, language, task_id=None):
+    async def fake_whisper_api(audio_path, language, task_id=None, **kwargs):
         called["which"] = "whisper_api"
         return "api", "he"
 
