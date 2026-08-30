@@ -1,0 +1,1131 @@
+if not final_transcript:
++        # ── Compute resume offset from partial transcript ───────────────
++        resume_offset = await _get_resume_offset(task_id)
++
++        if mode == ProcessingMode.TRANSCRIPTION_ONLY:
++            await state.update_task(
++                task_id,
++                TaskStatus.TRANSCRIBING,
++                50,
++                "📝 מתמלל בלבד — ללא סיכום ומבחן...",
++            )
++            transcript, detected_lang = await transcriber.transcribe_ivrit_ai(
++                audio_path, language, task_id=task_id
++            )
++            if resume_offset > 0:
++                partial_text, _ = await state.get_partial_transcript(task_id)
++                if partial_text:
++                    # Strip timestamps from the partial so we can concat cleanly
++                    clean_partial = re.sub(r"\[\d{1,2}:\d{2}(?::\d{2})?\]\s*", "", partial_text)
++                    transcript = clean_partial + " " + transcript
++
++            payload["cached_transcript"] = transcript
++            payload["cached_language"] = detected_lang
++            await state.set_job_payload(task_id, payload)
++            return LessonResult(transcript=transcript, language=detected_lang or "he")
++
++        # ── Whisper transcription ───────────────────────────────────────
++        if mode == ProcessingMode.WHISPER_API:
++            await state.update_task(
++                task_id,
++                TaskStatus.TRANSCRIBING,
++                50,
++                "☁️ מסיר שקט ושולח ל-OpenAI Whisper API...",
++            )
++            transcript, detected_lang = await transcriber.transcribe_via_api(
++                audio_path, language, task_id=task_id, resume_offset=resume_offset
++            )
++
++        elif mode == ProcessingMode.IVRIT_AI:
++            await state.update_task(
++                task_id,
++                TaskStatus.TRANSCRIBING,
++                50,
++                "🇮🇱 מתמלל עם ivrit-ai (מודל מותאם לעברית)...",
++            )
++            transcript, detected_lang = await transcriber.transcribe_ivrit_ai(
++                audio_path, language, task_id=task_id, resume_offset=resume_offset
++            )
++
++        else:
++            # Default / WHISPER_LOCAL — the primary local path
++            await state.update_task(
++                task_id,
++                TaskStatus.TRANSCRIBING,
++                50,
++                "🎙️ מתמלל עם Whisper מקומי (עשוי לקחת מספר דקות)...",
++            )
++            transcript, detected_lang = await transcriber.transcribe(
++                audio_path, language, task_id=task_id, resume_offset=resume_offset
++            )
++
++        # ── Save full transcript as checkpoint BEFORE summarization ───────
++        if resume_offset > 0:
++            partial_text, _ = await state.get_partial_transcript(task_id)
++            if partial_text:
++                clean_partial = re.sub(r"\[\d{1,2}:\d{2}(?::\d{2})?\]\s*", "", partial_text)
++                transcript = clean_partial + " " + transcript
++
++        payload["cached_transcript"] = transcript
++        payload["final_transcript"] = transcript
++        payload["cached_language"] = detected_lang
++        await state.set_job_payload(task_id, payload)
++
++    # ── Ollama summarization (local LLM) ────────────────────────────────────
++    if not transcript:
++        raise PipelineError(
++            "⚠️ התמלול נכשל — לא קיבלתי תוצאה מה-Mודל",
++            detail="transcription returned None transcript for mode={mode}",
+         )
+-        transcript, _ = await transcriber.transcribe(audio_path, language, task_id=task_id)
+ 
+     await state.update_task(
+         task_id,
+         TaskStatus.SUMMARIZING,
+         80,
+-        "🤖 יוצר סיכום ומבחן עם Gemini AI...",
++        "🤖 יוצר סיכום ומבחן עם Ollama מקומי...",
+     )
+-    result = await summarizer.summarize_transcript(
+-        transcript, _make_progress_cb(task_id, TaskStatus.SUMMARIZING)
++    result = await summarizer.summarize_transcript_with_ollama(
++        transcript,
++        ollama_host=settings.ollama_host,
++        model=(await runtime_config.get(runtime_config.KEY_OLLAMA_MODEL))
++            or settings.ollama_model,
++        timeout=settings.ollama_timeout,
+     )
+     result.transcript = transcript
+     return result
+@@ -330,7 +422,7 @@ async def _generate_flashcards_step(task_id: str, result) -> "LessonResult":
+         "🃏 מייצר כרטיסיות לחזרה...",
+     )
+     try:
+-        cards = await summarizer.generate_flashcards(result.summary, result.transcript)
++        cards = await summarizer.generate_flashcards(result.summary, result.transcript, language=result.language)
+         result.flashcards = cards
+         logger.info(f"Task {task_id}: generated {len(cards)} flashcards")
+     except Exception as exc:
+diff --git a/app/services/summarizer.py b/app/services/summarizer.py
+index 0c15815..0852669 100644
+--- a/app/services/summarizer.py
++++ b/app/services/summarizer.py
+@@ -30,6 +30,7 @@ import asyncio
+ import json
+ import logging
+ import os
++import re
+ from pathlib import Path
+ from typing import Awaitable, Callable
+ 
+@@ -121,6 +122,54 @@ quiz.options, quiz.correct_answer, quiz.explanation.
+   ✅ ההסבר יציין במפורש מדוע כל אחת מ-3 האפשרויות השגויות אינה נכונה
+ """
+ 
++_SYSTEM_PROMPT_EN = """
++You are an expert in education and lecture analysis.
++Your task is to analyze the lecture recording and produce a structured, comprehensive output in English.
++
++Field requirements (the schema is enforced automatically — you are responsible
++for content quality):
++  • summary — a thorough lecture summary (3-5 paragraphs). Cover all main
++    topics and explain why, not just what.
++  • chapters — logical topic sections as presented in lecture. Each chapter
++    should include title, content (detailed explanation, at least 3-4 sentences),
++    and key_points (2-4 bullet points).
++  • quiz — a multiple-choice exam following the rules below. Each question
++    must include 4 options, a correct_answer identical to one of the options,
++    and an explanation.
++  • language — the output language code ("en").
++
++══════════════════════════════════════════════════
++Critical instruction — preserve English technical terms:
++══════════════════════════════════════════════════
++In technical lectures, the instructor may mix local language with English
++technical terms. Preserve those terms exactly as spoken — do not translate,
++transliterate, or substitute them.
++
++Required examples:
++  ✅ "We defined useState in the React component"        (not: "We defined state usage in the component")
++  ✅ "The API returns JSON with status code 200"         (not: "The interface returns JSON with code 200")
++  ✅ "Run pip install fastapi in the terminal"           (not: "Install the fast package")
++  ✅ "TCP guarantees delivery, UDP does not"              (not: "The control protocol guarantees delivery")
++  ✅ "ACE-inhibitors are a class of drugs"               (not: "enzyme-converting inhibitor drugs")
++
++This applies to all output fields: summary, chapters.content, key_points,
++quiz.question, quiz.options, quiz.correct_answer, quiz.explanation.
++
++Use English for the output but preserve technical names and acronyms in English.
++
++══════════════════════════════════════════════════
++Critical instruction — include timestamps:
++══════════════════════════════════════════════════
++If the transcript includes timestamps in the format [MM:SS], include them
++when referring to specific segments. The timestamp appears at the start of the
++relevant segment and becomes a link in the UI.
++
++Examples:
++  ✅ "The instructor introduced the concept at [15:42] and expanded on it later [23:10]"
++  ✅ key_points: ["Definition of useState appears at [05:22]", "Practical example at [18:45]"]
++  ✅ explanation: "See the instructor's example at [42:15] — it demonstrates this mistake."
++"""
++
+ # ── Critique prompt ───────────────────────────────────────────────────────────────
+ 
+ _CRITIQUE_PROMPT = """
+@@ -157,13 +206,47 @@ avg = ממוצע ארבעת הציונים.
+   feedback: "ניתן לשפר את האפשרויות השגויות"
+ """
+ 
++_CRITIQUE_PROMPT_EN = """
++You are an expert at evaluating academic exam questions.
++You received a list of multiple-choice questions from a test on a lecture.
++Rate each question on a scale of 1-5 in four criteria:
++
++- clarity    (1-5): Is the question clear and unambiguous?
++- difficulty (1-5): Does the question require real understanding (not rote recall)? 1=recall, 5=analysis/synthesis
++- distractors(1-5): Do the three wrong options represent common reasoning mistakes?
++- accuracy   (1-5): Is the correct answer actually correct and properly justified?
++
++avg = the average of the four scores.
++Return the original index of each question in the index field.
++Use the feedback field for a short comment in English.
++
++════════════════════════════════════════════════════════════════════════════════
++Few-shot examples:
++════════════════════════════════════════════════════════════════════════════════
++
++Poor question (low avg):
++  ❌ "What year was special relativity published?"
++  → clarity:5, difficulty:1, distractors:2, accuracy:5 → avg:3.25
++  feedback: "Simple recall question. A student with good memory can answer it without understanding."
++
++Good question (high avg):
++  ✅ "Why does local time slow down for an observer moving at high speed compared to a stationary observer?"
++  → clarity:5, difficulty:5, distractors:4, accuracy:5 → avg:4.75
++  feedback: "Requires understanding of time dilation. The wrong options represent classic misconceptions."
++
++Mediocre question (borderline avg):
++  🟡 "Which of the following is an advantage of TCP over UDP?"
++  → clarity:4, difficulty:3, distractors:3, accuracy:5 → avg:3.75
++  feedback: "The distractors can be improved."
++"""
++
+ _REVISE_PROMPT_HEADER = """
+ אתה מומחה לכתיבת שאלות בחינה ברמה אקדמית.
+-קיבלת מבחן שעבר ביקורת — חלק מהשאלות קיבלו ציון ממוצע נמוך מ-THRESHOLD_PLACEHOLDER.
++קיבלת מבחן שעבר ביקורת — חלק מההשאלות קיבלו ציון ממוצע נמוך מ-THRESHOLD_PLACEHOLDER.
+ עליך לכתוב מחדש את השאלות שסומנו כ-NEEDS_REVISION, תוך שמירה על השאלות הטובות כמות שהן.
+ החזר את רשימת כל השאלות המעודכנות — כולל OK, כולל NEEDS_REVISION.
+ 
+-חוקי שכתוב:
++ חוקי שכתוב:
+   • כל שאלה שתחליף את NEEDS_REVISION חייבת לבדוק הבנה, יישום, ניתוח — לא שינון
+   • ארבע האפשרויות יהיו באותו אורך ובאותה מבנה דקדוקי
+   • כל אפשרות שגויה מייצגת טעות חשיבה שכיחה
+@@ -175,6 +258,23 @@ _REVISE_PROMPT_HEADER = """
+ מבחן מקורי עם סימון NEEDS_REVISION:
+ """
+ 
++_REVISE_PROMPT_HEADER_EN = """
++You are an expert in writing academic exam questions.
++You received a reviewed exam — some questions scored below THRESHOLD_PLACEHOLDER.
++Rewrite only the questions marked NEEDS_REVISION, while preserving the good questions unchanged.
++Return the full updated exam list including OK and NEEDS_REVISION statuses.
++
++Rewrite rules:
++  • Any question you replace as NEEDS_REVISION must test understanding, application, or analysis — not recall.
++  • All 4 options must use the same length and grammatical structure.
++  • Each wrong option must represent a plausible common thinking error.
++  • The explanation must explicitly state why each of the 3 wrong options is incorrect.
++  • Preserve technical terms in English exactly as written — React, API, TCP, JSON, JWT,
++    ACE-inhibitors, etc. Do not translate them.
++
++Original exam with NEEDS_REVISION markings:
++"""
++
+ 
+ # ── Response schemas (constrained decoding) ───────────────────────────────────────
+ # Dedicated schemas rather than the app models: LessonResult carries fields the
+@@ -264,6 +364,10 @@ _BASE_KWARGS = dict(
+ )
+ 
+ 
++def _is_english_language(language: str | None) -> bool:
++    return str(language or "he").strip().lower() == "en"
++
++
+ def _json_config(system_instruction: str | None, schema: type[BaseModel]) -> types.GenerateContentConfig:
+     return types.GenerateContentConfig(
+         **_BASE_KWARGS,
+@@ -273,9 +377,37 @@ def _json_config(system_instruction: str | None, schema: type[BaseModel]) -> typ
+     )
+ 
+ 
++def _lesson_config(language: str | None = "he") -> types.GenerateContentConfig:
++    return _json_config(
++        _SYSTEM_PROMPT_EN if _is_english_language(language) else _SYSTEM_PROMPT,
++        _LessonSchema,
++    )
++
++
++def _critique_config(language: str | None = "he") -> types.GenerateContentConfig:
++    return _json_config(
++        _CRITIQUE_PROMPT_EN if _is_english_language(language) else _CRITIQUE_PROMPT,
++        _CritiqueSchema,
++    )
++
++
++def _revise_config(language: str | None = "he") -> types.GenerateContentConfig:
++    return _json_config(
++        _REVISE_PROMPT_HEADER_EN if _is_english_language(language) else _REVISE_PROMPT_HEADER,
++        _RevisedQuizSchema,
++    )
++
++
++def _flashcards_config(language: str | None = "he") -> types.GenerateContentConfig:
++    return _json_config(
++        _FLASHCARDS_PROMPT_EN if _is_english_language(language) else _FLASHCARDS_PROMPT,
++        _FlashcardsSchema,
++    )
++
++
+ _LESSON_CONFIG = _json_config(_SYSTEM_PROMPT, _LessonSchema)
+ _CRITIQUE_CONFIG = _json_config(_CRITIQUE_PROMPT, _CritiqueSchema)
+-_REVISE_CONFIG = _json_config(None, _RevisedQuizSchema)
++_REVISE_CONFIG = _json_config(_REVISE_PROMPT_HEADER, _RevisedQuizSchema)
+ 
+ # Timeout for each individual Gemini call
+ _GEMINI_TIMEOUT = 600.0   # 10 minutes — full lesson generation
+@@ -367,7 +499,7 @@ def _to_lesson_result(parsed: _LessonSchema) -> LessonResult:
+ 
+ # ── Exam critique pipeline ────────────────────────────────────────────────────────
+ 
+-async def critique_exam(exam: list, summary: str) -> dict:
++async def critique_exam(exam: list, summary: str, language: str = "he") -> dict:
+     """
+     Score each question 1-5 on 4 rubrics via Gemini.
+ 
+@@ -395,7 +527,7 @@ async def critique_exam(exam: list, summary: str) -> dict:
+ 
+     try:
+         parsed: _CritiqueSchema = await _generate_structured(
+-            f"שאלות המבחן:\n{exam_text}", _CRITIQUE_CONFIG
++            f"שאלות המבחן:\n{exam_text}", _critique_config(language)
+         )
+     except PipelineError as exc:
+         logger.error(f"Critique pass failed (non-fatal): {exc}")
+@@ -403,7 +535,7 @@ async def critique_exam(exam: list, summary: str) -> dict:
+     return parsed.model_dump()
+ 
+ 
+-async def revise_exam(exam: list, critique: dict, summary: str) -> list:
++async def revise_exam(exam: list, critique: dict, summary: str, language: str = "he") -> list:
+     """
+     Rewrite questions whose avg score < settings.exam_critique_threshold.
+     Returns a new list[QuizQuestion] — preserving good questions, replacing bad
+@@ -439,7 +571,10 @@ async def revise_exam(exam: list, critique: dict, summary: str) -> list:
+     prompt = header + marked_json + "\n\nסיכום השיעור להקשר:\n" + summary
+ 
+     try:
+-        parsed: _RevisedQuizSchema = await _generate_structured(prompt, _REVISE_CONFIG)
++        parsed: _RevisedQuizSchema = await _generate_structured(
++            prompt,
++            _revise_config(language),
++        )
+     except PipelineError as exc:
+         logger.error(f"Revise pass failed (non-fatal, keeping original exam): {exc}")
+         return exam
+@@ -465,6 +600,7 @@ def _needs_revision(critique: dict, threshold: float) -> bool:
+ async def _apply_critique_pipeline(
+     result: LessonResult,
+     progress_cb: _ProgressCallback | None = None,
++    language: str = "he",
+ ) -> LessonResult:
+     """
+     Run the critique → revise pipeline on a finished LessonResult.
+@@ -485,7 +621,7 @@ async def _apply_critique_pipeline(
+     if progress_cb:
+         await progress_cb(90, "🔍 בודק איכות שאלות המבחן...")
+ 
+-    critique = await critique_exam(result.quiz, result.summary)
++    critique = await critique_exam(result.quiz, result.summary, language)
+     result.exam_critique_log = critique  # always save for debugging
+ 
+     # Log per-question scores
+@@ -507,7 +643,7 @@ async def _apply_critique_pipeline(
+         if progress_cb:
+             await progress_cb(95, f"✏️ משפר {low_count} שאלות שלא עמדו בסף האיכות...")
+ 
+-        result.quiz = await revise_exam(result.quiz, critique, result.summary)
++        result.quiz = await revise_exam(result.quiz, critique, result.summary, language)
+     else:
+         logger.info("All questions above threshold — skipping revise pass")
+         if progress_cb:
+@@ -521,10 +657,17 @@ async def _apply_critique_pipeline(
+ async def summarize_audio(
+     audio_path: str,
+     progress_cb: _ProgressCallback | None = None,
++    language: str = "he",
+ ) -> LessonResult:
+     """Upload audio to Gemini and get summary + quiz in one call (GEMINI_DIRECT)."""
+     client = _get_client()
+ 
++    audio_prompt = (
++        "Analyze the attached lecture recording and produce the required output."
++        if _is_english_language(language)
++        else "נתח את הקלטת השיעור המצורפת והפק את הפלט הנדרש."
++    )
++
+     logger.info(f"Uploading audio to Gemini Files API: {audio_path}")
+     try:
+         async with asyncio.timeout(_GEMINI_TIMEOUT):
+@@ -560,8 +703,8 @@ async def summarize_audio(
+ 
+     try:
+         parsed = await _generate_structured(
+-            ["נתח את הקלטת השיעור המצורפת והפק את הפלט הנדרש.", audio_file],
+-            _LESSON_CONFIG,
++            [audio_prompt, audio_file],
++            _lesson_config(language),
+         )
+     finally:
+         try:
+@@ -585,25 +728,30 @@ _MAX_CHUNK_CHARS = 350_000
+ async def summarize_transcript(
+     transcript: str,
+     progress_cb: _ProgressCallback | None = None,
++    language: str = "he",
+ ) -> LessonResult:
+     """
+     Summarize a text transcript (WHISPER_LOCAL / WHISPER_API / IVRIT_AI modes).
+     Handles chunking for very long classes, then runs the critique pipeline.
+     """
++    transcript_prefix = (
++        "Transcript:\n" if _is_english_language(language) else "תמלול השיעור:\n"
++    )
+     if len(transcript) <= _MAX_CHUNK_CHARS:
+         parsed = await _generate_structured(
+-            f"תמלול השיעור:\n{transcript}", _LESSON_CONFIG
++            f"{transcript_prefix}{transcript}", _lesson_config(language)
+         )
+         result = _to_lesson_result(parsed)
+     else:
+-        result = await _summarize_long_transcript(transcript, progress_cb)
++        result = await _summarize_long_transcript(transcript, progress_cb, language)
+ 
+-    return await _apply_critique_pipeline(result, progress_cb)
++    return await _apply_critique_pipeline(result, progress_cb, language)
+ 
+ 
+ async def _summarize_long_transcript(
+     transcript: str,
+     progress_cb: _ProgressCallback | None = None,
++    language: str = "he",
+ ) -> LessonResult:
+     """Long transcript: chunk → plain-text partial summaries → structured merge."""
+     chunks = [
+@@ -617,30 +765,40 @@ async def _summarize_long_transcript(
+     # final merge prompt, so JSON here would be pointless overhead.
+     partial_config = types.GenerateContentConfig(**_BASE_KWARGS)
+     partial_prompt = (
+-        "להלן חלק מתמלול שיעור. סכם בטקסט חופשי את הנקודות המרכזיות "
+-        "בחלק זה בלבד: פסקה-שתיים של סיכום ואז רשימת נקודות מפתח. "
+-        "שמור מונחים באנגלית וסימוני זמן [MM:SS] כפי שהם."
++        "Here is a part of the lecture transcript. Summarize the key points in free text for this part only: one to two paragraphs followed by a list of key points. Preserve English technical terms and any [MM:SS] timestamps as they appear."
++        if _is_english_language(language)
++        else (
++            "להלן חלק מתמלול שיעור. סכם בטקסט חופשי את הנקודות המרכזיות "
++            "בחלק זה בלבד: פסקה-שתיים של סיכום ואז רשימת נקודות מפתח. "
++            "שמור מונחים באנגלית וסימוני זמן [MM:SS] כפי שהם."
++        )
+     )
+ 
+     partial_summaries: list[str] = []
++    chunk_label = "Part" if _is_english_language(language) else "חלק"
++    progress_template = (
++        "🔄 Summarizing part {i} of {n}..."
++        if _is_english_language(language)
++        else "🔄 מסכם חלק {i} מתוך {n}..."
++    )
++    merge_intro = (
++        "Here are intermediate summaries of the lecture parts. Build a complete summary, chapters, and a multiple-choice quiz as required:\n\n"
++        if _is_english_language(language)
++        else "להלן סיכומי ביניים של חלקי השיעור. בנה מהם סיכום מלא, פרקים ומבחן אמריקאי כפי שנדרש:\n\n"
++    )
++
+     for i, chunk in enumerate(chunks, 1):
+         logger.info(f"Summarizing chunk {i}/{n}")
+         if progress_cb:
+-            # Map chunk progress proportionally into the 82–88% range
+-            # (leaving 88-95 for critique + revise)
+-            await progress_cb(82 + int(6 * i / n), f"🔄 מסכם חלק {i} מתוך {n}...")
+-        resp = await _generate(f"{partial_prompt}\n\nחלק {i}:\n{chunk}", partial_config)
++            await progress_cb(82 + int(6 * i / n), progress_template.format(i=i, n=n))
++        resp = await _generate(f"{partial_prompt}\n\n{chunk_label} {i}:\n{chunk}", partial_config)
+         partial_summaries.append(resp.text or "")
+ 
+     if progress_cb:
+-        await progress_cb(86, "🔗 מאחד את כל החלקים לסיכום מלא ומבחן...")
++        await progress_cb(86, "🔗 מאחד את כל החלקים לסיכום מלא ומבחן..." if not _is_english_language(language) else "🔗 Merging all parts into a full summary and quiz...")
+ 
+-    merge_prompt = (
+-        "להלן סיכומי ביניים של חלקי השיעור. "
+-        "בנה מהם סיכום מלא, פרקים ומבחן אמריקאי כפי שנדרש:\n\n"
+-        + "\n\n---\n\n".join(partial_summaries)
+-    )
+-    parsed = await _generate_structured(merge_prompt, _LESSON_CONFIG)
++    merge_prompt = merge_intro + "\n\n---\n\n".join(partial_summaries)
++    parsed = await _generate_structured(merge_prompt, _lesson_config(language))
+     return _to_lesson_result(parsed)
+ 
+ 
+@@ -759,6 +917,7 @@ _FLASHCARDS_CONFIG = _json_config(_FLASHCARDS_PROMPT, _FlashcardsSchema)
+ async def generate_flashcards(
+     summary: str,
+     transcript: str | None = None,
++    language: str = "he",
+ ) -> list[Flashcard]:
+     """Generate 15-25 flashcards from a lesson summary (+ optional transcript).
+ 
+@@ -777,7 +936,7 @@ async def generate_flashcards(
+     try:
+         parsed: _FlashcardsSchema = await _generate_structured(
+             "\n\n".join(context_parts),
+-            _FLASHCARDS_CONFIG,
++            _flashcards_config(language),
+             timeout=_FLASHCARDS_TIMEOUT,
+         )
+     except PipelineError as exc:
+@@ -793,3 +952,138 @@ async def generate_flashcards(
+         for c in parsed.flashcards
+         if c.front.strip() and c.back.strip()
+     ]
++
++
++# ── Local Ollama summarization (no Gemini dependency) ───────────────────────
++
++_LOCAL_SYSTEM_PROMPT = """
++אתה מומחה לחינוך וניתוח שיעורים אקדמיים.
++המשימה שלך: לנתח את תמלול השיעור ולהפיק פלט מובנה **בעברית** בלבד.
++
++תוכן השדות הנדרש (החזר JSON חוקי בלבד):
++  • summary — סיכום מקיף של השיעור כולו (3-5 פסקאות). כסה את כל הנושאים המרכזיים.
++  • chapters — חלוקה לוגית: [{title, content (3-4 משפטים), key_points (2-4)}]
++  • quiz — מבחן אמריקאי 8-10 שאלות: [{question, options(4), correct_answer, explanation}]
++  • language — "he"
++
++⚠️ חשוב ביותר: החזר **רק** אובייקט JSON חוקי. אל תעטוף ב-```json או ``` או כל markdown אחר.
++התחלה חייבת להיות { והסיום } — לא קודם ולא אחריו.
++
++שמור מונחים באנגלית כפי שהם: React, API, TCP, JSON וכו' לא מתורגמים.
++
++══════════════════════════════════════════════════
++הנחיה קריטית — ציטוט timestamps:
++אם בתמלול יש סימוני זמן [MM:SS], שלב אותם בתשובות כשאתה מתייחס לקטע ספציפי.
++אל תמציא timestamps שלא מופיעים במקור.
++"""
++
++
++async def summarize_transcript_with_ollama(
++    transcript: str,
++    ollama_host: str = "http://localhost:11434",
++    model: str = "llama3.2",
++    timeout: float = 600.0,
++) -> LessonResult:
++    """
++    Summarize a text transcript using a local Ollama instance instead of Gemini.
++
++    Constructs a prompt from the existing _SYSTEM_PROMPT content (adapted for
++    plain-text JSON output), calls ollama.complete(), and parses the raw JSON
++    into a LessonResult. Handles markdown fence stripping if the model still
++    hallucinates them.
++    """
++    from app.services.llm import OllamaProvider
++
++    provider = OllamaProvider(
++        host=ollama_host,
++        model=model,
++        timeout=timeout,
++    )
++
++    prompt = (
++        f"להלן תמלול השיעור:\n\n{transcript}"
++    )
++
++    try:
++        raw = await provider.complete(
++            prompt=prompt,
++            system=_LOCAL_SYSTEM_PROMPT,
++            temperature=0.3,
++            timeout=timeout,
++        )
++    except Exception as exc:
++        raise PipelineError(
++            "⚠️ נכשל ביצירת סיכום עם Ollama — נסה שוב",
++            detail=f"ollama complete failed: {exc}",
++        ) from exc
++
++    if not raw:
++        raise PipelineError(
++            "⚠️ Ollama החזיר תגובה ריקה — ודא שהמודל מותקן ופועל",
++            detail="ollama returned empty response",
++        )
++
++    response_text = raw.strip()
++
++    # Strip markdown fences that the LLM may have hallucinated around JSON output
++    for _ in range(3):  # loop handles nested or double-wrapped cases
++        if response_text.startswith("```json"):
++            response_text = response_text[7:]
++        elif response_text.startswith("```"):
++            response_text = response_text[3:]
++        if response_text.endswith("```"):
++            response_text = response_text[:-3]
++    response_text = response_text.strip()
++
++    match = re.search(r"\{.*\}", response_text, re.DOTALL)
++    cleaned_text = match.group(0) if match else response_text
++
++    try:
++        data = json.loads(cleaned_text)
++    except json.JSONDecodeError as exc:
++        raise PipelineError(
++            "⚠️ Ollama החזר פלט לא תקין — נסה שוב",
++            detail=f"ollama returned invalid JSON (first 200 chars): {cleaned_text[:200]}",
++        ) from exc
++
++    # Build LessonResult from the raw dict
++    try:
++        return _lesson_from_dict(data)
++    except Exception as exc:
++        raise PipelineError(
++            "⚠️ מבנה הפלט מ-Ollama לא תואם — נסה שוב",
++            detail=f"failed to parse ollama result into LessonResult: {exc}",
++        ) from exc
++
++
++def _lesson_from_dict(data: dict) -> LessonResult:
++    """Convert a raw dict (from JSON parse) into a LessonResult."""
++    summary = data.get("summary", "")
++    chapters_data = data.get("chapters", [])
++    quiz_data = data.get("quiz", [])
++
++    chapters = [
++        Chapter(
++            title=ch.get("title", ""),
++            content=ch.get("content", ""),
++            key_points=ch.get("key_points", []),
++        )
++        for ch in chapters_data
++    ]
++
++    quiz = [
++        QuizQuestion(
++            question=q.get("question", ""),
++            options=q.get("options", []),
++            correct_answer=q.get("correct_answer", ""),
++            explanation=q.get("explanation", ""),
++        )
++        for q in quiz_data
++    ]
++
++    return LessonResult(
++        summary=summary,
++        chapters=chapters,
++        quiz=quiz,
++        language=data.get("language", "he"),
++    )
+diff --git a/app/services/transcriber.py b/app/services/transcriber.py
+index 53422c1..cfe4bb5 100644
+--- a/app/services/transcriber.py
++++ b/app/services/transcriber.py
+@@ -23,8 +23,11 @@ Model lifecycle:
+   resident memory is exactly one model.
+ """
+ import asyncio
++import functools
+ import gc
+ import logging
++import os
++import shutil
+ import time
+ from concurrent.futures import ThreadPoolExecutor
+ from pathlib import Path
+@@ -203,6 +206,7 @@ def _transcribe_sync(
+     segment_cb=None,
+     progress_cb=None,
+     cancel_cb=None,
++    resume_offset: float = 0.0,
+ ) -> tuple[str, str]:
+     """
+     Blocking transcription — runs in the whisper pool.
+@@ -342,7 +346,32 @@ def _make_segment_cb(task_id: str | None, loop: asyncio.AbstractEventLoop):
+     return segment_cb
+ 
+ 
+-# Transcription owns the 50→78 slice of the progress bar; the summarizer
++# ── Resume helpers ───────────────────────────────────────────────────────────
++
++async def _trim_audio(audio_path: str, offset: float) -> str:
++    """Trim *audio_path* starting at *offset* seconds and return the temp MP3 path."""
++    trimmed = str(Path(settings.data_dir) / "downloads" / f"_resume_{id(audio_path):x}.mp3")
++    trimmed_parent = Path(trimmed).parent
++    trimmed_parent.mkdir(parents=True, exist_ok=True)
++    await asyncio.create_subprocess_exec(
++        "ffmpeg", "-y",
++        "-ss", str(offset),
++        "-i", audio_path,
++        "-c:a", "libmp3lame", "-q:a", "2",
++        trimmed,
++        stdout=asyncio.subprocess.DEVNULL,
++        stderr=asyncio.subprocess.DEVNULL,
++    )
++    return trimmed
++
++
++def _format_timestamp(seconds: float) -> str:
++    """Return ``[MM:SS]`` for a given time in seconds."""
++    total = int(round(seconds))
++    mm, ss = divmod(total, 60)
++    return f"[{mm:02d}:{ss:02d}]"
++
++
+ # picks up at 80 (see processor.py milestones), so 78 is the safe ceiling.
+ _PROGRESS_FLOOR = 50
+ _PROGRESS_CEIL  = 78
+@@ -386,6 +415,7 @@ async def transcribe(
+     audio_path: str,
+     language: str = "he",
+     task_id: str | None = None,
++    resume_offset: float = 0.0,
+ ) -> tuple[str, str]:
+     """
+     Transcribe an audio file locally with Faster-Whisper.
+@@ -398,11 +428,18 @@ async def transcribe(
+     try:
+         loop = asyncio.get_running_loop()
+         logger.info(f"[Local Whisper] Transcribing: {audio_path} (language: {language})")
+-        transcript, detected_lang = await loop.run_in_executor(
+-            _whisper_pool, _transcribe_sync, model, audio_path, language,
+-            _make_segment_cb(task_id, loop), _make_progress_cb(task_id, loop),
+-            _make_cancel_cb(task_id),
++        seg_cb = _make_segment_cb(task_id, loop)
++        prog_cb = _make_progress_cb(task_id, loop)
++        cancel_fn = (lambda t=task_id: cancellation.is_cancelled(t)) if task_id else None
++        func = functools.partial(
++            _transcribe_sync,
++            model, audio_path, language,
++            segment_cb=seg_cb,
++            progress_cb=prog_cb,
++            cancel_cb=cancel_fn,
++            resume_offset=0.0
+         )
++        transcript, detected_lang = await loop.run_in_executor(_whisper_pool, func)
+     finally:
+         # Runs on cancellation too: the slot is released, its refcount drops,
+         # and the idle watcher can evict the model to reclaim VRAM.
+@@ -419,6 +456,7 @@ async def transcribe_ivrit_ai(
+     audio_path: str,
+     language: str = "he",
+     task_id: str | None = None,
++    resume_offset: float = 0.0,
+ ) -> tuple[str, str]:
+     """
+     Transcribe with ivrit-ai's Hebrew-tuned Whisper model.
+@@ -433,11 +471,18 @@ async def transcribe_ivrit_ai(
+         logger.info(f"[ivrit-ai] Transcribing: {audio_path} (language: {language})")
+         # _transcribe_sync is reused — ivrit-ai speaks the same faster-whisper API,
+         # so timestamps, VAD behavior, and segment batching are byte-identical.
+-        transcript, detected_lang = await loop.run_in_executor(
+-            _whisper_pool, _transcribe_sync, model, audio_path, language,
+-            _make_segment_cb(task_id, loop), _make_progress_cb(task_id, loop),
+-            _make_cancel_cb(task_id),
++        seg_cb = _make_segment_cb(task_id, loop)
++        prog_cb = _make_progress_cb(task_id, loop)
++        cancel_fn = (lambda t=task_id: cancellation.is_cancelled(t)) if task_id else None
++        func = functools.partial(
++            _transcribe_sync,
++            model, audio_path, language,
++            segment_cb=seg_cb,
++            progress_cb=prog_cb,
++            cancel_cb=cancel_fn,
++            resume_offset=0.0
+         )
++        transcript, detected_lang = await loop.run_in_executor(_whisper_pool, func)
+     finally:
+         await _slot.release()
+ 
+diff --git a/app/state.py b/app/state.py
+index 5dc3137..7220ef1 100644
+--- a/app/state.py
++++ b/app/state.py
+@@ -35,7 +35,17 @@ DB_PATH = settings.data_dir / "tasks.db"
+ _db: aiosqlite.Connection | None = None
+ _db_lock = asyncio.Lock()
+ 
+-# ── Schema ───────────────────────────────────────────────────────────────────────
++# ── Write serialization lock ─────────────────────────────────────────────────
++_write_lock: asyncio.Lock | None = None
++
++def get_write_lock() -> asyncio.Lock:
++    global _write_lock
++    if _write_lock is None:
++        _write_lock = asyncio.Lock()
++    return _write_lock
++
++
++DB_PATH = settings.data_dir / "tasks.db"
+ 
+ CREATE_TABLE_SQL = """
+ CREATE TABLE IF NOT EXISTS tasks (
+@@ -114,6 +124,9 @@ async def _get_db() -> aiosqlite.Connection:
+         await _db.execute("PRAGMA busy_timeout=5000")
+         # SQLite leaves REFERENCES clauses unenforced unless this is on.
+         await _db.execute("PRAGMA foreign_keys=ON")
++        # Reduce lock contention under concurrent writes by using a busy
++        # retry strategy inside sqlite instead of failing immediately.
++        await _db.execute("PRAGMA journal_size_limit=1048576")
+         # Set row_factory once on the shared connection so all cursors return
+         # aiosqlite.Row objects — avoids repeated mutation of the shared connection.
+         _db.row_factory = aiosqlite.Row
+@@ -150,6 +163,7 @@ async def init_db():
+     await db.execute(CREATE_MAGIC_TOKENS_TABLE_SQL)
+     await db.execute(CREATE_SESSIONS_TABLE_SQL)
+     await db.execute(CREATE_APP_CONFIG_TABLE_SQL)
++    await db.execute("CREATE TABLE IF NOT EXISTS job_payload (task_id TEXT PRIMARY KEY, payload_json TEXT NOT NULL)")
+     await db.commit()
+ 
+     # Migrate: add missing columns to tasks table if needed
+@@ -193,6 +207,10 @@ async def init_db():
+         await db.execute("ALTER TABLE tasks ADD COLUMN smart_summary_error TEXT")
+         await db.commit()
+         logger.info("Migrated tasks table: added smart_summary_error column")
++    if "updated_at" not in cols:
++        await db.execute("ALTER TABLE tasks ADD COLUMN updated_at TEXT")
++        await db.commit()
++        logger.info("Migrated tasks table: added updated_at column")
+ 
+     # Create indexes now that all columns are guaranteed to exist.
+     # (user_id, created_at DESC) serves the history listing exactly
+diff --git a/docker-compose.yml b/docker-compose.yml
+index 0d3ea7e..9dfa0b4 100644
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -42,13 +42,13 @@ services:
+       # over compose's internal DNS — no host port needed.
+       - OLLAMA_HOST=http://ollama:11434
+       # Override these per-environment as needed:
+-      # - WHISPER_MODEL=medium
++      - WHISPER_MODEL=large-v3
+       # - AUTO_SHUTDOWN_IDLE_MINUTES=30
+       # - SUMMARY_BACKEND=ollama       # ollama | gemini (wizard persists this)
+-      # - OLLAMA_MODEL=gemma2:9b
++      - OLLAMA_MODEL=qwen2.5:32b
+ 
+     # ── Resources ───────────────────────────────────────────────────────────────
+-    # Local workstation profile (128 GB RAM, RTX 4070 Ti). The devices block
++    # Hardware profile (128 GB RAM, dual Xeon CPUs, RTX 6000 Ada 47GB VRAM). No CPU limit — container can use all Xeon cores. The devices block
+     # passes the NVIDIA GPU through (Docker Desktop WSL2 — needs only the
+     # Windows NVIDIA driver). faster-whisper then runs CUDA/float16 via
+     # WHISPER_DEVICE=auto. If `docker compose up` fails with "could not select
+@@ -57,8 +57,7 @@ services:
+     deploy:
+       resources:
+         limits:
+-          memory: 24g
+-          cpus: '8'
++          memory: 64g
+         reservations:
+           memory: 2g
+           devices:
+diff --git a/dry_run_upload.py b/dry_run_upload.py
+new file mode 100644
+index 0000000..5cf6025
+--- /dev/null
++++ b/dry_run_upload.py
+@@ -0,0 +1,22 @@
++﻿"""Minimal auth-free upload test."""
++import requests
++import sys
++
++VIDEO_PATH = r"C:\Users\Asaf\Videos\DevOps For Beginners\Episode 2 - Linux Essential\שיעור 37 -  Resources In Linux System.mp4"
++URL = "http://localhost:8000/api/tasks/upload"
++
++print(f"Starting upload for: {VIDEO_PATH}")
++
++try:
++    with open(VIDEO_PATH, "rb") as f:
++        files = {"file": ("video.mp4", f, "video/mp4")}
++        data = {"mode": "whisper_local", "language": "he"}
++        
++        print("Uploading to server... please wait.")
++        response = requests.post(URL, files=files, data=data)
++        
++    print(f"Status Code: {response.status_code}")
++    print(f"Response: {response.text}")
++except FileNotFoundError:
++    print("Error: Video file not found. Check the path.")
++    sys.exit(1)
+diff --git a/stress_test_upload.py b/stress_test_upload.py
+new file mode 100644
+index 0000000..253b62b
+--- /dev/null
++++ b/stress_test_upload.py
+@@ -0,0 +1,122 @@
++"""Stress test uploader for zoom-to-text pipeline."""
++import requests
++import time
++import sys
++
++API = "http://localhost:8000/api"
++VIDEO_PATH = r"C:\Users\Asaf\Videos\DevOps For Beginners\Episode 2 - Linux Essential\שיעור 37 -  Resources In Linux System.mp4"
++
++def main():
++    # 1. Upload file
++    print(f"\n{'='*60}")
++    print(f"UPLOADING: {VIDEO_PATH}")
++    print(f"Size: {__import__('os').path.getsize(VIDEO_PATH) / 1e6:.1f} MB")
++    print(f"{'='*60}\n")
++
++    with open(VIDEO_PATH, 'rb') as f:
++        files = {'file': ('lesson37.mp4', f, 'video/mp4')}
++        data = {'mode': 'whisper_local', 'language': 'he'}
++        
++        resp = requests.post(f"{API}/tasks/upload", files=files, data=data)
++    
++    if resp.status_code not in (200, 201, 202):
++        print(f"ERROR: {resp.status_code} - {resp.text}")
++        sys.exit(1)
++    
++    task = resp.json()
++    task_id = task['id']
++    print(f"\n✅ Task created: {task_id}")
++    print(f"   Status: {task['status']}")
++    print(f"{'='*60}\n")
++    
++    # 2. Poll for completion
++    poll_url = f"{API}/tasks/{task_id}"
++    last_progress = 0
++    start = time.time()
++    
++    while True:
++        resp = requests.get(poll_url)
++        if resp.status_code != 200:
++            print(f"\nERROR polling: {resp.text}")
++            sys.exit(1)
++        
++        task = resp.json()
++        status = task['status']
++        progress = task.get('progress', 0)
++        message = task.get('message', '')
++        
++        elapsed = time.time() - start
++        
++        # Print progress change
++        if progress != last_progress or status not in ('PENDING', 'COMPLETED'):
++            bar_len = 30
++            filled = int(bar_len * progress / 100) if progress > 0 else 0
++            bar = '█' * filled + '░' * (bar_len - filled)
++            print(f"\r[{bar}] {progress:3d}% | {status:20s} | {message}", end='', flush=True)
++            last_progress = progress
++        
++        if status in ('COMPLETED',):
++            elapsed_min = elapsed / 60
++            print(f"\n\n{'='*60}")
++            print(f"✅ COMPLETED in {elapsed_min:.1f} minutes")
++            print(f"{'='*60}\n")
++            
++            # Print summary if available
++            result = task.get('result', {})
++            if result and isinstance(result, dict):
++                summary = result.get('summary', '')
++                chapters = result.get('chapters', [])
++                quiz = result.get('quiz', [])
++                
++                print(f"Summary length: {len(summary) if summary else 0} chars")
++                print(f"Chapters: {len(chapters) if chapters else 0}")
++                print(f"Quiz questions: {len(quiz) if quiz else 0}")
++                
++                # Check for RTL/LTR issues
++                if summary:
++                    has_hebrew = any('\u0590' <= c <= '\u05FF' for c in summary)
++                    has_code_switching = any(term in summary.lower() 
++                                           for term in ['linux', 'system', 'resource', 'disk'])
++                    print(f"\nRTL/LTR Analysis:")
++                    print(f"  Contains Hebrew: {has_hebrew}")
++                    print(f"  Has code-switching (English terms): {has_code_switching}")
++                    
++                    # Show first 200 chars
++                    display = summary[:300].replace('\n', ' ')
++                    print(f"\nSummary preview:\n{display}...")
++                
++                if quiz and len(quiz) > 0:
++                    q0 = quiz[0] if isinstance(quiz[0], dict) else {}
++                    print(f"\nFirst question sample:")
++                    print(f"  Question: {q0.get('question', '')[:100]}...")
++                    options = q0.get('options', [])
++                    if options and len(options) > 0:
++                        for i, opt in enumerate(options):
++                            opt_text = opt if isinstance(opt, str) else opt.get('text', str(opt))
++                            print(f"    Option {i+1}: {opt_text[:80]}...")
++            
++            # Save full result to file for detailed review
++            import json
++            with open('/tmp/stress_test_result.json', 'w', encoding='utf-8') as out:
++                json.dump(task, out, ensure_ascii=False, indent=2)
++            print(f"\nFull result saved to: /tmp/stress_test_result.json")
++            
++            break
++            
++        elif status in ('FAILED', 'CANCELLED'):
++            error = task.get('error', 'No error details')
++            print(f"\n\n{'='*60}")
++            print(f"❌ FAILED: {error}")
++            if task.get('error_detail'):
++                print(f"Detail: {task['error_detail'][:200]}")
++            print(f"{'='*60}\n")
++            
++            # Save failure details
++            with open('/tmp/stress_test_failure.json', 'w', encoding='utf-8') as out:
++                json.dump(task, out, ensure_ascii=False, indent=2)
++            break
++        
++        time.sleep(2)
++
++if __name__ == '__main__':
++    main()
+diff --git a/tests/test_events_sse.py b/tests/test_events_sse.py
+index c40d0ec..0216792 100644
+--- a/tests/test_events_sse.py
++++ b/tests/test_events_sse.py
+@@ -109,7 +109,7 @@ def _parse_sse(body: str) -> list[dict]:
+ def test_events_stream_for_completed_task(client, mock_email, monkeypatch, isolated_dirs):
+     import app.services.summarizer as summarizer
+ 
+-    async def fake_summarize_audio(audio_path, progress_cb):
++    async def fake_summarize_audio(audio_path, progress_cb, language="he"):
+         return LessonResult(summary="סיכום", chapters=[], quiz=[], language="he")
+ 
+     async def fake_flashcards(summary, transcript=None):
+diff --git a/tests/test_ivrit_ai_wiring.py b/tests/test_ivrit_ai_wiring.py
+index d3abdf6..5c9b958 100644
+--- a/tests/test_ivrit_ai_wiring.py
++++ b/tests/test_ivrit_ai_wiring.py
+@@ -61,11 +61,11 @@ async def test_processor_routes_ivrit_mode_to_ivrit_transcriber(monkeypatch, tmp
+         called["which"] = "ivrit"
+         return "שלום", "he"
+ 
+-    async def fake_whisper(audio_path, language, task_id=None):
++    async def fake_whisper(audio_path, language, task_id=None, **kwargs):
+         called["which"] = "whisper"
+         return "hello", "he"
+ 
+-    async def fake_whisper_api(audio_path, language, task_id=None):
++    async def fake_whisper_api(audio_path, language, task_id=None, **kwargs):
+         called["which"] = "whisper_api"
+         return "api", "he"
+ 
+diff --git a/tests/test_resilience.py b/tests/test_resilience.py
+index f705c10..06821d0 100644
+--- a/tests/test_resilience.py
++++ b/tests/test_resilience.py
+@@ -226,7 +226,7 @@ def test_delete_task_reclaims_retained_upload_source(
+     remove that file too — the task row was its only reference."""
+     import app.services.transcriber as transcriber
+ 
+-    async def boom(audio_path, language, task_id=None):
++    async def boom(audio_path, language, task_id=None, **kwargs):
+         raise RuntimeError("simulated crash")
+ 
+     monkeypatch.setattr(transcriber, "transcribe", boom)
+diff --git a/tests/test_smart_summary.py b/tests/test_smart_summary.py
+index c17bc26..7fd61ae 100644
+--- a/tests/test_smart_summary.py
++++ b/tests/test_smart_summary.py
+@@ -174,7 +174,7 @@ def isolated_dirs(tmp_path, monkeypatch):
+ def test_smart_summary_end_to_end(client, mock_email, monkeypatch, isolated_dirs):
+     import app.services.summarizer as summarizer
+ 
+-    async def fake_summarize_audio(audio_path, progress_cb):
++    async def fake_summarize_audio(audio_path, progress_cb, language="he"):
+         return LessonResult(summary="סיכום קצר של שיעור", chapters=[], quiz=[], language="he")
+ 
+     async def fake_flashcards(summary, transcript=None):
+diff --git a/tests/test_task_management.py b/tests/test_task_management.py
+index 722be34..f3d6ae6 100644
+--- a/tests/test_task_management.py
++++ b/tests/test_task_management.py
+@@ -1,4 +1,4 @@
+-"""
++﻿"""
+ Tests for the task-management suite: cancel, retry, and storage retention.
+ 
+ Split into:
+@@ -11,7 +11,7 @@ Split into:
+ import asyncio
+ import time
+ 
+-import pytest
++import pytest  # type: ignore[import-not-found]
+ 
+ from app import cancellation, state
+ from app.config import settings
+@@ -81,10 +81,10 @@ def test_cancel_task_sets_cancelled(tmp_path, monkeypatch):
+     _run_with_db(tmp_path, monkeypatch, scenario)
+ 
+ 
+-def test_requeue_task_resets_error_and_partial(tmp_path, monkeypatch):
++def test_requeue_task_preserves_partial_transcript(tmp_path, monkeypatch):
+     async def scenario():
+         await state.create_task("t1", "upload:x", user_id="u1")
+-        await state.append_partial_transcript("t1", "[00:00] חלק מהתמלול ")
++        await state.append_partial_transcript("t1", "[00:00] partial ")
+         await state.fail_task("t1", "boom", detail="stacktrace")
+         assert (await state.get_task("t1")).status == TaskStatus.FAILED
+ 
+@@ -92,9 +92,10 @@ def test_requeue_task_resets_error_and_partial(tmp_path, monkeypatch):
+         t = await state.get_task("t1")
+         assert t.status == TaskStatus.PENDING
+         assert t.error is None
+-        # Stale live-transcript preview must be cleared for the fresh run
+-        _, total = await state.get_partial_transcript("t1")
+-        assert total == 0
++        # Partial transcript must be PRESERVED for the resume/checkpoint feature
++        partial_text, total = await state.get_partial_transcript("t1")
++        assert total > 0
++        assert "[00:00] " in partial_text
+ 
+     _run_with_db(tmp_path, monkeypatch, scenario)
+ 
+diff --git a/tests/test_upload_pipeline.py b/tests/test_upload_pipeline.py
+index 165691a..e9c7bf3 100644
+--- a/tests/test_upload_pipeline.py
++++ b/tests/test_upload_pipeline.py
+@@ -83,7 +83,7 @@ def test_upload_gemini_direct_completes(
+     """GEMINI_DIRECT upload: no extraction, straight to summarize_audio."""
+     import app.services.summarizer as summarizer
+ 
+-    async def fake_summarize_audio(audio_path, progress_cb):
++    async def fake_summarize_audio(audio_path, progress_cb, language="he"):
+         return fake_result
+ 
+     async def fake_flashcards(summary, transcript=None):
+@@ -134,7 +134,7 @@ def test_upload_whisper_local_completes(
+     import app.services.summarizer as summarizer
+     import app.services.transcriber as transcriber
+ 
+-    async def fake_transcribe(audio_path, language, task_id=None):
++    async def fake_transcribe(audio_path, language, task_id=None, **kwargs):
+         return "טקסט מתומלל", "he"
+ 
+     async def fake_summarize_transcript(transcript, progress_cb):
+@@ -201,7 +201,7 @@ def test_upload_payload_repointed_after_extraction(
+         payloads.append(dict(payload))
+         await real_set(task_id, payload)
+ 
+-    async def fake_transcribe(audio_path, language, task_id=None):
++    async def fake_transcribe(audio_path, language, task_id=None, **kwargs):
+         return "טקסט", "he"
+ 
+     async def fake_summarize_transcript(transcript, progress_cb):

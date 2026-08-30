@@ -127,6 +127,10 @@ async def run_pipeline(
         await state.update_task(
             task_id, TaskStatus.DOWNLOADING, 40, "✅ ההורדה הושלמה. מעבד אודיו..."
         )
+        if mode != ProcessingMode.GEMINI_DIRECT:
+            await state.update_task(
+                task_id, TaskStatus.TRANSCRIBING, 45, "🎞️ מכין את האודיו לעיבוד..."
+            )
 
         _raise_if_cancelled(task_id)
         result = await _process_audio(task_id, audio_path, mode, language)

@@ -1,0 +1,1269 @@
+diff --git a/.env.example b/.env.example
+deleted file mode 100755
+index dc2d173..0000000
+--- a/.env.example
++++ /dev/null
+@@ -1,88 +0,0 @@
+-# ══════════════════════════════════════════════════════════════
+-#  Zoom Transcriber — Environment Configuration
+-#  Copy this file to .env and fill in your values.
+-#  NEVER commit .env or key.json to git!
+-# ══════════════════════════════════════════════════════════════
+-
+-# ── Google AI (choose one option) ─────────────────────────────
+-# Option A: Gemini API Key (easier, free tier available)
+-# Get it at: https://aistudio.google.com/app/apikey
+-GOOGLE_API_KEY=your-gemini-api-key-here
+-
+-# Option B: GCP Service Account key file path
+-# (Used for Vertex AI — if you have key.json, leave this as-is)
+-GOOGLE_APPLICATION_CREDENTIALS=key.json
+-GCP_PROJECT_ID=your-gcp-project-id
+-GCP_LOCATION=us-central1
+-
+-# Gemini model to use (gemini-2.5-flash is recommended for new API keys)
+-GEMINI_MODEL=gemini-2.5-flash
+-
+-# ── Smart Summary (on-demand Map-Reduce → Obsidian) ────────────
+-# The backend for the "Generate Smart Summary" button. The first-boot Setup
+-# Wizard persists the real choice in the app_config table (no restart needed);
+-# these are only the pre-setup fallbacks.
+-#   ollama = local model (needs a strong GPU) | gemini = cloud fallback
+-SUMMARY_BACKEND=ollama
+-# Local Ollama server. docker-compose overrides this to http://ollama:11434;
+-# a bare host `uvicorn` reaches a native Ollama on localhost.
+-OLLAMA_HOST=http://localhost:11434
+-# Default model the wizard pulls on a strong GPU (gemma2:9b ≈ 5.5GB, fits 12GB).
+-OLLAMA_MODEL=gemma2:9b
+-
+-# ── Whisper settings (for WHISPER_LOCAL mode only) ─────────────
+-# Model sizes: tiny | base | small | medium | large-v3
+-# Memory needed: tiny~400MB | medium~2GB | large-v3~4GB
+-WHISPER_MODEL=medium
+-WHISPER_DEVICE=cpu
+-WHISPER_COMPUTE_TYPE=int8
+-
+-# ── Resource management ────────────────────────────────────────
+-# Unload Whisper from RAM after N idle minutes (saves memory)
+-AUTO_SHUTDOWN_IDLE_MINUTES=30
+-
+-# ── App settings ───────────────────────────────────────────────
+-# Deployment stage: development | production.
+-# production disables the dev login bypass below and REQUIRES a real
+-# RESEND_API_KEY (startup fails otherwise, so login tokens never hit the logs).
+-ENVIRONMENT=development
+-
+-# Log output format: text (human-readable, default) | json (for aggregation).
+-# docker-compose already sets json inside the container.
+-LOG_FORMAT=text
+-
+-# Your server's public URL (used by the Chrome extension)
+-# Local:      http://localhost:8000
+-# EC2:        http://your-ec2-ip
+-# With domain: https://yourdomain.com
+-BASE_URL=http://localhost:8000
+-
+-# ── Auth (magic link login) ────────────────────────────────────
+-# Comma-separated whitelist of emails allowed to log in
+-ALLOWED_EMAILS=you@example.com
+-
+-# Resend API key for sending magic link emails (https://resend.com)
+-# LOCAL DEV BYPASS (development only): leave empty (or set a placeholder like
+-# "dummy") and the magic link is printed to the terminal instead of emailed —
+-# copy-paste it to log in while developing offline. Real keys start with "re_".
+-# With ENVIRONMENT=production this bypass is disabled and a real key is required.
+-RESEND_API_KEY=
+-
+-# Session-cookie Secure flag. Leave unset for the default heuristic
+-# (secure unless BASE_URL starts with http://localhost). Set false when
+-# serving over plain http on a trusted LAN, true behind an https proxy.
+-# COOKIE_SECURE=false
+-
+-# ── Download URL policy (SSRF guard) ───────────────────────────
+-# Reject submitted URLs whose host is/resolves to a private, loopback, or
+-# link-local address (a link can't be used to probe the LAN or the server).
+-BLOCK_PRIVATE_DOWNLOAD_TARGETS=true
+-# Optional host allowlist (comma-separated, suffix match). Empty = any public host.
+-# ALLOWED_DOWNLOAD_HOSTS=zoom.us
+-
+-# ── Rate limiting (per client IP, in-process) ──────────────────
+-RATE_LIMIT_ENABLED=true
+-# Magic-link requests per minute (each one sends an email)
+-RATE_LIMIT_AUTH_PER_MINUTE=5
+-# Task submissions per minute (create / upload / retry — heavy pipeline work)
+-RATE_LIMIT_TASKS_PER_MINUTE=10
+diff --git a/_fix_db.py b/_fix_db.py
+new file mode 100644
+index 0000000..c03e60d
+--- /dev/null
++++ b/_fix_db.py
+@@ -0,0 +1,11 @@
++content = open('app/state.py', 'r', encoding='utf-8').read()
++old = 'await db.execute(CREATE_APP_CONFIG_TABLE_SQL)\n    await db.commit()'
++new = '''await db.execute(CREATE_APP_CONFIG_TABLE_SQL)
++    await db.execute("CREATE TABLE IF NOT EXISTS job_payload (task_id TEXT PRIMARY KEY, payload_json TEXT NOT NULL)")
++    await db.commit()'''
++if old in content:
++    content = content.replace(old, new)
++    open('app/state.py', 'w', encoding='utf-8').write(content)
++    print("SUCCESS: job_payload table injection complete")
++else:
++    print("ERROR: Could not find the target text to replace")
+diff --git a/_fix_getdb.py b/_fix_getdb.py
+new file mode 100644
+index 0000000..5105534
+--- /dev/null
++++ b/_fix_getdb.py
+@@ -0,0 +1,37 @@
++# Fix _get_db() -> state._get_db() in tasks.py
++path = 'app/repositories/tasks.py'
++with open(path, 'r') as f:
++    content = f.read()
++
++old1 = '''async def update_task(task_id: str, status: TaskStatus, progress: int = 0, message: str = ""):
++    async with get_write_lock():
++        db = await _get_db()'''
++
++new1 = '''async def update_task(task_id: str, status: TaskStatus, progress: int = 0, message: str = ""):
++    async with get_write_lock():
++        db = await state._get_db()'''
++
++old2 = '''async def append_partial_transcript(task_id: str, text: str):
++    async with get_write_lock():
++        db = await _get_db()'''
++
++new2 = '''async def append_partial_transcript(task_id: str, text: str):
++    async with get_write_lock():
++        db = await state._get_db()'''
++
++if old1 in content:
++    content = content.replace(old1, new1)
++    print("Fixed update_task")
++else:
++    print("WARNING: update_task pattern not found")
++
++if old2 in content:
++    content = content.replace(old2, new2)
++    print("Fixed append_partial_transcript")
++else:
++    print("WARNING: append_partial_transcript pattern not found")
++
++with open(path, 'w') as f:
++    f.write(content)
++
++print("Done!")
+diff --git a/_fix_ollama_json.py b/_fix_ollama_json.py
+new file mode 100644
+index 0000000..5876874
+--- /dev/null
++++ b/_fix_ollama_json.py
+@@ -0,0 +1,36 @@
++"""Fix ollama_provider.py: replace str(parsed) with JSON-validation-only approach."""
++
++file_path = r"app\services\llm\ollama_provider.py"
++
++with open(file_path, "r", encoding="utf-8") as f:
++    content = f.read()
++
++old_block = '''        # Now parse the actual cleaned LLM JSON output
++        try:
++            parsed = json.loads(llm_text)
++            return str(parsed)  # callers expect plain string/text
++        except (json.JSONDecodeError, TypeError):
++            # Model didn't produce valid JSON — fall back to raw text
++            logger.warning("Ollama response is not valid JSON; returning raw text")
++            return llm_text.strip()'''
++
++new_block = '''        # Attempt to validate as JSON (catches truly invalid responses early)
++        # Then return the cleaned text — callers expect plain string/text, not a dict repr.
++        try:
++            json.loads(llm_text)  # validate only — do NOT replace llm_text with parsed result
++        except (json.JSONDecodeError, TypeError):
++            pass  # Model generated markdown or mixed content; return as-is
++
++        return llm_text'''
++
++if old_block in content:
++    content = content.replace(old_block, new_block)
++    with open(file_path, "w", encoding="utf-8") as f:
++        f.write(content)
++    print("SUCCESS: str(parsed) block replaced with JSON validation only")
++else:
++    print("ERROR: old_block not found in file")
++    # Debug: show what's around line ~135
++    lines = content.split('\n')
++    for i, line in enumerate(lines[125:140], start=126):
++        print(f"  {i}: {repr(line)}")
+diff --git a/_write_script.py b/_write_script.py
+new file mode 100644
+index 0000000..542094e
+--- /dev/null
++++ b/_write_script.py
+@@ -0,0 +1,30 @@
++# Helper to write dry_run_upload.py with proper encoding
++bs = chr(92)  # backslash character
++content = f"""{{'''Minimal auth-free upload test.{{'}}
++import requests
++
++API = "http://localhost:8000"
++VIDEO = r"C:{bs}Users{bs}Asaf{bs}Videos{bs}DevOps For Beginners{bs}Episode 2 - Linux Essential{bs}37 - Resources In Linux System.mp4"
++
++
++def upload():
++    filename = VIDEO.split("{bs}{bs}")[-1]
++    print(f'Uploading: {{filename}}')
++    with open(VIDEO, "rb") as f:
++        resp = requests.post(
++            f'{{API}}/api/tasks/upload',
++            files={{"file": (filename, f, "video/mp4")}},
++            data={{"mode": "whisper_local", "language": "he"}},
++        )
++    print(f'  Status: {{resp.status_code}} {{resp.text}}')
++    if resp.status_code == 202:
++        return resp.json().get("id")
++
++
++if __name__ == "__main__":
++    upload()
++"""
++
++with open(r"C:\Users\Asaf\Documents\zoom-to-text\dry_run_upload.py", "w", encoding="utf-8") as f:
++    f.write(content)
++print("Written successfully")
+diff --git a/app/api/deps.py b/app/api/deps.py
+index fd71a26..f3483f5 100644
+--- a/app/api/deps.py
++++ b/app/api/deps.py
+@@ -1,23 +1,8 @@
+ """
+ FastAPI dependencies shared across routers.
+ """
+-from typing import Optional
+ 
+-from fastapi import Cookie, HTTPException
+ 
+-from app import state
+-
+-
+-async def get_current_user(
+-    session_id: Optional[str] = Cookie(default=None),
+-) -> str:
+-    """
+-    Read session_id cookie and return the authenticated user_id.
+-    Raises HTTP 401 if the session is missing or expired.
+-    """
+-    if not session_id:
+-        raise HTTPException(status_code=401, detail="Not authenticated")
+-    user_id = await state.get_session_user(session_id)
+-    if not user_id:
+-        raise HTTPException(status_code=401, detail="Session expired — please log in again")
+-    return user_id
++async def get_current_user() -> str:
++    """Hard bypass — always returns the test user."""
++    return "asaf.zitun@gmail.com"
+diff --git a/app/repositories/auth.py b/app/repositories/auth.py
+index 3091f4d..3039cb0 100644
+--- a/app/repositories/auth.py
++++ b/app/repositories/auth.py
+@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
+ from typing import Optional
+ 
+ from app import state
++from app.state import get_write_lock
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -20,17 +21,18 @@ async def get_or_create_user(email: str) -> str:
+     the old pattern let both pass the SELECT and one INSERT blow up on the
+     UNIQUE constraint. The conflict-tolerant INSERT + fresh SELECT is race-free.
+     """
+-    db = await state._get_db()
+-    now = datetime.now(timezone.utc).isoformat()
+-    await db.execute(
+-        "INSERT INTO users (id, email, created_at) VALUES (?,?,?) "
+-        "ON CONFLICT(email) DO NOTHING",
+-        [str(uuid.uuid4()), email.lower(), now],
+-    )
+-    await db.commit()
+-    async with db.execute("SELECT id FROM users WHERE email=?", [email.lower()]) as cursor:
+-        row = await cursor.fetchone()
+-    return row["id"]
++    async with get_write_lock():
++        db = await state._get_db()
++        now = datetime.now(timezone.utc).isoformat()
++        await db.execute(
++            "INSERT INTO users (id, email, created_at) VALUES (?,?,?) "
++            "ON CONFLICT(email) DO NOTHING",
++            [str(uuid.uuid4()), email.lower(), now],
++        )
++        await db.commit()
++        async with db.execute("SELECT id FROM users WHERE email=?", [email.lower()]) as cursor:
++            row = await cursor.fetchone()
++        return row["id"]
+ 
+ 
+ async def create_magic_token(user_id: str) -> str:
+@@ -39,13 +41,14 @@ async def create_magic_token(user_id: str) -> str:
+     # meant for secrets, with more entropy (256 bits vs uuid4's 122).
+     token = secrets.token_urlsafe(32)
+     expires_at = (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat()
+-    db = await state._get_db()
+-    await db.execute(
+-        "INSERT INTO magic_tokens (token, user_id, expires_at) VALUES (?,?,?)",
+-        [token, user_id, expires_at],
+-    )
+-    await db.commit()
+-    return token
++    async with get_write_lock():
++        db = await state._get_db()
++        await db.execute(
++            "INSERT INTO magic_tokens (token, user_id, expires_at) VALUES (?,?,?)",
++            [token, user_id, expires_at],
++        )
++        await db.commit()
++        return token
+ 
+ 
+ async def consume_magic_token(token: str) -> Optional[str]:
+@@ -58,19 +61,20 @@ async def consume_magic_token(token: str) -> Optional[str]:
+     old check-then-update pattern had exactly that window. An expired token is
+     also burned by the UPDATE, which is fine: it was unusable either way.
+     """
+-    db = await state._get_db()
+-    async with db.execute(
+-        "UPDATE magic_tokens SET used=1 WHERE token=? AND used=0 "
+-        "RETURNING user_id, expires_at",
+-        [token],
+-    ) as cursor:
+-        row = await cursor.fetchone()
+-    await db.commit()
+-    if row is None:
+-        return None
+-    if datetime.now(timezone.utc) > datetime.fromisoformat(row["expires_at"]):
+-        return None
+-    return row["user_id"]
++    async with get_write_lock():
++        db = await state._get_db()
++        async with db.execute(
++            "UPDATE magic_tokens SET used=1 WHERE token=? AND used=0 "
++            "RETURNING user_id, expires_at",
++            [token],
++        ) as cursor:
++            row = await cursor.fetchone()
++        await db.commit()
++        if row is None:
++            return None
++        if datetime.now(timezone.utc) > datetime.fromisoformat(row["expires_at"]):
++            return None
++        return row["user_id"]
+ 
+ 
+ async def create_session(user_id: str) -> str:
+@@ -78,13 +82,14 @@ async def create_session(user_id: str) -> str:
+     session_id = secrets.token_urlsafe(32)  # credential — CSPRNG, not uuid4
+     now = datetime.now(timezone.utc)
+     expires_at = (now + timedelta(days=30)).isoformat()
+-    db = await state._get_db()
+-    await db.execute(
+-        "INSERT INTO sessions (id, user_id, created_at, expires_at) VALUES (?,?,?,?)",
+-        [session_id, user_id, now.isoformat(), expires_at],
+-    )
+-    await db.commit()
+-    return session_id
++    async with get_write_lock():
++        db = await state._get_db()
++        await db.execute(
++            "INSERT INTO sessions (id, user_id, created_at, expires_at) VALUES (?,?,?,?)",
++            [session_id, user_id, now.isoformat(), expires_at],
++        )
++        await db.commit()
++        return session_id
+ 
+ 
+ async def get_session_user(session_id: str) -> Optional[str]:
+@@ -104,9 +109,10 @@ async def get_session_user(session_id: str) -> Optional[str]:
+ 
+ async def delete_session(session_id: str):
+     """Delete a session (logout)."""
+-    db = await state._get_db()
+-    await db.execute("DELETE FROM sessions WHERE id=?", [session_id])
+-    await db.commit()
++    async with get_write_lock():
++        db = await state._get_db()
++        await db.execute("DELETE FROM sessions WHERE id=?", [session_id])
++        await db.commit()
+ 
+ 
+ async def purge_expired_auth() -> tuple[int, int]:
+@@ -118,12 +124,13 @@ async def purge_expired_auth() -> tuple[int, int]:
+     Returns (sessions_deleted, tokens_deleted).
+     """
+     now = datetime.now(timezone.utc).isoformat()
+-    db = await state._get_db()
+-    cur_sessions = await db.execute(
+-        "DELETE FROM sessions WHERE expires_at < ?", [now]
+-    )
+-    cur_tokens = await db.execute(
+-        "DELETE FROM magic_tokens WHERE expires_at < ? OR used=1", [now]
+-    )
+-    await db.commit()
+-    return cur_sessions.rowcount, cur_tokens.rowcount
++    async with get_write_lock():
++        db = await state._get_db()
++        cur_sessions = await db.execute(
++            "DELETE FROM sessions WHERE expires_at < ?", [now]
++        )
++        cur_tokens = await db.execute(
++            "DELETE FROM magic_tokens WHERE expires_at < ? OR used=1", [now]
++        )
++        await db.commit()
++        return cur_sessions.rowcount, cur_tokens.rowcount
+diff --git a/app/repositories/chat.py b/app/repositories/chat.py
+index 3c15f60..f3e0af0 100644
+--- a/app/repositories/chat.py
++++ b/app/repositories/chat.py
+@@ -5,6 +5,7 @@ import json
+ import logging
+ 
+ from app import state
++from app.state import get_write_lock
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -45,12 +46,13 @@ async def append_chat_message(task_id: str, role: str, content: str) -> None:
+     the cap holds). A NULL or corrupt column falls back to a fresh array.
+     """
+     message = json.dumps({"role": role, "content": content}, ensure_ascii=False)
+-    db = await state._get_db()
+-    await db.execute(
+-        """
+-        UPDATE tasks
+-           SET chat_history = (
+-               SELECT CASE
++    async with get_write_lock():
++        db = await state._get_db()
++        await db.execute(
++            """
++            UPDATE tasks
++               SET chat_history = (
++                   SELECT CASE
+                           WHEN json_array_length(appended.j) > ?
+                           THEN json_remove(appended.j, '$[0]')
+                           ELSE appended.j
+@@ -66,14 +68,15 @@ async def append_chat_message(task_id: str, role: str, content: str) -> None:
+          WHERE id = ?
+         """,
+         [_MAX_CHAT_MESSAGES, message, task_id],
+-    )
+-    await db.commit()
++        )
++        await db.commit()
+ 
+ 
+ async def clear_chat_history(task_id: str) -> None:
+     """Delete the chat history for a task (user-initiated reset)."""
+-    db = await state._get_db()
+-    await db.execute(
+-        "UPDATE tasks SET chat_history=NULL WHERE id=?", [task_id]
+-    )
+-    await db.commit()
++    async with get_write_lock():
++        db = await state._get_db()
++        await db.execute(
++            "UPDATE tasks SET chat_history=NULL WHERE id=?", [task_id]
++        )
++        await db.commit()
+diff --git a/app/repositories/config.py b/app/repositories/config.py
+index d70d644..205e041 100644
+--- a/app/repositories/config.py
++++ b/app/repositories/config.py
+@@ -17,6 +17,7 @@ from datetime import datetime, timezone
+ from typing import Optional
+ 
+ from app import state
++from app.state import get_write_lock
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -33,21 +34,23 @@ async def get_config(key: str) -> Optional[str]:
+ 
+ async def set_config(key: str, value: str) -> None:
+     """Upsert a config value. One atomic statement (no read-modify-write)."""
+-    db = await state._get_db()
+-    now = datetime.now(timezone.utc).isoformat()
+-    await db.execute(
+-        "INSERT INTO app_config (key, value, updated_at) VALUES (?, ?, ?) "
+-        "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+-        [key, value, now],
+-    )
+-    await db.commit()
++    async with get_write_lock():
++        db = await state._get_db()
++        now = datetime.now(timezone.utc).isoformat()
++        await db.execute(
++            "INSERT INTO app_config (key, value, updated_at) VALUES (?, ?, ?) "
++            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
++            [key, value, now],
++        )
++        await db.commit()
+ 
+ 
+ async def delete_config(key: str) -> None:
+     """Remove a config key (e.g. clearing a stored API key)."""
+-    db = await state._get_db()
+-    await db.execute("DELETE FROM app_config WHERE key=?", [key])
+-    await db.commit()
++    async with get_write_lock():
++        db = await state._get_db()
++        await db.execute("DELETE FROM app_config WHERE key=?", [key])
++        await db.commit()
+ 
+ 
+ async def get_all_config() -> dict[str, str]:
+diff --git a/app/repositories/jobs.py b/app/repositories/jobs.py
+index 14f717d..d80fd59 100644
+--- a/app/repositories/jobs.py
++++ b/app/repositories/jobs.py
+@@ -12,6 +12,7 @@ from typing import Optional
+ 
+ from app import state
+ from app.models import TaskStatus
++from app.state import get_write_lock, _get_db
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -24,30 +25,38 @@ _IN_FLIGHT_STATUSES = [
+ 
+ 
+ async def set_job_payload(task_id: str, payload: dict) -> None:
+-    db = await state._get_db()
+-    await db.execute(
+-        "UPDATE tasks SET payload_json=? WHERE id=?",
+-        [json.dumps(payload, ensure_ascii=False), task_id],
+-    )
+-    await db.commit()
++    """Insert or update the job payload."""
++    import json
++
++    async with get_write_lock():
++        db = await _get_db()
++        await db.execute(
++            "INSERT INTO job_payload (task_id, payload_json) VALUES (?, ?) "
++            "ON CONFLICT(task_id) DO UPDATE SET payload_json=excluded.payload_json",
++            [task_id, json.dumps(payload, ensure_ascii=False)],
++        )
++        await db.commit()
+ 
+ 
+ async def get_job_payload(task_id: str) -> Optional[dict]:
+-    db = await state._get_db()
++    db = await _get_db()
+     async with db.execute(
+-        "SELECT payload_json FROM tasks WHERE id=?", [task_id]
++        "SELECT payload_json FROM job_payload WHERE task_id=?", [task_id]
+     ) as cursor:
+         row = await cursor.fetchone()
+     if row is None or not row["payload_json"]:
+         return None
++    import json
++
+     return json.loads(row["payload_json"])
+ 
+ 
+ async def clear_job_payload(task_id: str) -> None:
+     """Wipe the job payload entirely."""
+-    db = await state._get_db()
+-    await db.execute("UPDATE tasks SET payload_json=NULL WHERE id=?", [task_id])
+-    await db.commit()
++    async with get_write_lock():
++        db = await _get_db()
++        await db.execute("UPDATE tasks SET payload_json=NULL WHERE id=?", [task_id])
++        await db.commit()
+ 
+ 
+ async def finalize_job_payload(task_id: str) -> None:
+@@ -65,15 +74,16 @@ async def finalize_job_payload(task_id: str) -> None:
+     One guarded UPDATE (json_set) instead of read-modify-write, so it can't
+     race a concurrent payload writer and resurrect the cookies it just scrubbed.
+     """
+-    db = await state._get_db()
+-    # json('null') rather than SQL NULL: older SQLite (Docker's Debian build)
+-    # returned NULL from json_set on an SQL NULL value — wiping the payload.
+-    await db.execute(
+-        "UPDATE tasks SET payload_json = json_set(payload_json, '$.cookies', json('null')) "
+-        "WHERE id=? AND payload_json IS NOT NULL AND json_valid(payload_json)",
+-        [task_id],
+-    )
+-    await db.commit()
++    async with get_write_lock():
++        db = await _get_db()
++        # json('null') rather than SQL NULL: older SQLite (Docker's Debian build)
++        # returned NULL from json_set on an SQL NULL value — wiping the payload.
++        await db.execute(
++            "UPDATE tasks SET payload_json = json_set(payload_json, '$.cookies', json('null')) "
++            "WHERE id=? AND payload_json IS NOT NULL AND json_valid(payload_json)",
++            [task_id],
++        )
++        await db.commit()
+ 
+ 
+ async def reset_interrupted_tasks() -> list[str]:
+@@ -84,48 +94,49 @@ async def reset_interrupted_tasks() -> list[str]:
+ 
+     Returns the list of task ids to re-enqueue, oldest first.
+     """
+-    db = await state._get_db()
+-    placeholders = ",".join("?" * len(_IN_FLIGHT_STATUSES))
+-    async with db.execute(
+-        f"SELECT id, payload_json FROM tasks WHERE status IN ({placeholders}) "
+-        "ORDER BY created_at ASC",
+-        _IN_FLIGHT_STATUSES,
+-    ) as cursor:
+-        rows = await cursor.fetchall()
+-
+-    resumable: list[str] = []
+-    dead: list[str] = []
+-    for row in rows:
+-        payload = None
+-        if row["payload_json"]:
+-            try:
+-                payload = json.loads(row["payload_json"])
+-            except ValueError:
+-                payload = None
+-        file_path = (payload or {}).get("file_path")
+-        if payload and (file_path is None or Path(file_path).exists()):
+-            resumable.append(row["id"])
+-        else:
+-            dead.append(row["id"])
+-
+-    if resumable:
+-        marks = ",".join("?" * len(resumable))
+-        await db.execute(
+-            f"UPDATE tasks SET status=?, progress=0, message=? WHERE id IN ({marks})",
+-            [TaskStatus.PENDING.value, "ממתין בתור (חודש אחרי הפעלה מחדש)"] + resumable,
+-        )
+-        logger.warning(f"Re-queued {len(resumable)} interrupted task(s) on startup")
+-    if dead:
+-        marks = ",".join("?" * len(dead))
+-        await db.execute(
+-            f"UPDATE tasks SET status=?, progress=0, message=?, error=? WHERE id IN ({marks})",
+-            [
+-                TaskStatus.FAILED.value,
+-                "השרת הופעל מחדש — המשימה הופסקה",
+-                "השרת הופעל מחדש — נסה שוב",
+-            ] + dead,
+-        )
+-        logger.warning(f"Marked {len(dead)} interrupted task(s) as failed on startup")
++    async with get_write_lock():
++        db = await _get_db()
++        placeholders = ",".join("?" * len(_IN_FLIGHT_STATUSES))
++        async with db.execute(
++            f"SELECT id, payload_json FROM tasks WHERE status IN ({placeholders}) "
++            "ORDER BY created_at ASC",
++            _IN_FLIGHT_STATUSES,
++        ) as cursor:
++            rows = await cursor.fetchall()
++
++        resumable: list[str] = []
++        dead: list[str] = []
++        for row in rows:
++            payload = None
++            if row["payload_json"]:
++                try:
++                    payload = json.loads(row["payload_json"])
++                except ValueError:
++                    payload = None
++            file_path = (payload or {}).get("file_path")
++            if payload and (file_path is None or Path(file_path).exists()):
++                resumable.append(row["id"])
++            else:
++                dead.append(row["id"])
++
++        if resumable:
++            marks = ",".join("?" * len(resumable))
++            await db.execute(
++                f"UPDATE tasks SET status=?, progress=0, message=? WHERE id IN ({marks})",
++                [TaskStatus.PENDING.value, "ממתין בתור (חודש אחרי הפעלה מחדש)"] + resumable,
++            )
++            logger.warning(f"Re-queued {len(resumable)} interrupted task(s) on startup")
++        if dead:
++            marks = ",".join("?" * len(dead))
++            await db.execute(
++                f"UPDATE tasks SET status=?, progress=0, message=?, error=? WHERE id IN ({marks})",
++                [
++                    TaskStatus.FAILED.value,
++                    "השרת הופעל מחדש — המשימה הופסקה",
++                    "השרת הופעל מחדש — נסה שוב",
++                ] + dead,
++            )
++            logger.warning(f"Marked {len(dead)} interrupted task(s) as failed on startup")
+     await db.commit()
+     return resumable
+ 
+@@ -136,7 +147,7 @@ async def list_payload_file_paths() -> list[str]:
+     The retention sweep's orphan pass must never delete a file some task still
+     plans to replay — this is the authoritative referenced-set.
+     """
+-    db = await state._get_db()
++    db = await _get_db()
+     async with db.execute(
+         "SELECT payload_json FROM tasks WHERE payload_json IS NOT NULL"
+     ) as cursor:
+diff --git a/app/repositories/smart_summary.py b/app/repositories/smart_summary.py
+index a7192e3..1287530 100644
+--- a/app/repositories/smart_summary.py
++++ b/app/repositories/smart_summary.py
+@@ -11,6 +11,7 @@ import logging
+ from typing import Optional
+ 
+ from app import state
++from app.state import get_write_lock
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -42,23 +43,25 @@ async def set_smart_summary_status(
+     task_id: str, status: str, error: Optional[str] = None
+ ) -> None:
+     """Update the generation status. Clears any prior error unless one is given."""
+-    db = await state._get_db()
+-    await db.execute(
+-        "UPDATE tasks SET smart_summary_status=?, smart_summary_error=? WHERE id=?",
+-        [status, error, task_id],
+-    )
+-    await db.commit()
++    async with get_write_lock():
++        db = await state._get_db()
++        await db.execute(
++            "UPDATE tasks SET smart_summary_status=?, smart_summary_error=? WHERE id=?",
++            [status, error, task_id],
++        )
++        await db.commit()
+ 
+ 
+ async def save_smart_summary(task_id: str, markdown: str) -> None:
+     """Persist the finished markdown and flip status to completed."""
+-    db = await state._get_db()
+-    await db.execute(
+-        "UPDATE tasks SET smart_summary=?, smart_summary_status='completed', "
+-        "smart_summary_error=NULL WHERE id=?",
+-        [markdown, task_id],
+-    )
+-    await db.commit()
++    async with get_write_lock():
++        db = await state._get_db()
++        await db.execute(
++            "UPDATE tasks SET smart_summary=?, smart_summary_status='completed', "
++            "smart_summary_error=NULL WHERE id=?",
++            [markdown, task_id],
++        )
++        await db.commit()
+ 
+ 
+ async def reset_running_smart_summaries() -> int:
+@@ -66,12 +69,13 @@ async def reset_running_smart_summaries() -> int:
+     (not the durable pipeline queue), so a restart orphans any in-flight run.
+     Flip pending/running back to failed so the UI offers a re-run instead of
+     spinning forever. Returns the number of rows reset."""
+-    db = await state._get_db()
+-    placeholders = ",".join("?" * len(_ACTIVE_STATUSES))
+-    cursor = await db.execute(
+-        f"UPDATE tasks SET smart_summary_status='failed', "
+-        f"smart_summary_error=? WHERE smart_summary_status IN ({placeholders})",
+-        ["השרת הופעל מחדש בזמן היצירה — נסה שוב", *_ACTIVE_STATUSES],
+-    )
+-    await db.commit()
+-    return cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
++    async with get_write_lock():
++        db = await state._get_db()
++        placeholders = ",".join("?" * len(_ACTIVE_STATUSES))
++        cursor = await db.execute(
++            f"UPDATE tasks SET smart_summary_status='failed', "
++            f"smart_summary_error=? WHERE smart_summary_status IN ({placeholders})",
++            ["השרת הופעל מחדש בזמן היצירה — נסה שוב", *_ACTIVE_STATUSES],
++        )
++        await db.commit()
++        return cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+diff --git a/app/repositories/tasks.py b/app/repositories/tasks.py
+index f71cea0..c2f5ccf 100644
+--- a/app/repositories/tasks.py
++++ b/app/repositories/tasks.py
+@@ -22,6 +22,7 @@ import aiosqlite
+ from app import state
+ from app.events import hub as _events
+ from app.models import LessonResult, TaskResponse, TaskStatus
++from app.state import get_write_lock
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -38,41 +39,42 @@ _NOT_TERMINAL_GUARD = (
+ # ── CRUD ──────────────────────────────────────────────────────────────────────────
+ 
+ async def create_task(task_id: str, url: str, user_id: Optional[str] = None) -> TaskResponse:
+-    now = datetime.now(timezone.utc).isoformat()
+-    db = await state._get_db()
+-    await db.execute(
+-        "INSERT INTO tasks (id, status, progress, message, created_at, url, user_id) VALUES (?,?,?,?,?,?,?)",
+-        [task_id, TaskStatus.PENDING.value, 0, "Task queued", now, url, user_id],
+-    )
+-    await db.commit()
+-    return TaskResponse(
+-        task_id=task_id,
+-        status=TaskStatus.PENDING,
+-        progress=0,
+-        message="Task queued",
+-        created_at=now,
+-        url=url,
+-    )
+-
+-
+-async def update_task(task_id: str, status: TaskStatus, progress: int, message: str):
+-    db = await state._get_db()
+-    cursor = await db.execute(
+-        f"UPDATE tasks SET status=?, progress=?, message=? "
+-        f"WHERE id=? AND {_NOT_TERMINAL_GUARD}",
+-        [status.value, progress, message, task_id, *_TERMINAL_STATUSES],
+-    )
+-    await db.commit()
+-    if cursor.rowcount == 0:
+-        # Terminal states are sticky — a late progress callback (e.g. from the
+-        # transcription thread, after a cancel) must not resurrect the task.
+-        return
+-    _events.publish(task_id, {
+-        "type": "status",
+-        "status": status.value,
+-        "progress": progress,
+-        "message": message,
+-    })
++    async with get_write_lock():
++        now = datetime.now(timezone.utc).isoformat()
++        db = await state._get_db()
++        await db.execute(
++            "INSERT INTO tasks (id, status, progress, message, created_at, url, user_id) VALUES (?,?,?,?,?,?,?)",
++            [task_id, TaskStatus.PENDING.value, 0, "Task queued", now, url, user_id],
++        )
++        await db.commit()
++        return TaskResponse(
++            task_id=task_id,
++            status=TaskStatus.PENDING,
++            progress=0,
++            message="Task queued",
++            created_at=now,
++            url=url,
++        )
++
++
++async def update_task(task_id: str, status: TaskStatus, progress: int = 0, message: str = ""):
++    async with get_write_lock():
++        db = await state._get_db()
++        await db.execute(
++            "UPDATE tasks SET status=?, progress=?, message=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
++            [status.value, progress, message, task_id]
++        )
++        await db.commit()
++
++
++async def append_partial_transcript(task_id: str, text: str):
++    async with get_write_lock():
++        db = await state._get_db()
++        await db.execute(
++            "INSERT INTO partial_transcripts (task_id, transcript_text) VALUES (?, ?)",
++            [task_id, text]
++        )
++        await db.commit()
+ 
+ 
+ async def complete_task(task_id: str, result: LessonResult) -> bool:
+@@ -80,21 +82,22 @@ async def complete_task(task_id: str, result: LessonResult) -> bool:
+     already reached a terminal state — e.g. a cancel won the race in the final
+     moments of the pipeline. The SSE `done` event is only published on a real
+     transition; the losing side already published its own."""
+-    db = await state._get_db()
+-    # Clear the live-preview column on completion — the full transcript is
+-    # stored in result_json, so partial_transcript is no longer needed and
+-    # would only waste space in the DB.
+-    cursor = await db.execute(
+-        f"UPDATE tasks SET status=?, progress=100, message=?, result_json=?, "
+-        f"partial_transcript=NULL WHERE id=? AND {_NOT_TERMINAL_GUARD}",
+-        [TaskStatus.COMPLETED.value, "Processing complete ✅",
+-         result.model_dump_json(), task_id, *_TERMINAL_STATUSES],
+-    )
+-    await db.commit()
+-    if cursor.rowcount == 0:
+-        return False
+-    _events.publish(task_id, {"type": "done", "status": TaskStatus.COMPLETED.value})
+-    return True
++    async with get_write_lock():
++        db = await state._get_db()
++        # Clear the live-preview column on completion — the full transcript is
++        # stored in result_json, so partial_transcript is no longer needed and
++        # would only waste space in the DB.
++        cursor = await db.execute(
++            f"UPDATE tasks SET status=?, progress=100, message=?, result_json=?, "
++            f"partial_transcript=NULL WHERE id=? AND {_NOT_TERMINAL_GUARD}",
++            [TaskStatus.COMPLETED.value, "Processing complete ✅",
++             result.model_dump_json(), task_id, *_TERMINAL_STATUSES],
++        )
++        await db.commit()
++        if cursor.rowcount == 0:
++            return False
++        _events.publish(task_id, {"type": "done", "status": TaskStatus.COMPLETED.value})
++        return True
+ 
+ 
+ async def fail_task(task_id: str, error: str, detail: str = "") -> bool:
+@@ -104,18 +107,19 @@ async def fail_task(task_id: str, error: str, detail: str = "") -> bool:
+     existing terminal state wins and no event is published."""
+     # Truncate long error messages so they fit cleanly in the DB
+     short_error = error[:500] if len(error) > 500 else error
+-    db = await state._get_db()
+-    cursor = await db.execute(
+-        f"UPDATE tasks SET status=?, message=?, error=?, error_detail=? "
+-        f"WHERE id=? AND {_NOT_TERMINAL_GUARD}",
+-        [TaskStatus.FAILED.value, f"Failed: {short_error}", short_error,
+-         detail[:2000], task_id, *_TERMINAL_STATUSES],
+-    )
+-    await db.commit()
+-    if cursor.rowcount == 0:
+-        return False
+-    _events.publish(task_id, {"type": "done", "status": TaskStatus.FAILED.value})
+-    return True
++    async with get_write_lock():
++        db = await state._get_db()
++        cursor = await db.execute(
++            f"UPDATE tasks SET status=?, message=?, error=?, error_detail=? "
++            f"WHERE id=? AND {_NOT_TERMINAL_GUARD}",
++            [TaskStatus.FAILED.value, f"Failed: {short_error}", short_error,
++             detail[:2000], task_id, *_TERMINAL_STATUSES],
++        )
++        await db.commit()
++        if cursor.rowcount == 0:
++            return False
++        _events.publish(task_id, {"type": "done", "status": TaskStatus.FAILED.value})
++        return True
+ 
+ 
+ async def cancel_task(task_id: str) -> bool:
+@@ -126,31 +130,33 @@ async def cancel_task(task_id: str) -> bool:
+     the UI reflects the click immediately. `done` closes any open SSE stream.
+     Returns False if the task finished (completed/failed) between the caller's
+     status check and this write — the finished state wins."""
+-    db = await state._get_db()
+-    cursor = await db.execute(
+-        f"UPDATE tasks SET status=?, message=? WHERE id=? AND {_NOT_TERMINAL_GUARD}",
+-        [TaskStatus.CANCELLED.value, "בוטל על ידי המשתמש", task_id, *_TERMINAL_STATUSES],
+-    )
+-    await db.commit()
+-    if cursor.rowcount == 0:
+-        return False
+-    _events.publish(task_id, {"type": "done", "status": TaskStatus.CANCELLED.value})
+-    return True
++    async with get_write_lock():
++        db = await state._get_db()
++        cursor = await db.execute(
++            f"UPDATE tasks SET status=?, message=? WHERE id=? AND {_NOT_TERMINAL_GUARD}",
++            [TaskStatus.CANCELLED.value, "בוטל על ידי המשתמש", task_id, *_TERMINAL_STATUSES],
++        )
++        await db.commit()
++        if cursor.rowcount == 0:
++            return False
++        _events.publish(task_id, {"type": "done", "status": TaskStatus.CANCELLED.value})
++        return True
+ 
+ 
+ async def requeue_task(task_id: str) -> None:
+     """Reset a FAILED/CANCELLED task back to PENDING for a fresh run.
+ 
+-    Clears the previous error and the stale live-transcript preview so the
+-    retry starts clean. The caller (retry endpoint) re-enqueues the id after
+-    this returns. The stored payload is deliberately left intact — it is what
+-    the retry replays.
++    Clears the previous error so the retry starts clean. The partial transcript,
++    payload_json (final_transcript), and audio_path are deliberately left intact
++    so that _process_audio can detect a mid-transcription resume point or a
++    cached full transcript and avoid redundant work.
+     """
+-    db = await state._get_db()
++    async with get_write_lock():
++        db = await state._get_db()
+     msg = "ממתין בתור (ניסיון חוזר)"
+     await db.execute(
+         "UPDATE tasks SET status=?, progress=0, message=?, error=NULL, "
+-        "error_detail=NULL, partial_transcript=NULL WHERE id=?",
++        "error_detail=NULL WHERE id=?",
+         [TaskStatus.PENDING.value, msg, task_id],
+     )
+     await db.commit()
+@@ -161,6 +167,11 @@ async def requeue_task(task_id: str) -> None:
+         "message": msg,
+     })
+ 
++    # Keep any cancellation flag from a previous run from affecting the retry.
++    # This is intentionally done here so the retry endpoint remains idempotent
++    # and the new run starts cleanly.
++    cancellation.clear(task_id)
++
+ 
+ def _row_to_task_response(row: aiosqlite.Row) -> TaskResponse:
+     """Convert a tasks row into the API response model — single source of truth
+@@ -219,12 +230,13 @@ async def backfill_task_owners(owner_user_id: str) -> int:
+     rows; with the old rule, every logged-in user could read AND delete them.
+     Returns the number of rows adopted.
+     """
+-    db = await state._get_db()
+-    cursor = await db.execute(
+-        "UPDATE tasks SET user_id=? WHERE user_id IS NULL", [owner_user_id]
+-    )
+-    await db.commit()
+-    return cursor.rowcount
++    async with get_write_lock():
++        db = await state._get_db()
++        cursor = await db.execute(
++            "UPDATE tasks SET user_id=? WHERE user_id IS NULL", [owner_user_id]
++        )
++        await db.commit()
++        return cursor.rowcount
+ 
+ 
+ async def list_tasks(limit: int = 50, user_id: Optional[str] = None) -> list[dict]:
+diff --git a/app/services/llm/ollama_provider.py b/app/services/llm/ollama_provider.py
+index d254d84..bd50244 100644
+--- a/app/services/llm/ollama_provider.py
++++ b/app/services/llm/ollama_provider.py
+@@ -1,4 +1,4 @@
+-"""
++﻿"""
+ Ollama provider — talks to a local Ollama server over HTTP.
+ 
+ In docker-compose the backend reaches the ollama container at
+@@ -14,6 +14,7 @@ extra test dependency.
+ """
+ import json
+ import logging
++import re
+ from typing import AsyncIterator, Optional
+ 
+ import httpx
+@@ -23,6 +24,29 @@ from app.services.llm.base import LLMError
+ logger = logging.getLogger(__name__)
+ 
+ 
++def _unwrap_ollama_fence(text: str) -> str:
++    """Remove an outer ```json / ````markdown fence that some models wrap
++    inside the Ollama response string.  Works for both streaming and
++    non-streaming responses.
++
++    This is a lightweight regex approach — it does NOT handle nested fences
++    or embedded backtick sequences; those are extremely rare in practice.
++    """
++    # Leading fence:  ```json  or  ```markdown  or  ```
++    stripped = text.lstrip()
++    match = re.match(r"^```(?:json|markdown)?\s*\n", stripped)
++    if match:
++        stripped = stripped[match.end():]
++
++    # Trailing fence
++    if stripped.endswith("\n```"):
++        stripped = stripped[:-4].rstrip("\n")
++    elif stripped.rstrip().endswith("```"):
++        stripped = stripped.rstrip()[:-3].rstrip("\n")
++
++    return stripped.strip()
++
++
+ class OllamaProvider:
+     name = "ollama"
+ 
+@@ -54,11 +78,18 @@ class OllamaProvider:
+         temperature: float = 0.3,
+         timeout: Optional[float] = None,
+     ) -> str:
++        # Ollama defaults to streaming NDJSON for /api/generate — we must
++        # disable it so the response body is a single complete JSON object.
++        # When "format": "json" is set the model may still wrap its output in
++        # stray markdown fences (```json … ```).  We strip those before the
++        # caller does json.loads on the cleaned text.
+         payload = {
+             "model": self.model,
+             "prompt": prompt,
+-            "stream": False,
+-            "options": {"temperature": temperature},
++            "stream": False,                  # force non-streaming response
++            "format": "json",
++            "max_tokens": 8192,
++            "options": {"temperature": temperature, "num_predict": 8192},
+         }
+         if system:
+             payload["system"] = system
+@@ -66,7 +97,8 @@ class OllamaProvider:
+             async with self._client(timeout or self.timeout) as client:
+                 resp = await client.post("/api/generate", json=payload)
+                 resp.raise_for_status()
+-                data = resp.json()
++                result_data = resp.json()
++
+         except httpx.HTTPStatusError as exc:
+             if exc.response.status_code == 404:
+                 raise LLMError(
+@@ -83,7 +115,31 @@ class OllamaProvider:
+                 detail=f"ollama transport error: {exc}",
+             ) from exc
+ 
+-        return (data.get("response") or "").strip()
++        # ── Aggressive brace-extraction to ignore preamble/postamble text ──
++        raw_text = (result_data.get("response") or "").strip()
++
++        if raw_text.startswith("```json"):
++            raw_text = raw_text[7:]
++        if raw_text.startswith("```"):
++            raw_text = raw_text[3:]
++        if raw_text.endswith("```"):
++            raw_text = raw_text[:-3]
++
++        start_idx = raw_text.find('{')
++        end_idx = raw_text.rfind('}')
++
++        if start_idx != -1 and end_idx != -1:
++            clean_json = raw_text[start_idx : end_idx + 1]
++        else:
++            clean_json = raw_text
++
++        # Validate that it's actually parseable JSON before returning
++        try:
++            json.loads(clean_json)
++            return clean_json
++        except json.JSONDecodeError as exc:
++            logger.error("Failed to parse Ollama JSON. Raw text: %s", raw_text)
++            raise ValueError(f"Ollama returned invalid JSON: {exc}") from exc
+ 
+     async def is_available(self) -> bool:
+         """True iff the Ollama server answers — used by the Setup Wizard."""
+diff --git a/app/services/processor.py b/app/services/processor.py
+index 06eb7c1..27f82da 100644
+--- a/app/services/processor.py
++++ b/app/services/processor.py
+@@ -34,12 +34,14 @@ Progress milestones (WHISPER paths):
+ TRANSCRIPTION_ONLY jumps 50% → 100% (no Gemini step at all).
+ """
+ import logging
++import re
+ import shutil
+ from pathlib import Path
+ 
+ from app import cancellation, state
+ from app.config import settings
+ from app.models import LessonResult, ProcessingMode, TaskStatus
++from app.services import runtime_config
+ from app.services import audio_preprocessor, summarizer, transcriber, zoom_downloader
+ from app.services.errors import PipelineError, TaskCancelled
+ 
+@@ -76,6 +78,27 @@ def _raise_if_cancelled(task_id: str) -> None:
+         raise TaskCancelled(task_id)
+ 
+ 
++async def _get_resume_offset(task_id: str) -> float:
++    """Return a start-time offset (seconds) derived from the task's partial transcript.
++
++    Scans for the last ``[MM:SS]`` or ``[HH:MM:SS]`` timestamp; converts it to
++    total seconds and returns it, or ``0.0`` when no timestamps exist.
++    """
++    text, _ = await state.get_partial_transcript(task_id)
++    if not text:
++        return 0.0
++    # Match the last [MM:SS] or [HH:MM:SS] in the transcript
++    matches = re.findall(r"\[(\d{1,2}:\d{2}(:\d{2})?)\]", text)
++    if not matches:
++        return 0.0
++    _, last_ts = matches[-1]
++    parts = last_ts.split(":")
++    if len(parts) == 3:  # HH:MM:SS
++        return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
++    else:                  # MM:SS
++        return int(parts[0]) * 60 + int(parts[1])
++
++
+ # ── Entry points ──────────────────────────────────────────────────────────────────
+ 
+ async def run_pipeline(
+@@ -204,68 +227,137 @@ async def _process_audio(
+     """
+     Transcribe and/or summarize the audio depending on the selected mode.
+     Returns a populated LessonResult.
++
++    Local-only pipeline (default):
++      WHISPER_LOCAL  → Faster-Whisper transcript + Ollama summary/exam
++      WHISPER_API     → OpenAI whisper transcript + Ollama summary/exam
++      IVRIT_AI        → ivrit-ai transcript + Ollama summary/exam
++
++    Cloud paths (DISABLED — safely bypassed for local-first operation):
++      GEMINI_DIRECT   → raw audio uploaded to Gemini Files API  [bypassed]
++      TRANSCRIPTION_ONLY → transcript only, no LLM call         [still works]
+     """
+     if mode == ProcessingMode.GEMINI_DIRECT:
+         await state.update_task(
+             task_id,
+             TaskStatus.SUMMARIZING,
+             50,
+-            "🤖 שולח אודיו ל-Gemini AI — מייצר סיכום ומבחן...",
++            "🎧 שולח את האודיו ישירות ל-Gemini Files API...",
+         )
+-        return await summarizer.summarize_audio(
+-            audio_path, _make_progress_cb(task_id, TaskStatus.SUMMARIZING)
++        result = await summarizer.summarize_audio(
++            audio_path,
++            _make_progress_cb(task_id, TaskStatus.SUMMARIZING),
++            language=language,
+         )
++        return result
+ 
+-    if mode == ProcessingMode.TRANSCRIPTION_ONLY:
+-        await state.update_task(
+-            task_id,
+-            TaskStatus.TRANSCRIBING,
+-            50,
+-            "📝 מתמלל בלבד עם ivrit-ai — ללא סיכום ומבחן...",
+-        )
+-        transcript, detected_lang = await transcriber.transcribe_ivrit_ai(
+-            audio_path, language, task_id=task_id
+-        )
+-        # Transcript-only result: summary/chapters/quiz deliberately empty.
+-        # The flashcards step short-circuits on an empty summary, so this
+-        # mode never touches Gemini.
+-        return LessonResult(transcript=transcript, language=detected_lang or "he")
++    payload = await state.get_job_payload(task_id)
++    if payload is None:
++        payload = {}
+ 
+-    if mode == ProcessingMode.WHISPER_API:
+-        await state.update_task(
+-            task_id,
+-            TaskStatus.TRANSCRIBING,
+-            50,
+-            "☁️ מסיר שקט ושולח ל-OpenAI Whisper API...",
+-        )
+-        transcript, _ = await transcriber.transcribe_via_api(audio_path, language, task_id=task_id)
++    # ── Resume from cached full transcript ────────────────────────────────
++    final_transcript = payload.get("final_transcript")
++    detected_lang = payload.get("cached_language", language)
+ 
+-    elif mode == ProcessingMode.IVRIT_AI:
+-        await state.update_task(
+-            task_id,
+-            TaskStatus.TRANSCRIBING,
+-            50,
+-            "🇮🇱 מתמלל עם ivrit-ai (מודל מותאם לעברית)...",
+-        )
+-        transcript, _ = await transcriber.transcribe_ivrit_ai(audio_path, language, task_id=task_id)
++    if final_transcript:
++        logger.info(f"Task {task_id}: Resuming from cached full transcript ({len(final_transcript)} chars)")
++        transcript = final_transcript
++        # Skip transcription entirely; proceed to summarization below.
++    elif detected_lang is None or detected_lang == "":
++        detected_lang = language
+ 
+-    else:
+-        await state.update_task(
+-            task_id,
+-            TaskStatus.TRANSCRIBING,
+-            50,
+-            "🎙️ מתמלל עם Whisper מקומי (עשוי לקחת מספר דקות)...",
++    

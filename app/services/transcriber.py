@@ -353,7 +353,7 @@ async def _trim_audio(audio_path: str, offset: float) -> str:
     trimmed = str(Path(settings.data_dir) / "downloads" / f"_resume_{id(audio_path):x}.mp3")
     trimmed_parent = Path(trimmed).parent
     trimmed_parent.mkdir(parents=True, exist_ok=True)
-    await asyncio.create_subprocess_exec(
+    proc = await asyncio.create_subprocess_exec(
         "ffmpeg", "-y",
         "-ss", str(offset),
         "-i", audio_path,
@@ -362,6 +362,7 @@ async def _trim_audio(audio_path: str, offset: float) -> str:
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
     )
+    await proc.wait()
     return trimmed
 
 
@@ -437,7 +438,7 @@ async def transcribe(
             segment_cb=seg_cb,
             progress_cb=prog_cb,
             cancel_cb=cancel_fn,
-            resume_offset=0.0
+            resume_offset=resume_offset
         )
         transcript, detected_lang = await loop.run_in_executor(_whisper_pool, func)
     finally:
@@ -480,7 +481,7 @@ async def transcribe_ivrit_ai(
             segment_cb=seg_cb,
             progress_cb=prog_cb,
             cancel_cb=cancel_fn,
-            resume_offset=0.0
+            resume_offset=resume_offset
         )
         transcript, detected_lang = await loop.run_in_executor(_whisper_pool, func)
     finally:
