@@ -304,8 +304,12 @@ async def _process_audio(
                 50,
                 "☁️ מסיר שקט ושולח ל-OpenAI Whisper API...",
             )
+            # No resume_offset here: the API returns plain text without
+            # [MM:SS] tags, so _get_resume_offset() is always 0 for this
+            # mode, and transcribe_via_api() doesn't take the argument
+            # (passing it raised TypeError and failed every WHISPER_API task).
             transcript, detected_lang = await transcriber.transcribe_via_api(
-                audio_path, language, task_id=task_id, resume_offset=resume_offset
+                audio_path, language, task_id=task_id
             )
 
         elif mode == ProcessingMode.IVRIT_AI:
