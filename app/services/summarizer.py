@@ -1012,6 +1012,7 @@ async def summarize_transcript_with_ollama(
             system=_LOCAL_SYSTEM_PROMPT,
             temperature=0.3,
             timeout=timeout,
+            json_mode=True,
         )
     except Exception as exc:
         raise PipelineError(
